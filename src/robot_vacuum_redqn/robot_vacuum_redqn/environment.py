@@ -579,7 +579,7 @@ class DQNCoverageEnv(gym.Env):
         
         # obs data를 얻음
         obs = self._get_obs()
-        H, W = obs["map"][2].shape
+        H, W = obs['map'][2].shape
         
         # ---- obs의 map data 그리기 ----
         
@@ -590,7 +590,7 @@ class DQNCoverageEnv(gym.Env):
         axes = [ax1, ax2, ax3]
             
         # obstacles
-        axes[0].imshow(obs["map"][2], cmap='gray_r', origin='lower')
+        axes[0].imshow(obs['map'][2], cmap='gray_r', origin='lower')
         axes[0].plot(H//2, W//2, 'r.')
         axes[0].set_title("Obstacles local view")
         legend_elements0 = [
@@ -601,7 +601,7 @@ class DQNCoverageEnv(gym.Env):
 
         # cleaned
         # 현재 로봇 위치를 점으로 찍음
-        axes[1].imshow(obs["map"][1], cmap='gray_r', origin='lower')
+        axes[1].imshow(obs['map'][1], cmap='gray_r', origin='lower')
         axes[1].plot(H//2, W//2, 'r.') # 로봇 위치를 빨간 점으로 표시
         axes[1].set_title("Cleaned map local view")
         legend_elements1 = [
@@ -612,7 +612,7 @@ class DQNCoverageEnv(gym.Env):
         
         # agent_layer
         # 현재 로봇 위치를 점으로 찍음
-        axes[2].imshow(obs["map"][0], cmap='gray_r', origin='lower')
+        axes[2].imshow(obs['map'][0], cmap='gray_r', origin='lower')
         axes[2].plot(H//2, W//2, 'r.') # 로봇 위치를 빨간 점으로 표시
         axes[2].set_title(f"Agent layer local view")
         legend_elements2 = [
@@ -630,9 +630,9 @@ class DQNCoverageEnv(gym.Env):
         
         # text 출력
         vec_info_text = (f"[Observation Status]\n"
-        f"- Normlized position: ({obs["vec"][0]:.2f}, {obs["vec"][1]:.2f})\n"
-        f"- Normalized ray: East: {obs["vec"][6]:.2f}, North: {obs["vec"][7]:.2f}, West: {obs["vec"][8]:.2f}, South: {obs["vec"][9]:.2f}\n"
-        f"- Normalized coverage: {obs["vec"][10]:.2f}\n")
+        f"- Normlized position: ({obs['vec'][0]:.2f}, {obs['vec'][1]:.2f})\n"
+        f"- Normalized ray: East: {obs['vec'][6]:.2f}, North: {obs['vec'][7]:.2f}, West: {obs['vec'][8]:.2f}, South: {obs['vec'][9]:.2f}\n"
+        f"- Normalized coverage: {obs['vec'][10]:.2f}\n")
         ax_txt.text(0, 0.5, vec_info_text, transform=ax_txt.transAxes, fontsize=14,
                     va='top', ha='left', family='monospace')
         # ---------------------------------------------
@@ -696,10 +696,10 @@ class DQNCoverageEnv(gym.Env):
         
 #     # 3개의 레이어를 합쳐서 시각화하거나 각각 따로 띄울 수 있습니다.
 #     axes = fig.subplots(1, 3)
-#     H, W = obs["map"][2].shape
+#     H, W = obs['map'][2].shape
 
 #     # obstacles
-#     axes[0].imshow(obs["map"][2], cmap='gray_r', origin='lower')
+#     axes[0].imshow(obs['map'][2], cmap='gray_r', origin='lower')
 #     axes[0].plot(H//2, W//2, 'r.')
 #     axes[0].set_title("Obstacles local view")
 #     legend_elements0 = [
@@ -710,7 +710,7 @@ class DQNCoverageEnv(gym.Env):
 
 #     # cleaned
 #     # 현재 로봇 위치를 점으로 찍음
-#     axes[1].imshow(obs["map"][1], cmap='gray_r', origin='lower')
+#     axes[1].imshow(obs['map'][1], cmap='gray_r', origin='lower')
 #     axes[1].plot(H//2, W//2, 'r.') # 로봇 위치를 빨간 점으로 표시
 #     axes[1].set_title("Cleaned map local view")
 #     legend_elements1 = [
@@ -721,7 +721,7 @@ class DQNCoverageEnv(gym.Env):
     
 #     # agent_layer
 #     # 현재 로봇 위치를 점으로 찍음
-#     axes[2].imshow(obs["map"][0], cmap='gray_r', origin='lower')
+#     axes[2].imshow(obs['map'][0], cmap='gray_r', origin='lower')
 #     axes[2].plot(H//2, W//2, 'r.') # 로봇 위치를 빨간 점으로 표시
 #     axes[2].set_title(f"Agent layer local view")
 #     legend_elements2 = [
@@ -732,9 +732,9 @@ class DQNCoverageEnv(gym.Env):
     
 #     print(f"""
 #     [Observation Status]
-#     - Normlized position: ({obs["vec"][0]:.2f}, {obs["vec"][1]:.2f})
-#     - Normalized ray: East: {obs["vec"][6]:.2f}, North: {obs["vec"][7]:.2f}, West: {obs["vec"][8]:.2f}, South: {obs["vec"][9]:.2f}
-#     - Normalized coverage: {obs["vec"][10]:.2f}
+#     - Normlized position: ({obs['vec'][0]:.2f}, {obs['vec'][1]:.2f})
+#     - Normalized ray: East: {obs['vec'][6]:.2f}, North: {obs['vec'][7]:.2f}, West: {obs['vec'][8]:.2f}, South: {obs['vec'][9]:.2f}
+#     - Normalized coverage: {obs['vec'][10]:.2f}
 #     """)
     
 

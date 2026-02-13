@@ -413,7 +413,7 @@ class TrainDQN():
         elif mode == 'checkpoint':
             
             assert info is not None
-            episode = info["episode"]; episode_reward = info["episode_reward"] # info에서 저장할 model의 episode 번호와 episode_reward 얻기
+            episode = info['episode']; episode_reward = info['episode_reward'] # info에서 저장할 model의 episode 번호와 episode_reward 얻기
             
             # Checkpoint 저장 경로 설정
             model_name_base, _ = os.path.splitext(self.args.model_name) # 확장자 '.pth'를 제거한 model_name
@@ -447,7 +447,7 @@ class TrainDQN():
             with torch.no_grad(): 
                 if self.train_cfg.use_noisy and mode == 'train':
                     self.policy_net.reset_noise() # 논문 기법: 결정 전 노이즈 리셋
-                map_tensor = state["map"]; vec_tensor = state["vec"]
+                map_tensor = state['map']; vec_tensor = state['vec']
                 q_values = self.policy_net(map_tensor, vec_tensor) # Shape: (1, action_space)
                 
             if use_softmax:
@@ -461,10 +461,10 @@ class TrainDQN():
         action = None
         if mode == 'train':
             assert options is not None
-            epsilon = options["epsilon"]
-            warmup = options["warmup"]
-            last_action = options["last_action"]
-            last_collision = options["last_collision"]
+            epsilon = options['epsilon']
+            warmup = options['warmup']
+            last_action = options['last_action']
+            last_collision = options['last_collision']
             
             # 이전 step에서 collision이 일어났으면 이전 step에서 수행한 action을 제외하고 action을 랜덤 선택: Warmup인 경우에도 똑같이 수행
             if last_collision and last_action is not None: 
@@ -495,15 +495,15 @@ class TrainDQN():
         """
         """
         # map data 변환: H와 W를 target_dim으로 변환
-        hwc_map = np.transpose(obs["map"], (1, 2, 0)) # obs의 map data가 (C, H, W) 형태이므로 이를 (H, W, C) 형태로 변환
+        hwc_map = np.transpose(obs['map'], (1, 2, 0)) # obs의 map data가 (C, H, W) 형태이므로 이를 (H, W, C) 형태로 변환
         resized_hwc_map = cv2.resize(hwc_map, (target_dim, target_dim), interpolation=cv2.INTER_NEAREST)
         processed_map = np.transpose(resized_hwc_map, (2, 0, 1))
 
         # vec data 변환
-        if obs["vec"].dtype == np.float32:
-            processed_vec = obs["vec"].copy()
+        if obs['vec'].dtype == np.float32:
+            processed_vec = obs['vec'].copy()
         else:
-            processed_vec = obs["vec"].astype(np.float32)
+            processed_vec = obs['vec'].astype(np.float32)
             
         return {"map": processed_map, "vec": processed_vec}
     
@@ -583,8 +583,8 @@ class TrainDQN():
             processed_obs = self._pre_process_obs(last_obs, target_dim=self.train_cfg.grid_map_size)
             
             # 텐서 변환 및 장치 이동
-            map_tensor = torch.from_numpy(processed_obs["map"]).float().to(self.device).unsqueeze(0)
-            vec_tensor = torch.from_numpy(processed_obs["vec"]).to(self.device).unsqueeze(0)
+            map_tensor = torch.from_numpy(processed_obs['map']).float().to(self.device).unsqueeze(0)
+            vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
             state = {"map": map_tensor, "vec": vec_tensor}
             
             action = self._get_action(env, state, mode='test')
@@ -603,7 +603,7 @@ class TrainDQN():
             last_obs = next_obs
             last_info = info
         
-        return last_info["Coverage"]
+        return last_info['Coverage']
             
     def train(self):
         
@@ -670,8 +670,8 @@ class TrainDQN():
                     self.no_warmup_steps += 1
                 
                 # Tensor 변환
-                map_tensor = torch.from_numpy(processed_obs["map"]).float().to(self.device).unsqueeze(0)
-                vec_tensor = torch.from_numpy(processed_obs["vec"]).to(self.device).unsqueeze(0)
+                map_tensor = torch.from_numpy(processed_obs['map']).float().to(self.device).unsqueeze(0)
+                vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
                 state = {"map": map_tensor, "vec": vec_tensor}
                 
                 # Epsilon 결정: Step 수가 늘어날수록 epsilon을 점점 줄임. Warmup 과정에서는 유지
@@ -691,18 +691,18 @@ class TrainDQN():
                 next_processed_obs = self._pre_process_obs(next_obs, target_dim=51)
                 
                 # Episode를 종료하는 조건: Coverage에 성공한 경우 or Episode가 조기 종료된 경우 (Collision은 포함 X)
-                # Warmup 시에는 truncated일 때 info["Steps"] == args.warmup_ep_steps일 때만 종료
+                # Warmup 시에는 truncated일 때 info['Steps'] == args.warmup_ep_steps일 때만 종료
                 if warmup:
-                    done_ep = (terminated & info["Success"]) or (truncated & (info["Steps"] == self.train_cfg.warmup_ep_steps))
+                    done_ep = (terminated & info['Success']) or (truncated & (info['Steps'] == self.train_cfg.warmup_ep_steps))
                 else:
-                    done_ep = (terminated & info["Success"]) or truncated
+                    done_ep = (terminated & info['Success']) or truncated
                 
                 done = terminated # Buffer에 done이라고 저장하는 조건: Collision & Coverage 성공
                 # ---------------------------------------------------------------------------
                 
                 # last_action, last_collision, last_info 저장
                 last_action = action
-                last_collision = info["Collision"]
+                last_collision = info['Collision']
                 last_info = info
                 
                 # 메모리 저장
@@ -720,12 +720,12 @@ class TrainDQN():
                     batch = [self.memory[i] for i in batch_indices]
                     
                     # batch 개별 요소의 구조: (processed_obs, action, reward, next_processed_obs, done)
-                    ms_b = torch.from_numpy(np.array([b[0]["map"] for b in batch])).float().to(self.device)     # Map state: (B, 3, 51, 51)
-                    vs_b = torch.from_numpy(np.array([b[0]["vec"] for b in batch])).float().to(self.device)     # Vector state: (B, 12)
+                    ms_b = torch.from_numpy(np.array([b[0]['map'] for b in batch])).float().to(self.device)     # Map state: (B, 3, 51, 51)
+                    vs_b = torch.from_numpy(np.array([b[0]['vec'] for b in batch])).float().to(self.device)     # Vector state: (B, 12)
                     a_b = torch.LongTensor([b[1] for b in batch]).unsqueeze(1).to(self.device)                  # Action: (B, 1)
                     r_b = torch.FloatTensor([b[2] for b in batch]).unsqueeze(1).to(self.device)                 # Reward: (B, 1)
-                    nms_b = torch.from_numpy(np.array([b[3]["map"] for b in batch])).float().to(self.device)    # Next map state: (B, 3, 51, 51)
-                    nvs_b = torch.from_numpy(np.array([b[3]["vec"] for b in batch])).float().to(self.device)    # Next vector state: (B, 12)
+                    nms_b = torch.from_numpy(np.array([b[3]['map'] for b in batch])).float().to(self.device)    # Next map state: (B, 3, 51, 51)
+                    nvs_b = torch.from_numpy(np.array([b[3]['vec'] for b in batch])).float().to(self.device)    # Next vector state: (B, 12)
                     d_b = torch.FloatTensor([b[4] for b in batch]).unsqueeze(1).to(self.device)                 # Done: (B, 1)
                     
                     # Q(s, a) 계산
