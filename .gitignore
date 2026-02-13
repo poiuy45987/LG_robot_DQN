@@ -1,0 +1,14 @@
+# Model and checkpoints
+*.pth
+models/
+logs/
+*_checkpoints/
+
+# Python cache files
+__pycache__/
+
+# 보안 관련 파일
+.env
+
+# Vessl output files
+/output/

@@ -1,0 +1,38 @@
+name: test
+image: quay.io/vessl-ai/torch:2.3.1-cuda12.1-r5
+run: | 
+  pip install -r requirements.txt
+  python src/robot_vacuum_redqn/robot_vacuum_redqn/main.py \
+    --mode train \
+    --model_dir /output \
+    --model_name one_map_model_trash.pth \
+    --optimizer sgd \
+    --batch_size 128 \
+    --gamma 0.99 \
+    --lr 1e-4 \
+    --momentum 0.9 \
+    --buffer_size 50000 \
+    --warmup_episodes 20 \
+    --warmup_ep_steps 1000 \
+    --warmup_tot_steps 20000 \
+    --target_update 1000 \
+    --policy_update 1 \
+    --valid_freq 30 \
+    --ckp_freq 10 \
+    --valid_map_num 1 \
+    --valid_start_point_num 3 \
+    --max_episodes 30000 \
+    --epsilon_start 1.0 \
+    --epsilon_end 0.1 \
+    --epsilon_decay 2000000 \
+    --use_softmax \
+    --softmax_temp 1.0 \
+    --do_normalize \
+    --use_vessl \
+    --reset_only_start_pos \
+    --map_height 500.0 \
+    --map_width 500.0 \
+    --num_tables 5 \
+    --uncleaned_reward 1.0 \
+    --cleaned_penalty -0.1 \
+    --obstacle_penalty -2.0
