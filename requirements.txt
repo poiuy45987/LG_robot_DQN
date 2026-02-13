@@ -2,7 +2,7 @@ gymnasium
 ipython
 matplotlib
 numpy
-opencv_python
+opencv-python-headless
 Pillow
 pytz
 torch
