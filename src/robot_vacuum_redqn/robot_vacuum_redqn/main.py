@@ -17,9 +17,9 @@ import glob
 from PIL import Image
 
 # 앞서 정의한 클래스들을 임포트한다고 가정 (또는 같은 파일에 위치)
-from .config import EnvConfig, TrainConfig, DEFAULT_SEED
-from .environment import DQNCoverageEnv
-from .redqn_network import CNN_ReDQN
+from config import EnvConfig, TrainConfig, DEFAULT_SEED
+from environment import DQNCoverageEnv
+from redqn_network import CNN_ReDQN
 
 def parse_args():
     

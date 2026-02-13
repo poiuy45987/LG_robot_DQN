@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
 
-from .config import EnvConfig, DEFAULT_SEED
+from config import EnvConfig, DEFAULT_SEED
 
 # Map을 시각화할 때 table, chair을 구별하기 위해 설정한 값
 # 실제로 훈련 또는 validation 과정에서 map을 생성할 때는 장애물을 전부 1로 바꿈
