@@ -14,8 +14,8 @@ from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
 import argparse
 
-from config import EnvConfig, DEFAULT_SEED
-from map_generator import generate_house_like_obstacles
+from .config import EnvConfig, DEFAULT_SEED
+from .map_generator import generate_house_like_obstacles
 
 
 def get_args():

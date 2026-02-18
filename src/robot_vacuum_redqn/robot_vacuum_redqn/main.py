@@ -17,9 +17,9 @@ import glob
 from PIL import Image
 
 # 앞서 정의한 클래스들을 임포트한다고 가정 (또는 같은 파일에 위치)
-from config import EnvConfig, TrainConfig, DEFAULT_SEED
-from environment import DQNCoverageEnv
-from redqn_network import CNN_ReDQN
+from .config import EnvConfig, TrainConfig, DEFAULT_SEED
+from .environment import DQNCoverageEnv
+from .redqn_network import CNN_ReDQN
 
 def parse_args():
     
@@ -215,8 +215,11 @@ class TrainDQN():
             
             # Train environment와 validation environement 조성
             self.env = DQNCoverageEnv(env_cfg, seed=args.seed)
-            self.valid_env = DQNCoverageEnv(env_cfg, seed=args.seed+1000) # 훈련용 environment와 다른 환경을 구성하기 위해서
-            
+            if args.reset_only_start_pos:
+                self.valid_env = DQNCoverageEnv(env_cfg, seed=args.seed) # 훈련용 environment와 같은 환경을 구성하기 위해서
+            else:
+                self.valid_env = DQNCoverageEnv(env_cfg, seed=args.seed+1000) # 훈련용 environment와 다른 환경을 구성하기 위해서
+                
             # Train hyperparameter를 받음
             self.train_cfg = TrainConfig(**{k: v for k, v in vars(args).items() if k in TrainConfig.__dataclass_fields__})         
             
@@ -284,7 +287,10 @@ class TrainDQN():
                 raise ValueError(f"Unsupported optimizer type: {args.optimizer}")
         
         elif args.mode == 'test':
-            self.test_env = DQNCoverageEnv(env_cfg, seed=args.seed+2000) # Test environment 구현
+            if args.reset_only_start_pos:
+                self.test_env = DQNCoverageEnv(env_cfg, seed=args.seed) # Test environment 구현
+            else:
+                self.test_env = DQNCoverageEnv(env_cfg, seed=args.seed+2000) # Test environment 구현
             
         # Loading model
         self._load_model(args)
@@ -445,7 +451,7 @@ class TrainDQN():
         def _get_greedy_action(use_softmax=False) -> int:
             # Action을 Q-value로 뽑지 않더라도 일단 Q-value를 얻어서 관찰
             with torch.no_grad(): 
-                if self.train_cfg.use_noisy and mode == 'train':
+                if mode == 'train' and self.train_cfg.use_noisy:
                     self.policy_net.reset_noise() # 논문 기법: 결정 전 노이즈 리셋
                 map_tensor = state['map']; vec_tensor = state['vec']
                 q_values = self.policy_net(map_tensor, vec_tensor) # Shape: (1, action_space)
@@ -509,6 +515,10 @@ class TrainDQN():
     
     def _validation(self, episode: int):
         
+        """
+        reset_only_start_pos가 참이면 train한 map과 같은 map을 이용
+        """
+        
         self.policy_net.eval() # eval mode로 전환
         coverage = []
         max_coverage = 0.0
@@ -516,10 +526,11 @@ class TrainDQN():
         options={"reset_only_start_pos": True} # 시작 지점만 초기화하기 위한 option
         
         # Coverage 성능을 평가
-        for map_num in range(self.train_cfg.valid_map_num):
+        for _ in range(self.train_cfg.valid_map_num):
+            
             # Validation 환경을 초기화
-            if map_num == 0:
-                obs, _ = self.valid_env.reset(seed=self.seed)
+            if self.train_cfg.reset_only_start_pos:
+                obs, _ = self.valid_env.reset(options=options)
             else:
                 obs, _ = self.valid_env.reset()
                 
@@ -580,7 +591,7 @@ class TrainDQN():
         last_info = None
         while not done:
             
-            processed_obs = self._pre_process_obs(last_obs, target_dim=self.train_cfg.grid_map_size)
+            processed_obs = self._pre_process_obs(last_obs, target_dim=self.args.grid_map_size)
             
             # 텐서 변환 및 장치 이동
             map_tensor = torch.from_numpy(processed_obs['map']).float().to(self.device).unsqueeze(0)
