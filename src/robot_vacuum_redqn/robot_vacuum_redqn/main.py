@@ -552,7 +552,7 @@ class TrainDQN():
             self.tb_writer.add_scalar('Validation/Coverage_mean', coverage_mean, episode)
         if self.wandb_run:
             self.wandb_run.log({'Validation/Coverage_mean': coverage_mean,
-                                'Validation/Best_path': wandb.Image(max_coverage_traj_img)}, step=episode)
+                                'Validation/Best_path': wandb.Image(max_coverage_traj_img)}, step=self.total_steps)
         if self.args.use_vessl:
             vessl.log(step=episode, payload={'Validation/Coverage_mean': coverage_mean,
                                                       'Validation/Best_path': vessl.Image(max_coverage_traj_img)})
@@ -669,6 +669,11 @@ class TrainDQN():
                 else:
                     self.no_warmup_steps += 1
                 
+                # Episode 수 저장
+                if self.wandb_run:
+                    self.wandb_run.log({"Train/Episodes": episode}, step=self.total_steps)
+                    
+                
                 # Tensor 변환
                 map_tensor = torch.from_numpy(processed_obs['map']).float().to(self.device).unsqueeze(0)
                 vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
@@ -779,7 +784,7 @@ class TrainDQN():
             if self.wandb_run:
                 self.wandb_run.log({"Stats/Episode_reward": episode_reward,
                            "Stats/Coverage_rate": coverage,
-                           "Stats/Collision_count": ep_collision}, step=episode)
+                           "Stats/Collision_count": ep_collision}, step=self.total_steps)
             if self.args.use_vessl:
                 vessl.log(step=episode, payload={
                     "Stats/Episode_reward": episode_reward,
@@ -802,9 +807,8 @@ class TrainDQN():
                 if self.tb_writer:
                     self.tb_writer.add_image("Visualization/Robot_path", map_img, episode, dataformats="HWC")
                 if self.wandb_run:
-                    self.wandb_run.log({"Visualization/Robot_path": wandb.Image(map_img)}, step=episode)
+                    self.wandb_run.log({"Visualization/Robot_path": wandb.Image(map_img)}, step=self.total_steps)
                 if self.args.use_vessl:
-                    print("Vessl_run!!!")
                     vessl.log(step=episode, payload={"Visualization/Robot_path": vessl.Image(map_img)})
             
             # Episode 결과 출력        
