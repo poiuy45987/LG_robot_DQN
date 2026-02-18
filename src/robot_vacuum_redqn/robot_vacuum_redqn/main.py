@@ -796,6 +796,7 @@ class TrainDQN():
             if not warmup and episode % self.train_cfg.valid_freq == 0:
                 self._validation(episode)
             
+            print("What?")
             # Map 기록 저장
             if (warmup and episode % 4 == 0) or (not warmup and episode % 20 == 0):
                 map_img = self.env.get_visualized_img(img_choice='traj')
