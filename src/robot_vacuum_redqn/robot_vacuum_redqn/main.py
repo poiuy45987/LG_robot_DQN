@@ -267,12 +267,15 @@ class TrainDQN():
                 
             self.vessl_run = None
             if args.use_vessl:
+                print("init")
                 self.vessl_run = vessl.init(
                     organization="snu-eng-gtx1080", 
                     project="lg-robot-ReDQN", 
                     hp=params_config,
                     # name=f"{current_time}_{args.model_name}_training"                  
                 )
+                print("init done")
+                print(self.vessl_run)
             # ---------------------------------------------------------
             
             # Optimizer 설정
