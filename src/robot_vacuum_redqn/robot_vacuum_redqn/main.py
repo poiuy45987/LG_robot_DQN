@@ -479,9 +479,9 @@ class TrainDQN():
                     all_actions.remove(last_action)
                 action = self.train_rng.choice(all_actions)
             
-            # Warmup 상황인 경우 action을 random하게 뽑음
-            elif warmup: 
-                action = env.action_space.sample()
+            # # Warmup 상황인 경우 action을 random하게 뽑음
+            # elif warmup: 
+            #     action = env.action_space.sample()
                 
             # Warmup이 아닌 경우 epsilon 기법으로 action 선택
             elif self.train_rng.random() < epsilon:
@@ -668,6 +668,7 @@ class TrainDQN():
                 self.env.set_env_mode(warmup=True, ep_steps=self.train_cfg.warmup_ep_steps) # Environment를 warmup하는 mode로 전환
             else:
                 warmup = False
+                self.env.set_env_mode(warmup=False, ep_steps=self.train_cfg.warmup_ep_steps)
                 
             # ~~~~ Episode 내에서 training 수행 ~~~~
             while not done_ep:
