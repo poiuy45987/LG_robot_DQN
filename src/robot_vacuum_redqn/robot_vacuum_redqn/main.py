@@ -265,6 +265,7 @@ class TrainDQN():
                     name=f"{current_time}_{args.model_name}_training"
                 )
                 
+            print(">>> [DEBUG] vessl.init 실행 바로 직전입니다!", flush=True)
             self.vessl_run = None
             if args.use_vessl:
                 self.vessl_run = vessl.init(
@@ -273,6 +274,7 @@ class TrainDQN():
                     hp=params_config,
                     # name=f"{current_time}_{args.model_name}_training"                  
                 )
+            print(">>> [DEBUG] vessl.init을 무사히 통과했습니다!", flush=True)
             # ---------------------------------------------------------
             
             # Optimizer 설정
