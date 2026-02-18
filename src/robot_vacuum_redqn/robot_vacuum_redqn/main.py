@@ -168,7 +168,7 @@ def get_device_info(device):
         total_mem = torch.cuda.get_device_properties(current_idx).total_memory / 1e9
         print(f"  > VRAM: {total_mem:.2f} GB")
         
-    print("-" * 30)
+    print("-" * 30, flush=True)
 
 
 def visualize_test_map(seed=DEFAULT_SEED):
@@ -265,7 +265,6 @@ class TrainDQN():
                     name=f"{current_time}_{args.model_name}_training"
                 )
                 
-            print(">>> [DEBUG] vessl.init 실행 바로 직전입니다!", flush=True)
             self.vessl_run = None
             if args.use_vessl:
                 self.vessl_run = vessl.init(
@@ -274,7 +273,6 @@ class TrainDQN():
                     hp=params_config,
                     # name=f"{current_time}_{args.model_name}_training"                  
                 )
-            print(">>> [DEBUG] vessl.init을 무사히 통과했습니다!", flush=True)
             # ---------------------------------------------------------
             
             # Optimizer 설정
@@ -340,16 +338,16 @@ class TrainDQN():
                         if loaded_img is not None: 
                             self.best_coverage_path_img = cv2.cvtColor(loaded_img, cv2.COLOR_BGR2RGB) # BGR -> RGB 변환
                 
-                print(f"Loaded pre-trained model: {pre_trained_model_path}")
+                print(f"Loaded pre-trained model: {pre_trained_model_path}", flush=True)
             
             else: # 사전에 학습된 모델을 사용하지 않는 경우 checkpoint를 확인
                 checkpoints = glob.glob(os.path.join(checkpoint_dir, "*.pth")) # 전체 checkpoint file 목록
 
                 if checkpoints: # Checkpoint가 존재하면 이어서 학습을 진행
-                    print("Checkpoint directory already exists. Continue training...") # Checkpoint가 있으면 이어서 학습
+                    print("Checkpoint directory already exists. Continue training...", flush=True) # Checkpoint가 있으면 이어서 학습
                     
                     latest_checkpoint = max(checkpoints, key=os.path.getctime) # 가장 최근 파일 선택
-                    print(f"Loading latest checkpoint: {latest_checkpoint}")
+                    print(f"Loading latest checkpoint: {latest_checkpoint}", flush=True)
                     checkpoint_data = torch.load(latest_checkpoint, map_location=self.device)
                     self.policy_net.load_state_dict(checkpoint_data['model_state_dict'])
                     self.target_net.load_state_dict(checkpoint_data['model_state_dict'])
@@ -365,16 +363,16 @@ class TrainDQN():
                         if loaded_img is not None: 
                             self.best_coverage_path_img = cv2.cvtColor(loaded_img, cv2.COLOR_BGR2RGB) # BGR -> RGB 변환
                     
-                    print(f"Resumed training from episode {checkpoint_data['episode']} with reward {checkpoint_data['episode_reward']}")
+                    print(f"Resumed training from episode {checkpoint_data['episode']} with reward {checkpoint_data['episode_reward']}", flush=True)
                 
                 else:
-                    print("No checkpoint files found!")
+                    print("No checkpoint files found!", flush=True)
                 
         elif args.mode == 'test':
             
             test_model = os.path.join(model_dir, args.model_name)
             if not os.path.exists(test_model):
-                raise FileNotFoundError(f"Test model file not found: {test_model}")
+                raise FileNotFoundError(f"Test model file not found: {test_model}", flush=True)
             checkpoint = torch.load(test_model, map_location=self.device)
             self.policy_net.load_state_dict(checkpoint['model_state_dict'])
 
@@ -560,7 +558,7 @@ class TrainDQN():
                                                       'Validation/Best_path': vessl.Image(max_coverage_traj_img)})
         
         # Validation 결과 출력
-        print(f"[Validation] Episode {episode}: Coverage Mean = {coverage_mean:.4f}, Best Coverage Mean = {self.best_coverage_mean:.4f}")
+        print(f"[Validation] Episode {episode}: Coverage Mean = {coverage_mean:.4f}, Best Coverage Mean = {self.best_coverage_mean:.4f}", flush=True)
             
         self.policy_net.train() # train mode로 전환
         
@@ -809,9 +807,9 @@ class TrainDQN():
                     self.vessl_run.log(step=episode, payload={"Visualization/Robot_path": vessl.Image(map_img)})
             
             # Episode 결과 출력        
-            print(f"Episode: {episode}, Warmup: {warmup}, Reward: {episode_reward:.2f}, Steps: {steps}, Total_steps: {self.total_steps}, Epsilon: {epsilon:.3f}")
+            print(f"Episode: {episode}, Warmup: {warmup}, Reward: {episode_reward:.2f}, Steps: {steps}, Total_steps: {self.total_steps}, Epsilon: {epsilon:.3f}", flush=True)
             if not warmup:
-                print(f"\tLoss: {loss:.2f}")
+                print(f"\tLoss: {loss:.2f}", flush=True)
 
     def test(self):
         
@@ -828,7 +826,7 @@ class TrainDQN():
         obs, _ = self.test_env.reset(seed=self.seed) # Test 환경을 reset하여 초기 state 얻음
         coverage = self._test_one_map(self.test_env, obs) # 생성된 map에서 coverage 과제 수행
         self.test_env.show_visualized_img(img_choice='traj') # trajectory 시각화
-        print(f"Test finished. Coverage: {coverage}")
+        print(f"Test finished. Coverage: {coverage}", flush=True)
     
 def main():
     
