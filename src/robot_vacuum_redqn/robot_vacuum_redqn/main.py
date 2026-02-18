@@ -265,17 +265,14 @@ class TrainDQN():
                     name=f"{current_time}_{args.model_name}_training"
                 )
                 
-            self.vessl_run = None
+            # vessl 설정
             if args.use_vessl:
-                print("init")
-                self.vessl_run = vessl.init(
+                vessl.init(
                     organization="snu-eng-gtx1080", 
                     project="lg-robot-ReDQN", 
                     hp=params_config,
                     # name=f"{current_time}_{args.model_name}_training"                  
                 )
-                print("init done")
-                print(self.vessl_run)
             # ---------------------------------------------------------
             
             # Optimizer 설정
@@ -556,7 +553,7 @@ class TrainDQN():
         if self.wandb_run:
             self.wandb_run.log({'Validation/Coverage_mean': coverage_mean,
                                 'Validation/Best_path': wandb.Image(max_coverage_traj_img)}, step=episode)
-        if self.vessl_run:
+        if self.args.use_vessl:
             vessl.log(step=episode, payload={'Validation/Coverage_mean': coverage_mean,
                                                       'Validation/Best_path': vessl.Image(max_coverage_traj_img)})
         
@@ -760,7 +757,7 @@ class TrainDQN():
                     if self.wandb_run:
                         self.wandb_run.log({"Train/Loss": loss.item(),
                                             "Train/Q_value_mean": curr_q.mean().item()}, step=self.total_steps)
-                    if self.vessl_run:
+                    if self.args.use_vessl:
                         vessl.log(step=self.total_steps, 
                                            payload={"Train/Loss": loss.item(), 
                                                     "Train/Q_value_mean": curr_q.mean().item()})
@@ -783,7 +780,7 @@ class TrainDQN():
                 self.wandb_run.log({"Stats/Episode_reward": episode_reward,
                            "Stats/Coverage_rate": coverage,
                            "Stats/Collision_count": ep_collision}, step=episode)
-            if self.vessl_run:
+            if self.args.use_vessl:
                 vessl.log(step=episode, payload={
                     "Stats/Episode_reward": episode_reward,
                     "Stats/Coverage_rate": coverage,
@@ -799,9 +796,6 @@ class TrainDQN():
             if not warmup and episode % self.train_cfg.valid_freq == 0:
                 self._validation(episode)
             
-            print("What?")
-            print(f"{self.args.use_vessl}")
-            print(f"{self.vessl_run}")
             # Map 기록 저장
             if (warmup and episode % 4 == 0) or (not warmup and episode % 20 == 0):
                 map_img = self.env.get_visualized_img(img_choice='traj')
@@ -809,7 +803,7 @@ class TrainDQN():
                     self.tb_writer.add_image("Visualization/Robot_path", map_img, episode, dataformats="HWC")
                 if self.wandb_run:
                     self.wandb_run.log({"Visualization/Robot_path": wandb.Image(map_img)}, step=episode)
-                if self.vessl_run:
+                if self.args.use_vessl:
                     print("Vessl_run!!!")
                     vessl.log(step=episode, payload={"Visualization/Robot_path": vessl.Image(map_img)})
             
