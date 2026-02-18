@@ -797,6 +797,8 @@ class TrainDQN():
                 self._validation(episode)
             
             print("What?")
+            print(f"{self.args.use_vessl}")
+            print(f"{self.vessl_run}")
             # Map 기록 저장
             if (warmup and episode % 4 == 0) or (not warmup and episode % 20 == 0):
                 map_img = self.env.get_visualized_img(img_choice='traj')
