@@ -554,7 +554,7 @@ class TrainDQN():
             self.wandb_run.log({'Validation/Coverage_mean': coverage_mean,
                                 'Validation/Best_path': wandb.Image(max_coverage_traj_img)}, step=episode)
         if self.vessl_run:
-            self.vessl_run.log(step=episode, payload={'Validation/Coverage_mean': coverage_mean,
+            vessl.log(step=episode, payload={'Validation/Coverage_mean': coverage_mean,
                                                       'Validation/Best_path': vessl.Image(max_coverage_traj_img)})
         
         # Validation 결과 출력
@@ -758,7 +758,7 @@ class TrainDQN():
                         self.wandb_run.log({"Train/Loss": loss.item(),
                                             "Train/Q_value_mean": curr_q.mean().item()}, step=self.total_steps)
                     if self.vessl_run:
-                        self.vessl_run.log(step=self.total_steps, 
+                        vessl.log(step=self.total_steps, 
                                            payload={"Train/Loss": loss.item(), 
                                                     "Train/Q_value_mean": curr_q.mean().item()})
                         
@@ -781,7 +781,7 @@ class TrainDQN():
                            "Stats/Coverage_rate": coverage,
                            "Stats/Collision_count": ep_collision}, step=episode)
             if self.vessl_run:
-                self.vessl_run.log(step=episode, payload={
+                vessl.log(step=episode, payload={
                     "Stats/Episode_reward": episode_reward,
                     "Stats/Coverage_rate": coverage,
                     "Stats/Collision_count": ep_collision
@@ -804,7 +804,7 @@ class TrainDQN():
                 if self.wandb_run:
                     self.wandb_run.log({"Visualization/Robot_path": wandb.Image(map_img)}, step=episode)
                 if self.vessl_run:
-                    self.vessl_run.log(step=episode, payload={"Visualization/Robot_path": vessl.Image(map_img)})
+                    vessl.log(step=episode, payload={"Visualization/Robot_path": vessl.Image(map_img)})
             
             # Episode 결과 출력        
             print(f"Episode: {episode}, Warmup: {warmup}, Reward: {episode_reward:.2f}, Steps: {steps}, Total_steps: {self.total_steps}, Epsilon: {epsilon:.3f}", flush=True)
