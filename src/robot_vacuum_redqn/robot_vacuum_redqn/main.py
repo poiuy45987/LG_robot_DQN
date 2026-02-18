@@ -804,6 +804,7 @@ class TrainDQN():
                 if self.wandb_run:
                     self.wandb_run.log({"Visualization/Robot_path": wandb.Image(map_img)}, step=episode)
                 if self.vessl_run:
+                    print("Vessl_run!!!")
                     vessl.log(step=episode, payload={"Visualization/Robot_path": vessl.Image(map_img)})
             
             # Episode 결과 출력        
