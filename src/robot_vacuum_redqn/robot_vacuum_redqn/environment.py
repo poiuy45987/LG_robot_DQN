@@ -222,6 +222,7 @@ class DQNCoverageEnv(gym.Env):
         return coverable
 
     # FIXME: Reward 구조 수정
+    # Reward 출력 및 cover한 영역을 표시
     def _apply_footprint_rewards(self, cx: int, cy: int):
         
         if not self._in_bounds_center(cx, cy):
@@ -402,7 +403,7 @@ class DQNCoverageEnv(gym.Env):
         for _ in range(20000):
             cx = int(self.env_rng.integers(self.robot_half_size, self.W - self.robot_half_size))
             cy = int(self.env_rng.integers(self.robot_half_size, self.H - self.robot_half_size))
-            _, collided = self._apply_footprint_rewards(cx, cy)
+            _, collided = self._collides(cx, cy) # 현재 로봇 청소기가 있는 영역을 cleaned_layer에 추가
             if not collided:
                 self.pos = (cx, cy)
                 break
@@ -410,7 +411,7 @@ class DQNCoverageEnv(gym.Env):
             print("Force the robot position to the center.")
             xs, ys = self._get_footprint_coords(self.W//2, self.H//2)
             self.obstacles[ys, xs] = 0
-            _, collided = self._apply_footprint_rewards(cx, cy)
+            _, collided = self._collides(cx, cy)
             if collided:
                 raise ValueError("Obstacles were not removed before forced robot placement.")
         self.dir = int(self.env_rng.integers(0, 4))
@@ -418,6 +419,7 @@ class DQNCoverageEnv(gym.Env):
         # Coverable grid를 계산 (Training 시에도 이용)
         self.reachable = self._compute_reachable_centers(*self.pos)
         self.coverable = self._compute_coverable_cells_from_reachable(self.reachable)
+        _, _ = self._apply_footprint_rewards(cx, cy) # cleaned_layer에 robot이 cover한 영역을 표시
         self.total_coverable_area = int(self.coverable.sum())
         self.last_coverage = self._coverage()
         self.no_progress_cnt = 0
