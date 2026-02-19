@@ -403,7 +403,7 @@ class DQNCoverageEnv(gym.Env):
         for _ in range(20000):
             cx = int(self.env_rng.integers(self.robot_half_size, self.W - self.robot_half_size))
             cy = int(self.env_rng.integers(self.robot_half_size, self.H - self.robot_half_size))
-            _, collided = self._collides(cx, cy) # 현재 로봇 청소기가 있는 영역을 cleaned_layer에 추가
+            collided = self._collides(cx, cy) # 현재 로봇 청소기가 있는 영역을 cleaned_layer에 추가
             if not collided:
                 self.pos = (cx, cy)
                 break
@@ -411,7 +411,7 @@ class DQNCoverageEnv(gym.Env):
             print("Force the robot position to the center.")
             xs, ys = self._get_footprint_coords(self.W//2, self.H//2)
             self.obstacles[ys, xs] = 0
-            _, collided = self._collides(cx, cy)
+            collided = self._collides(cx, cy)
             if collided:
                 raise ValueError("Obstacles were not removed before forced robot placement.")
         self.dir = int(self.env_rng.integers(0, 4))
