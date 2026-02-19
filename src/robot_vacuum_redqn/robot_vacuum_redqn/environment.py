@@ -227,15 +227,20 @@ class DQNCoverageEnv(gym.Env):
         if not self._in_bounds_center(cx, cy):
             return float(self.cfg.obstacle_penalty), True
         
-        xs, ys = self._get_footprint_coords(cx, cy)
-        if self._collides(xs, ys):
+        # xs, ys = self._get_footprint_coords(cx, cy)
+        if self._collides(cx, cy):
             return float(self.cfg.obstacle_penalty), True
         else:
-            self.cleaned[ys, xs] = 1
-            if self.cleaned[cy, cx]:
+            xs, ys = self._get_footprint_coords(cx, cy)
+            
+            # 청소되지 않은 pixel이 있으면 새롭게 cover한 pixel 수에 비례하게 reward를 추가
+            new_cleaned_grid_num = ((self.cleaned[ys, xs] == 0) & (self.coverable[ys, xs] == 1)).sum()
+            
+            if new_cleaned_grid_num > 0:
+                self.cleaned[ys, xs] = 1 # cleaned_layer에 cover한 영역을 표시
+                return float(new_cleaned_grid_num * self.cfg.uncleaned_reward), False
+            else: # 이미 모든 pixel이 청소되어 있는 경우 penalty 부여
                 return float(self.cfg.cleaned_penalty), False
-            else:
-                return float(self.cfg.uncleaned_reward), False
 
         # if (self.obstacles[ys, xs] == 1).any():
         #     return float(self.cfg.obstacle_penalty), True
