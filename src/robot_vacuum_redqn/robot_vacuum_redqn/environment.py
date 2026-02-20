@@ -433,7 +433,6 @@ class DQNCoverageEnv(gym.Env):
     def step(self, action):
 
         self.steps += 1
-        self.dir = action
 
         # 초기 설정 값
         reward = 0.0
@@ -445,11 +444,13 @@ class DQNCoverageEnv(gym.Env):
         # ---- 다음 위치로 이동: Collision이 일어나면 더 나아가지 않음 ----
         # Collision이 일어나면, collision 사실을 info에 넣어 알리기만 하고 더 나아가지 않음
         # 이 작업은 training 시와 test 시에 동일하게 동작함.
-        dx, dy = self.dir_vecs[self.dir]
+        dx, dy = self.dir_vecs[action]
         cx, cy = self.pos
         nx, ny = int(cx + dx), int(cy + dy)
         
         reward, collided = self._apply_footprint_rewards(nx, ny) # 다음 위치로 이동할 때의 reward와 충돌 여부를 얻음
+        if self.dir != action: # 이전에 진행한 step과 다른 방향으로 진행한 경우
+            reward += self.cfg.turn_penalty
         
         if collided:
             collision = True

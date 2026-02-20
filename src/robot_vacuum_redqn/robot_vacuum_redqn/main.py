@@ -141,7 +141,8 @@ def parse_args():
     # Reward function 관련 설정
     env_set_group.add_argument('--uncleaned_reward', type=float, default=1.0, help='Uncleaned grid reward (Default: 1.0)')
     env_set_group.add_argument('--cleaned_penalty', type=float, default=-0.1, help='Cleaned grid penalty (Default: -0.1)')
-    env_set_group.add_argument('--obstacle_penalty', type=float, default=-10.0, help='Obstalce penalty (Default: 10.0)')
+    env_set_group.add_argument('--obstacle_penalty', type=float, default=-10.0, help='Obstalce penalty (Default: -10.0)')
+    env_set_group.add_argument('--turn_penalty', type=float, default=-0.1, help='Turning penalty (Default: -0.1)')
     
     # -----------------------------
     
@@ -329,7 +330,7 @@ class TrainDQN():
                     raise FileNotFoundError(f"Pre-trained model file not found: {pre_trained_model_path}")
                 
                 # /models 폴더에 저장된 model 정보를 불러옴
-                pre_trained_model = torch.load(pre_trained_model_path, map_location=self.device)
+                pre_trained_model = torch.load(pre_trained_model_path, map_location=self.device, weights_only=False)
                 self.policy_net.load_state_dict(pre_trained_model['model_state_dict'])
                 self.target_net.load_state_dict(pre_trained_model['model_state_dict'])
                 self.best_coverage_mean = pre_trained_model['best_coverage_mean']
@@ -354,7 +355,7 @@ class TrainDQN():
                     
                     latest_checkpoint = max(checkpoints, key=os.path.getctime) # 가장 최근 파일 선택
                     print(f"Loading latest checkpoint: {latest_checkpoint}", flush=True)
-                    checkpoint_data = torch.load(latest_checkpoint, map_location=self.device)
+                    checkpoint_data = torch.load(latest_checkpoint, map_location=self.device, weights_only=False)
                     self.policy_net.load_state_dict(checkpoint_data['model_state_dict'])
                     self.target_net.load_state_dict(checkpoint_data['model_state_dict'])
                     self.optimizer.load_state_dict(checkpoint_data['optimizer_state_dict']) # Optimizer도 checkpoint와 똑같이 유지
@@ -379,7 +380,7 @@ class TrainDQN():
             test_model = os.path.join(model_dir, args.model_name)
             if not os.path.exists(test_model):
                 raise FileNotFoundError(f"Test model file not found: {test_model}", flush=True)
-            checkpoint = torch.load(test_model, map_location=self.device)
+            checkpoint = torch.load(test_model, map_location=self.device, weights_only=False)
             self.policy_net.load_state_dict(checkpoint['model_state_dict'])
 
     def _save_model(self, mode='model', info=None):
@@ -834,7 +835,7 @@ class TrainDQN():
         #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         #model_name = args.model_name
         #model_dir = args.model_dir
-        #saved_dict = torch.load(os.path.join(model_dir, model_name), map_location=device)
+        #saved_dict = torch.load(os.path.join(model_dir, model_name), map_location=device, weights_only=False)
         #test_model = CNN_ReDQN(action_size=4, use_noisy=args.use_noisy).to(device)
         #test_model.load_state_dict(saved_dict['model_state_dict'])
         #test_model.eval()

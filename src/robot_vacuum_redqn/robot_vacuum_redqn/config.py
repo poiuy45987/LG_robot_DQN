@@ -99,6 +99,7 @@ class EnvConfig:
     uncleaned_reward: float = 1.0
     cleaned_penalty: float = -0.1
     obstacle_penalty: float = -10.0
+    turn_penalty: float = -0.1
     
     def _to_grid(self, value: float) -> int:
         """cm 단위를 grid 단위로 변환 (최소 1 그리드 보장)"""
