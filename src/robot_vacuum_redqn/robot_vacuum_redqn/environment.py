@@ -574,6 +574,7 @@ class DQNCoverageEnv(gym.Env):
         ]
         ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.05, 1))
         ax.set_title(f"Coverage: {self.last_coverage:.2f}")
+        ax.text(0, -0.1, f"Path length: {len(self.traj)}", transform=ax.transAxes, ha="left", va="top", fontsize=11, color='black')
         self.fig.tight_layout()
         
     def _draw_obs(self):

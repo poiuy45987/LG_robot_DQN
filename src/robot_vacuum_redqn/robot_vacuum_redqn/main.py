@@ -11,10 +11,12 @@ import cv2
 import datetime
 import pytz
 import random
+import time
 import os
 import argparse
 import glob
 from PIL import Image
+from IPython.display import display, clear_output
 
 # 앞서 정의한 클래스들을 임포트한다고 가정 (또는 같은 파일에 위치)
 from .config import EnvConfig, TrainConfig, DEFAULT_SEED
@@ -24,6 +26,9 @@ from .redqn_network import CNN_ReDQN
 def parse_args():
     
     parser = argparse.ArgumentParser()
+    
+    # Debugging 여부 설정
+    parser.add_argument('--debug', action='store_true', help='Debugging 여부 결정')
     
     # Seed 설정
     parser.add_argument('--seed', type=int, default=DEFAULT_SEED, help=f'Set seed: (Default: {DEFAULT_SEED})')
@@ -574,44 +579,71 @@ class TrainDQN():
             
         self.policy_net.train() # train mode로 전환
         
-    def _test_one_map(self, env: DQNCoverageEnv, obs: dict) -> float:
-        """
-        Map 하나를 test하는 method
-        로봇을 맵 내에서 움직이게 함. Terminated 또는 Truncated이 될 때까지 움직임.
-        env는 reset된 상태로 전달됨.
-
-        Args:
-            env: 로봇을 움직일 environment
-            obs: reset 시 얻은 observation 정보
-
-        Returns:
-            float: Coverage를 표시
-        """
+    def _test_one_map(self, env: DQNCoverageEnv, obs: dict, debug: bool = False) -> float:
+        
         done = False
         last_obs = obs
         last_info = None
+        debug_skip_count = 0
+        
+        # [1] 디버그 모드일 때 사용할 도화지(fig)를 미리 딱 한 번만 만듭니다.
+        if debug:
+            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+            # 초기 빈 이미지 설치
+            im_traj = axes[0].imshow(np.zeros((self.args.grid_map_size, self.args.grid_map_size, 3)))
+            im_obs = axes[1].imshow(np.zeros((self.args.grid_map_size, self.args.grid_map_size, 3)))
+            text_traj = axes[0].text(0.5, -0.15, "", transform=axes[0].transAxes, ha="center", fontsize=11, color='black')
+            axes[0].set_title("Trajectory")
+            axes[1].set_title("Observation")
+            for ax in axes: ax.axis('off')
+            plt.tight_layout()
+            
+            # Jupyter용 디스플레이 핸들을 생성 (이걸 통해 이미지만 쏙 바꿉니다)
+            display_handle = display(fig, display_id=True)
+            plt.close(fig) # 별도의 정적 출력이 생기지 않도록 닫기
+        
         while not done:
-            
             processed_obs = self._pre_process_obs(last_obs, target_dim=self.args.grid_map_size)
-            
-            # 텐서 변환 및 장치 이동
             map_tensor = torch.from_numpy(processed_obs['map']).float().to(self.device).unsqueeze(0)
             vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
             state = {"map": map_tensor, "vec": vec_tensor}
             
             action = self._get_action(env, state, mode='test')
-            # with torch.no_grad():
-            #     # Noisy Layer 사용 시 추론 전 노이즈 리셋 (학습 시와 일관성 유지)
-            #     if self.train_cfg.use_noisy:
-            #         self.policy_net.reset_noise()
-            #     # Dual-input 입력
-            #     q_values = self.policy_net(map_tensor, vec_tensor)
-            #     action = q_values.argmax().item()
             
+            if debug:
+                # [2] 텍스트 정보만 살짝 지우고 다시 출력 (그림은 건드리지 않음)
+                #clear_output(wait=True)
+                
+                with torch.no_grad():
+                    q_values = self.policy_net(map_tensor, vec_tensor).squeeze().cpu().numpy()
+                
+                action_list = ['E', 'N', 'W', 'S']
+                action_info = (f"[Selected action]: {action_list[action]}\n"
+                               f"[Q-values] E: {q_values[0]:.2f}, N: {q_values[1]:.2f}, W: {q_values[2]:.2f}, S: {q_values[3]:.2f}")
+                
+                # [3] 데이터만 가져와서 기존 이미지 객체에 덮어쓰기 (가장 핵심)
+                traj_img = env.get_visualized_img(img_choice='traj')
+                obs_img = env.get_visualized_img(img_choice='obs')
+                
+                im_traj.set_data(traj_img)
+                im_obs.set_data(obs_img)
+                text_traj.set_text(action_info)
+                
+                # [4] 화면 갱신 (도화지 위치는 그대로, 내용물만 부드럽게 변경)
+                display_handle.update(fig)
+                
+                if debug_skip_count > 0:
+                    debug_skip_count -= 1
+                    time.sleep(0.1)
+                else:
+                    user_val = input("Next step: [Enter] | Auto: [Number] | Exit: [q] >> ")
+                    if user_val.lower() == 'q':
+                        break
+                    if user_val.strip().isdigit():
+                        debug_skip_count = int(user_val) - 1
+
             next_obs, _, terminated, truncated, info = env.step(action)
             done = terminated or truncated
-            
-            # 다음 스텝을 위해 상태 업데이트
             last_obs = next_obs
             last_info = info
         
@@ -711,7 +743,7 @@ class TrainDQN():
                 # Episode를 종료하는 조건: Coverage에 성공한 경우 or Episode가 조기 종료된 경우 (Collision은 포함 X)
                 # Warmup 시에는 truncated일 때 info['Steps'] == args.warmup_ep_steps일 때만 종료
                 if warmup:
-                    done_ep = (terminated & info['Success']) or (truncated & (info['Steps'] == self.train_cfg.warmup_ep_steps))
+                    done_ep = (terminated & info['Success']) or (truncated & (info['Steps'] >= self.train_cfg.warmup_ep_steps))
                 else:
                     done_ep = (terminated & info['Success']) or truncated
                 
@@ -833,7 +865,7 @@ class TrainDQN():
         
         self.policy_net.eval() # eval mode로 전환
         obs, _ = self.test_env.reset(seed=self.seed) # Test 환경을 reset하여 초기 state 얻음
-        coverage = self._test_one_map(self.test_env, obs) # 생성된 map에서 coverage 과제 수행
+        coverage = self._test_one_map(self.test_env, obs, self.args.debug) # 생성된 map에서 coverage 과제 수행
         self.test_env.show_visualized_img(img_choice='traj') # trajectory 시각화
         print(f"Test finished. Coverage: {coverage}", flush=True)
     
