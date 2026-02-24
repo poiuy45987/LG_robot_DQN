@@ -11,7 +11,8 @@ class NoisyLinear(nn.Module):
         
         self.weight_mu = nn.Parameter(torch.empty(out_features, in_features))
         self.weight_sigma = nn.Parameter(torch.empty(out_features, in_features))
-        self.register_buffer('weight_epsilon', torch.empty(out_features, in_features))
+        self.register_buffer('weight_epsilon_in', torch.empty(in_features))
+        self.register_buffer('weight_epsilon_out', torch.empty(out_features))
         
         self.bias_mu = nn.Parameter(torch.empty(out_features))
         self.bias_sigma = nn.Parameter(torch.empty(out_features))
@@ -28,14 +29,21 @@ class NoisyLinear(nn.Module):
         self.weight_sigma.data.fill_(self.sigma_init / (self.in_features ** 0.5))
         self.bias_mu.data.uniform_(-mu_range, mu_range)
         self.bias_sigma.data.fill_(self.sigma_init / (self.out_features ** 0.5))
+        
+    def _scale_noise(self, size):
+        x = torch.randn(size, device=self.weight_epsilon_in.device) # 평균 0, 표준편차 1인 정규분포 (음수/양수 섞임)
+        return x.sign().mul_(x.abs().sqrt_())
 
     def reset_noise(self):
-        self.weight_epsilon.normal_()
-        self.bias_epsilon.normal_()
+        self.weight_epsilon_in.copy_(self._scale_noise(self.in_features))
+        self.weight_epsilon_out.copy_(self._scale_noise(self.out_features))
+        self.bias_epsilon.copy_(self._scale_noise(self.out_features))
 
     def forward(self, x):
         if self.training:
-            weight = self.weight_mu + self.weight_sigma * self.weight_epsilon
+            # forward 시점에 외적(ger)을 수행하여 일시적으로 행렬 생성
+            # 메모리에 저장하지 않으므로 속도와 용량 모두 이득입니다.
+            weight = self.weight_mu + self.weight_sigma * torch.ger(self.weight_epsilon_out, self.weight_epsilon_in)
             bias = self.bias_mu + self.bias_sigma * self.bias_epsilon
         else:
             weight = self.weight_mu

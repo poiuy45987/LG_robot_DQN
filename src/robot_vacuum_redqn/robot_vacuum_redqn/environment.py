@@ -221,7 +221,6 @@ class DQNCoverageEnv(gym.Env):
         coverable &= (self.obstacles == 0).astype(np.uint8)
         return coverable
 
-    # FIXME: Reward 구조 수정
     # Reward 출력 및 cover한 영역을 표시
     def _apply_footprint_rewards(self, cx: int, cy: int):
         

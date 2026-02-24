@@ -247,7 +247,7 @@ class TrainDQN():
             params_list_for_log = [
                 'batch_size', 'lr', 'optimizer', 'momentum', 'epsilon_decay', 'use_softmax',
                 'softmax_temp', 'use_noisy', 'target_with_noisy', 'gamma', 'reset_only_start_pos',
-                'uncleaned_reward', 'cleaned_penalty', 'obstacle_penalty'        
+                'uncleaned_reward', 'cleaned_penalty', 'obstacle_penalty', 'turn_penalty'      
             ]
             params_config = {k: v for k, v in vars(args).items() if k in params_list_for_log}
             
@@ -830,15 +830,6 @@ class TrainDQN():
                 print(f"\tLoss: {loss:.2f}", flush=True)
 
     def test(self):
-        
-        # 저장된 모델 loading
-        #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        #model_name = args.model_name
-        #model_dir = args.model_dir
-        #saved_dict = torch.load(os.path.join(model_dir, model_name), map_location=device, weights_only=False)
-        #test_model = CNN_ReDQN(action_size=4, use_noisy=args.use_noisy).to(device)
-        #test_model.load_state_dict(saved_dict['model_state_dict'])
-        #test_model.eval()
         
         self.policy_net.eval() # eval mode로 전환
         obs, _ = self.test_env.reset(seed=self.seed) # Test 환경을 reset하여 초기 state 얻음
