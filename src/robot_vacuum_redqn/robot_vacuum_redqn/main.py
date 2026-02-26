@@ -1,4 +1,5 @@
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
@@ -148,7 +149,7 @@ def parse_args():
     env_set_group.add_argument('--cleaned_penalty', type=float, default=-0.1, help='Cleaned grid penalty (Default: -0.1)')
     env_set_group.add_argument('--obstacle_penalty', type=float, default=-10.0, help='Obstalce penalty (Default: -10.0)')
     env_set_group.add_argument('--turn_penalty', type=float, default=-0.1, help='Turning penalty (Default: -0.1)')
-    
+    env_set_group.add_argument('--step_penalty', type=float, default=-0.01, help='Step penalty (Default: -0.01)')
     # -----------------------------
     
     args = parser.parse_args()
@@ -252,7 +253,7 @@ class TrainDQN():
             params_list_for_log = [
                 'batch_size', 'lr', 'optimizer', 'momentum', 'epsilon_decay', 'use_softmax',
                 'softmax_temp', 'use_noisy', 'target_with_noisy', 'gamma', 'reset_only_start_pos',
-                'uncleaned_reward', 'cleaned_penalty', 'obstacle_penalty', 'turn_penalty'      
+                'uncleaned_reward', 'cleaned_penalty', 'obstacle_penalty', 'turn_penalty', 'step_penalty'      
             ]
             params_config = {k: v for k, v in vars(args).items() if k in params_list_for_log}
             
@@ -363,7 +364,19 @@ class TrainDQN():
                     checkpoint_data = torch.load(latest_checkpoint, map_location=self.device, weights_only=False)
                     self.policy_net.load_state_dict(checkpoint_data['model_state_dict'])
                     self.target_net.load_state_dict(checkpoint_data['model_state_dict'])
-                    self.optimizer.load_state_dict(checkpoint_data['optimizer_state_dict']) # Optimizer도 checkpoint와 똑같이 유지
+                    
+                    try:
+                        self.optimizer.load_state_dict(checkpoint_data['optimizer_state_dict']) # Optimizer도 checkpoint와 똑같이 유지
+                    except (KeyError, ValueError):
+                        print("Optimizer state mismatch. Initializing optimizer.")
+                        # Optimizer를 다시 설정
+                        if args.optimizer == 'sgd':
+                            self.optimizer = optim.SGD(self.policy_net.parameters(), lr=args.lr, momentum=args.momentum)
+                        elif args.optimizer == 'adam':
+                            self.optimizer = optim.Adam(self.policy_net.parameters(), lr=args.lr)
+                        else:
+                            raise ValueError(f"Unsupported optimizer type: {args.optimizer}")
+
                     self.total_steps = checkpoint_data['total_steps']
                     self.start_episode = checkpoint_data['episode'] + 1
                     self.best_coverage_mean = checkpoint_data['best_coverage_mean']
@@ -452,7 +465,9 @@ class TrainDQN():
             raise ValueError(f"Unsupported mode: {mode}. Expected 'model' or 'checkpoint'.")
         
         
-    def _get_action(self, env: DQNCoverageEnv, state, mode='test', options=None) -> int:
+    def _get_action(self, env: DQNCoverageEnv, state, action_mask, mode='test', options=None) -> int:
+        
+        # action_mask는 greedy action을 선택할 때만 사용. Warmup, epsilon 탐험, collision 이후 랜덤 탐험 시에는 action_mask 적용 X
         
         def _get_greedy_action(use_softmax=False) -> int:
             # Action을 Q-value로 뽑지 않더라도 일단 Q-value를 얻어서 관찰
@@ -461,12 +476,21 @@ class TrainDQN():
                     self.policy_net.reset_noise() # 논문 기법: 결정 전 노이즈 리셋
                 map_tensor = state['map']; vec_tensor = state['vec']
                 q_values = self.policy_net(map_tensor, vec_tensor) # Shape: (1, action_space)
+            
+            # 사방이 막힌 경우
+            if not torch.any(action_mask > 0):
+                return q_values.argmax().item()
                 
             if use_softmax:
-                probs = F.softmax(q_values / self.train_cfg.softmax_temp, dim=1).cpu().numpy().flatten()
+                masked_q_values = q_values + (1-action_mask)*-1e9 # mask==0.0인 곳은 매우 작은 수를 더하여 확률을 0에 가깝게 만듦
+                probs = F.softmax(masked_q_values / self.train_cfg.softmax_temp, dim=1).cpu().numpy().flatten() # 확률값 계산
+                probs[action_mask.cpu().numpy().flatten() == 0] = 0  # action_mask가 0인 곳은 확률을 0으로 만듦
+                probs = probs / (probs.sum() + 1e-8) # 확률 합이 1이 안 될 경우를 대비해 normalize (안전장치)
                 action = self.train_rng.choice(len(probs), p=probs)
             else:
-                action = q_values.argmax().item()
+                masked_q_values = q_values.clone()
+                masked_q_values[action_mask == 0] = -1e9
+                action = masked_q_values.argmax().item()
             
             return action
  
@@ -486,8 +510,8 @@ class TrainDQN():
                 action = self.train_rng.choice(all_actions)
             
             # # Warmup 상황인 경우 action을 random하게 뽑음
-            # elif warmup: 
-            #     action = env.action_space.sample()
+            elif warmup: 
+                action = env.action_space.sample()
                 
             # Warmup이 아닌 경우 epsilon 기법으로 action 선택
             elif self.train_rng.random() < epsilon:
@@ -517,7 +541,10 @@ class TrainDQN():
         else:
             processed_vec = obs['vec'].astype(np.float32)
             
-        return {"map": processed_map, "vec": processed_vec}
+        # action_mask 복사
+        action_mask = obs['action_mask']
+            
+        return {'map': processed_map, 'vec': processed_vec, 'action_mask': action_mask}
     
     def _validation(self, episode: int):
         
@@ -528,6 +555,7 @@ class TrainDQN():
         self.policy_net.eval() # eval mode로 전환
         coverage = []
         max_coverage = 0.0
+        coverage_mean = 0.0
         max_coverage_traj_img = None # 가장 성능이 좋았던 map에서의 trajectory를 보여줌
         options={"reset_only_start_pos": True} # 시작 지점만 초기화하기 위한 option
         
@@ -541,28 +569,27 @@ class TrainDQN():
                 obs, _ = self.valid_env.reset()
                 
             for start_num in range(self.train_cfg.valid_start_point_num):
+                
                 # start_num == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
                 if start_num != 0:
                     obs, _ = self.valid_env.reset(options=options) # 시작 지점 초기화
                 cur_coverage = self._test_one_map(self.valid_env, obs) # Coverage 성능을 평가
-                coverage.append(cur_coverage) # Coverage 평균을 구하기 위해 cur_coverage를 저장
-                if cur_coverage > max_coverage:
-                    max_coverage = cur_coverage
-                    max_coverage_traj_img = self.valid_env.get_visualized_img()
-        coverage_mean = np.mean(coverage)
+                
+                # Coverage 값이 유효한 경우에만 저장: Reachable grid의 수가 전체 grid 수의 절반은 넘어야 함.
+                if self.valid_env.reachable.sum() >= self.valid_env.H * self.valid_env.W * 0.5:
+                    coverage.append(cur_coverage) # Coverage 평균을 구하기 위해 cur_coverage를 저장
+                    if cur_coverage > max_coverage:
+                        max_coverage = cur_coverage
+                        max_coverage_traj_img = self.valid_env.get_visualized_img()
+        
+        if coverage:
+            coverage_mean = np.mean(coverage)
         
         # Coverage 성능 평가 후 이전 model의 coverage 성능보다 더 좋으면 model을 저장
         if coverage_mean > self.best_coverage_mean:
             self.best_coverage_mean = coverage_mean
             self.best_coverage_path_img = max_coverage_traj_img
             self._save_model(mode='model') # Coverage 성능이 가장 좋았던 model을 저장
-        
-        # FIXME: 삭제. 그냥 log로 주기
-        # # Cell에 최적 모델의 trajectory 그림이 실시간으로 나타나도록 함.
-        # if self.best_coverage_path_img is not None:
-        #     pil_img = Image.fromarray(self.best_coverage_path_img)
-        #     clear_output(wait=True)
-        #     display(pil_img)
         
         # Validation 결과를 tensorboard와 wandb에 기록
         if self.tb_writer:
@@ -606,36 +633,55 @@ class TrainDQN():
             processed_obs = self._pre_process_obs(last_obs, target_dim=self.args.grid_map_size)
             map_tensor = torch.from_numpy(processed_obs['map']).float().to(self.device).unsqueeze(0)
             vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
+            action_mask = torch.from_numpy(processed_obs['action_mask']).to(self.device).unsqueeze(0)
             state = {"map": map_tensor, "vec": vec_tensor}
             
-            action = self._get_action(env, state, mode='test')
+            action = self._get_action(env, state, action_mask, mode='test')
             
             if debug:
                 # [2] 텍스트 정보만 살짝 지우고 다시 출력 (그림은 건드리지 않음)
                 #clear_output(wait=True)
                 
-                with torch.no_grad():
-                    q_values = self.policy_net(map_tensor, vec_tensor).squeeze().cpu().numpy()
+                # with torch.no_grad():
+                #     q_values = self.policy_net(map_tensor, vec_tensor).squeeze().cpu().numpy()
                 
-                action_list = ['E', 'N', 'W', 'S']
-                action_info = (f"[Selected action]: {action_list[action]}\n"
-                               f"[Q-values] E: {q_values[0]:.2f}, N: {q_values[1]:.2f}, W: {q_values[2]:.2f}, S: {q_values[3]:.2f}")
+                # action_list = ['E', 'N', 'W', 'S']
+                # action_info = (f"[Selected action]: {action_list[action]}\n"
+                #                f"[Q-values] E: {q_values[0]:.2f}, N: {q_values[1]:.2f}, W: {q_values[2]:.2f}, S: {q_values[3]:.2f}")
                 
-                # [3] 데이터만 가져와서 기존 이미지 객체에 덮어쓰기 (가장 핵심)
-                traj_img = env.get_visualized_img(img_choice='traj')
-                obs_img = env.get_visualized_img(img_choice='obs')
+                # # [3] 데이터만 가져와서 기존 이미지 객체에 덮어쓰기 (가장 핵심)
+                # traj_img = env.get_visualized_img(img_choice='traj')
+                # obs_img = env.get_visualized_img(img_choice='obs')
                 
-                im_traj.set_data(traj_img)
-                im_obs.set_data(obs_img)
-                text_traj.set_text(action_info)
+                # im_traj.set_data(traj_img)
+                # im_obs.set_data(obs_img)
+                # text_traj.set_text(action_info)
                 
-                # [4] 화면 갱신 (도화지 위치는 그대로, 내용물만 부드럽게 변경)
-                display_handle.update(fig)
+                # # [4] 화면 갱신 (도화지 위치는 그대로, 내용물만 부드럽게 변경)
+                # display_handle.update(fig)
                 
                 if debug_skip_count > 0:
                     debug_skip_count -= 1
-                    time.sleep(0.1)
                 else:
+                    
+                    with torch.no_grad():
+                        q_values = self.policy_net(map_tensor, vec_tensor).squeeze().cpu().numpy()
+                    
+                    action_list = ['E', 'N', 'W', 'S']
+                    action_info = (f"[Selected action]: {action_list[action]}\n"
+                                   f"[Q-values] E: {q_values[0]:.2f}, N: {q_values[1]:.2f}, W: {q_values[2]:.2f}, S: {q_values[3]:.2f}")
+                    
+                    # [3] 데이터만 가져와서 기존 이미지 객체에 덮어쓰기 (가장 핵심)
+                    traj_img = env.get_visualized_img(img_choice='traj')
+                    obs_img = env.get_visualized_img(img_choice='obs')
+                    
+                    im_traj.set_data(traj_img)
+                    im_obs.set_data(obs_img)
+                    text_traj.set_text(action_info)
+                    
+                    # [4] 화면 갱신 (도화지 위치는 그대로, 내용물만 부드럽게 변경)
+                    display_handle.update(fig)
+                    
                     user_val = input("Next step: [Enter] | Auto: [Number] | Exit: [q] >> ")
                     if user_val.lower() == 'q':
                         break
@@ -647,6 +693,7 @@ class TrainDQN():
             last_obs = next_obs
             last_info = info
         
+        print(env.traj)
         return last_info['Coverage']
             
     def train(self):
@@ -718,12 +765,13 @@ class TrainDQN():
                 if self.wandb_run:
                     self.wandb_run.log({"Train/Episodes": episode}, step=self.total_steps)
                     
-                
                 # Tensor 변환
                 map_tensor = torch.from_numpy(processed_obs['map']).float().to(self.device).unsqueeze(0)
                 vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
+                action_mask = torch.from_numpy(processed_obs['action_mask']).to(self.device).unsqueeze(0)
                 state = {"map": map_tensor, "vec": vec_tensor}
                 
+                # FIXME: model을 load할 때 self.no_warmup_steps를 받아야 함.
                 # Epsilon 결정: Step 수가 늘어날수록 epsilon을 점점 줄임. Warmup 과정에서는 유지
                 epsilon = max(self.train_cfg.epsilon_end, self.train_cfg.epsilon_start-self.no_warmup_steps/self.train_cfg.epsilon_decay)
                 
@@ -734,7 +782,7 @@ class TrainDQN():
                     "last_action": last_action,
                     "last_collision": last_collision,
                 }
-                action = self._get_action(self.env, state, mode='train', options=action_options)
+                action = self._get_action(self.env, state, action_mask, mode='train', options=action_options)
                 
                 # ----------------------------- Action 수행 ---------------------------------
                 next_obs, reward, terminated, truncated, info = self.env.step(action)
@@ -791,7 +839,8 @@ class TrainDQN():
                         target_q = r_b + (1 - d_b) * self.train_cfg.gamma * next_q
                     
                     # Loss 계산 후 parameter update
-                    loss = F.mse_loss(curr_q, target_q.detach())
+                    loss_func = nn.HuberLoss(delta=1.0)
+                    loss = loss_func(curr_q, target_q.detach())
                     self.optimizer.zero_grad()
                     loss.backward()
                     
@@ -862,7 +911,6 @@ class TrainDQN():
                 print(f"\tLoss: {loss:.2f}", flush=True)
 
     def test(self):
-        
         self.policy_net.eval() # eval mode로 전환
         obs, _ = self.test_env.reset(seed=self.seed) # Test 환경을 reset하여 초기 state 얻음
         coverage = self._test_one_map(self.test_env, obs, self.args.debug) # 생성된 map에서 coverage 과제 수행

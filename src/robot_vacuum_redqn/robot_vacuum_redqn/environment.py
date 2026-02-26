@@ -224,6 +224,8 @@ class DQNCoverageEnv(gym.Env):
     # Reward 출력 및 cover한 영역을 표시
     def _apply_footprint_rewards(self, cx: int, cy: int):
         
+        reward = 0.0
+        
         if not self._in_bounds_center(cx, cy):
             return float(self.cfg.obstacle_penalty), True
         
@@ -238,9 +240,13 @@ class DQNCoverageEnv(gym.Env):
             
             if new_cleaned_grid_num > 0:
                 self.cleaned[ys, xs] = 1 # cleaned_layer에 cover한 영역을 표시
-                return float(new_cleaned_grid_num * self.cfg.uncleaned_reward), False
+                reward += float(new_cleaned_grid_num * self.cfg.uncleaned_reward)
             else: # 이미 모든 pixel이 청소되어 있는 경우 penalty 부여
-                return float(self.cfg.cleaned_penalty), False
+                reward += float(self.cfg.cleaned_penalty)
+            
+            reward += float(self.cfg.step_penalty) # Step penalty 추가
+            
+            return reward, False
 
         # if (self.obstacles[ys, xs] == 1).any():
         #     return float(self.cfg.obstacle_penalty), True
@@ -365,8 +371,10 @@ class DQNCoverageEnv(gym.Env):
         ray_norm = np.zeros(4, dtype=np.float32)
         for d in range(4):
             ray_norm[d] = self._ray_distance_forward(cx, cy, d)
+        # 여유 공간을 보고 충돌할 수 있는 action을 제외하기 위한 action_mask를 생성
+        action_mask = (ray_norm != 0).astype(np.float32)
         ray_norm = (ray_norm / max(1, self.max_forward))*2-1
-
+        
         # Coverage 비율: [0, 1] 범위의 숫자를 [-1, 1] 범위로 정규화
         cov = self._coverage()
         cov_norm = cov*2-1
@@ -378,7 +386,7 @@ class DQNCoverageEnv(gym.Env):
             np.array([cov_norm], dtype=np.float32),
         ], axis=0).astype(np.float32)
         
-        return {"map": patch, "vec": obs_vec}
+        return {"map": patch, "vec": obs_vec, 'action_mask': action_mask}
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed) # 난수 생성기 self.np_random가 생성됨. 첫 episode에는 seed 초기화가 일어남. 다음 episode부터는 seed 초기화를 수행하지 않음.(seed=None)
@@ -682,69 +690,6 @@ class DQNCoverageEnv(gym.Env):
             # 여러 번 호출하면 창이 여러 개 뜹니다.
             img_pil.show()
             
-
-# def get_img_from_fig(fig, dpi=100):
-#     """Figure를 렌더링하여 RGB 픽셀 배열(numpy)로 변환 (메모리 캡처)"""
-#     buf = io.BytesIO()
-#     fig.savefig(buf, format='png', dpi=dpi, bbox_inches='tight')
-#     buf.seek(0)
-    
-#     # 메모리 버퍼를 넘파이 배열로 변환
-#     img_arr = np.frombuffer(buf.getvalue(), dtype=np.uint8)
-#     # OpenCV 등을 이용해 디코딩 (이미지 버퍼 -> RGB 행렬)
-#     img = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
-#     img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    
-#     plt.close(fig) # 캡처 후 즉시 메모리 해제
-    
-#     return img.transpose(2, 0, 1) # [H, W, C] -> [C, H, W] (텐서보드 규격)
-
-        
-# def visualize_obs(fig: Figure, obs: np.ndarray):
-        
-#     # 3개의 레이어를 합쳐서 시각화하거나 각각 따로 띄울 수 있습니다.
-#     axes = fig.subplots(1, 3)
-#     H, W = obs['map'][2].shape
-
-#     # obstacles
-#     axes[0].imshow(obs['map'][2], cmap='gray_r', origin='lower')
-#     axes[0].plot(H//2, W//2, 'r.')
-#     axes[0].set_title("Obstacles local view")
-#     legend_elements0 = [
-#         Patch(facecolor='black', edgecolor='black', label='Obstacles'),
-#         Patch(facecolor='white', edgecolor='black', label='Free space'),
-#     ]
-#     axes[0].legend(handles=legend_elements0, loc='upper left', bbox_to_anchor=(0, -0.1))
-
-#     # cleaned
-#     # 현재 로봇 위치를 점으로 찍음
-#     axes[1].imshow(obs['map'][1], cmap='gray_r', origin='lower')
-#     axes[1].plot(H//2, W//2, 'r.') # 로봇 위치를 빨간 점으로 표시
-#     axes[1].set_title("Cleaned map local view")
-#     legend_elements1 = [
-#         Patch(facecolor='black', edgecolor='black', label='Covered space'),
-#         Patch(facecolor='white', edgecolor='black', label='Uncovered space'),
-#     ]
-#     axes[1].legend(handles=legend_elements1, loc='upper left', bbox_to_anchor=(0, -0.1))
-    
-#     # agent_layer
-#     # 현재 로봇 위치를 점으로 찍음
-#     axes[2].imshow(obs['map'][0], cmap='gray_r', origin='lower')
-#     axes[2].plot(H//2, W//2, 'r.') # 로봇 위치를 빨간 점으로 표시
-#     axes[2].set_title(f"Agent layer local view")
-#     legend_elements2 = [
-#         Patch(facecolor='black', edgecolor='black', label='Robot'),
-#         Patch(facecolor='white', edgecolor='black', label='Non-robot'),
-#     ]
-#     axes[2].legend(handles=legend_elements2, loc='upper left', bbox_to_anchor=(0, -0.1))
-    
-#     print(f"""
-#     [Observation Status]
-#     - Normlized position: ({obs['vec'][0]:.2f}, {obs['vec'][1]:.2f})
-#     - Normalized ray: East: {obs['vec'][6]:.2f}, North: {obs['vec'][7]:.2f}, West: {obs['vec'][8]:.2f}, South: {obs['vec'][9]:.2f}
-#     - Normalized coverage: {obs['vec'][10]:.2f}
-#     """)
-    
 
 if __name__ == "__main__":
     # environment가 잘 생성되었는지 테스트하는 코드
