@@ -149,6 +149,13 @@ class EnvConfig:
     max_forward: int = 50 # 단위: cm
     robot_size: float = 36.0 # cm 단위
     
+    # Reward function parameter (footprint-based)
+    uncleaned_reward: float = 1.0
+    cleaned_penalty: float = -0.1
+    obstacle_penalty: float = -10.0
+    turn_penalty: float = -0.1
+    step_penalty: float = -0.01
+    
     def _to_grid(self, value: float) -> int:
         """cm 단위를 grid 단위로 변환 (최소 1 그리드 보장)"""
         return int(max(1, value // self.grid_size))
