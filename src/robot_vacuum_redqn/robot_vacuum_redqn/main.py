@@ -81,19 +81,20 @@ def parse_args():
     train_set_group.add_argument('--valid_start_point_num', type=int, default=3, help='Validation 시 한 map당 테스트해볼 start_poit 수 (Default: 20)')
     
     # Exploration 관련 설정: Episilon 기법, Softmax 기법, Noisy layer 사용
+    train_set_group.add_argument('--use_epsilon', action='store_true', help='Use epsilon-greedy strategy')
     train_set_group.add_argument('--epsilon_start', type=float, default=1.0, help='Starting value of epsilon for epsilon-greedy policy (Default: 1.0)')
     train_set_group.add_argument('--epsilon_end', type=float, default=0.1, help='Final value of epsilon after decay (Default: 0.1')
     train_set_group.add_argument('--epsilon_decay', type=int, default=200000, help='Number of steps to decay epsilon from start to end (Default: 200,000)')
+    
     train_set_group.add_argument('--use_softmax', action='store_true', help='Use softmax action selection instead of epsilon-greedy')
     train_set_group.add_argument('--softmax_temp', type=float, default=1.0, help='Temperature parameter for softmax action selection (Default: 1.0)')
+    
     train_set_group.add_argument('--use_noisy', action='store_true', help='Use noisy layers in the network')
     train_set_group.add_argument('--target_with_noisy', action='store_true', help='Use noisy layers in the target network') 
     
     # State pre-processing 설정
     train_set_group.add_argument('--grid_map_size', type=int, default=51, help='Network input으로 넣어주는 grid map의 height와 width를 설정')
     train_set_group.add_argument('--do_normalize', action='store_true', help='Do normalize on grid map data')
-    # train_set_group.add_argument('--grid_map_mean', type=float, default=0.0, help='Target mean for normalizing grid map data (default: 0.0)')
-    # train_set_group.add_argument('--grid_map_std', type=float, default=1.0, help='Target std for normalizing grid map data (default: 1.0)')
     
     # Q-value 관련 설정
     train_set_group.add_argument('--gamma', type=float, default=0.99, help='Discount factor for future rewards (default: 0.99)')
@@ -378,6 +379,7 @@ class TrainDQN():
                             raise ValueError(f"Unsupported optimizer type: {args.optimizer}")
 
                     self.total_steps = checkpoint_data['total_steps']
+                    self.no_warmup_steps = checkpoint_data['no_warmup_steps']
                     self.start_episode = checkpoint_data['episode'] + 1
                     self.best_coverage_mean = checkpoint_data['best_coverage_mean']
                     
@@ -455,6 +457,7 @@ class TrainDQN():
                 'optimizer_state_dict': self.optimizer.state_dict(),
                 'episode_reward': episode_reward,
                 'total_steps': self.total_steps,
+                'no_warmup_steps': self.no_warmup_steps,
                 'best_coverage_mean': self.best_coverage_mean,
             }
                 
@@ -463,7 +466,6 @@ class TrainDQN():
             
         else:
             raise ValueError(f"Unsupported mode: {mode}. Expected 'model' or 'checkpoint'.")
-        
         
     def _get_action(self, env: DQNCoverageEnv, state, action_mask, mode='test', options=None) -> int:
         
@@ -493,39 +495,42 @@ class TrainDQN():
                 action = masked_q_values.argmax().item()
             
             return action
- 
-        action = None
+        
         if mode == 'train':
+            
+            # options 인자 받기
             assert options is not None
-            epsilon = options['epsilon']
             warmup = options['warmup']
             last_action = options['last_action']
             last_collision = options['last_collision']
             
-            # 이전 step에서 collision이 일어났으면 이전 step에서 수행한 action을 제외하고 action을 랜덤 선택: Warmup인 경우에도 똑같이 수행
+            # 1. 이전 step에서 collision이 일어났으면 이전 step에서 수행한 action을 제외하고 action을 랜덤 선택: Warmup인 경우에도 똑같이 수행
             if last_collision and last_action is not None: 
                 all_actions = list(range(env.action_space.n))
                 if last_action in all_actions:
                     all_actions.remove(last_action)
-                action = self.train_rng.choice(all_actions)
+                return self.train_rng.choice(all_actions)
             
-            # # Warmup 상황인 경우 action을 random하게 뽑음
-            elif warmup: 
-                action = env.action_space.sample()
+            # 2. Warmup 상황인 경우 action을 random하게 뽑음
+            if warmup: 
+                return env.action_space.sample()
                 
-            # Warmup이 아닌 경우 epsilon 기법으로 action 선택
-            elif self.train_rng.random() < epsilon:
-                action = env.action_space.sample()
-            else:
-                action = _get_greedy_action(use_softmax=self.train_cfg.use_softmax)
+            # 3. Epsilon 기법을 사용하는 경우
+            if self.train_cfg.use_epsilon: 
+                
+                # Epsilon 결정: Step 수가 늘어날수록 epsilon을 점점 줄임. Warmup 과정에서는 유지
+                epsilon = max(self.train_cfg.epsilon_end, self.train_cfg.epsilon_start-self.no_warmup_steps/self.train_cfg.epsilon_decay)
+                if self.train_rng.random() < epsilon:
+                    return env.action_space.sample()
+            
+            # 4. 그 외에는 전부 greedy action을 사용
+            return _get_greedy_action(use_softmax=self.train_cfg.use_softmax)
         
         elif mode == 'test':
-            action = _get_greedy_action(use_softmax=False)
+            return _get_greedy_action(use_softmax=False)
         
         else:
             raise ValueError(f"Unsupported mode: {mode}. Expected 'train' or 'test'.")
-        
-        return action
         
     def _pre_process_obs(self, obs, target_dim=51) -> dict:
         """
@@ -771,13 +776,8 @@ class TrainDQN():
                 action_mask = torch.from_numpy(processed_obs['action_mask']).to(self.device).unsqueeze(0)
                 state = {"map": map_tensor, "vec": vec_tensor}
                 
-                # FIXME: model을 load할 때 self.no_warmup_steps를 받아야 함.
-                # Epsilon 결정: Step 수가 늘어날수록 epsilon을 점점 줄임. Warmup 과정에서는 유지
-                epsilon = max(self.train_cfg.epsilon_end, self.train_cfg.epsilon_start-self.no_warmup_steps/self.train_cfg.epsilon_decay)
-                
                 # Action 선택: Warmup 중에는 100% random, 그 이후에는 epsilon 기법 사용
                 action_options = {
-                    "epsilon": epsilon,
                     "warmup": warmup,
                     "last_action": last_action,
                     "last_collision": last_collision,
