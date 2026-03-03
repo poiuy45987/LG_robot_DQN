@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
 
 class NoisyLinear(nn.Module):
     
@@ -161,3 +162,17 @@ class CNN_ReDQN(nn.Module):
         for m in self.modules():
             if isinstance(m, NoisyLinear):
                 m.reset_noise()
+    
+    def get_sigma_data(self) -> dict:
+        """네트워크 내 모든 Noisy Layer의 sigma 통계량을 반환"""
+        stats = {}
+        for name, module in self.named_modules():
+            # NoisyLinear 층인지 확인 (클래스 이름을 직접 체크하거나 isinstance 사용)
+            if hasattr(module, 'weight_sigma'): 
+                w_sigma = module.weight_sigma.detach().abs().mean().item()
+                b_sigma = module.bias_sigma.detach().abs().mean().item()
+                
+                # 레이어 이름이 너무 길면 보기 힘드니 적절히 가공
+                stats[f"sigma/{name}_w"] = w_sigma
+                stats[f"sigma/{name}_b"] = b_sigma
+        return stats

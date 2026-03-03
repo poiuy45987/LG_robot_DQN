@@ -103,6 +103,7 @@ class DQNCoverageEnv(gym.Env):
         # ------------------------
         
         # ---- 5. Coverage 관련 변수 ----
+        self.coveraged_area = 0         # Cover한 영역의 넓이
         self.total_coverable_area = 0   # Coverable 영역을 계산
         self.last_coverage = 0.0        # 이전 step에서의 coverage 비율(Step 시도 시 coverate가 증가하는지 여부를 관찰하기 위함)
         self.no_progress_cnt = 0        # 이전 step에 비해 coverage가 증가하지 않은 횟수를 세는 변수. 그 횟수가 일정 이상이 되면 truncated
@@ -220,68 +221,77 @@ class DQNCoverageEnv(gym.Env):
         # never count obstacle cells
         coverable &= (self.obstacles == 0).astype(np.uint8)
         return coverable
+    
+    
+    def _mark_trajectory(self, cx: int, cy: int, flag: bool=True) -> tuple[int, float, bool]:
+        """
+        로봇 중심이 (cx, cy)일 때 cleaned_map에 발자국을 찍는 method
 
-    # Reward 출력 및 cover한 영역을 표시
-    def _apply_footprint_rewards(self, cx: int, cy: int):
+        Args:
+            cx, cy (int): 로봇 중심의 좌표
+            flag (bool): new_cleaned_num, revisit_degree의 계산 여부를 정함
+        Return:
+            tuple[int, bool]: 
+                - new_cleaned_num (int): 새롭게 cover한 grid 수
+                - revisit_degree (float): 로봇 청소기가 현재 위치한 영역을 이전에 얼마나 청소했는지 표시하는 인자. 
+                    1.0 이상이면 영역의 grid 모두가 이전에 청소한 적이 있음. 숫자가 클수록 더 자주 청소했다는 의미
+                - collided (bool): 충돌 여부
+        """
         
-        reward = 0.0
+        new_cleaned_num = 0
+        revisit_degree = 0.0
         
+        # 1. 중심 좌표가 맵을 벗어나는 경우
         if not self._in_bounds_center(cx, cy):
-            return float(self.cfg.obstacle_penalty), True
+            return new_cleaned_num, revisit_degree, True
         
-        # xs, ys = self._get_footprint_coords(cx, cy)
+        # 2. 로봇이 장애물과 충돌하는 경우
         if self._collides(cx, cy):
-            return float(self.cfg.obstacle_penalty), True
-        else:
-            xs, ys = self._get_footprint_coords(cx, cy)
-            
-            # 청소되지 않은 pixel이 있으면 새롭게 cover한 pixel 수에 비례하게 reward를 추가
-            new_cleaned_grid_num = ((self.cleaned[ys, xs] == 0) & (self.coverable[ys, xs] == 1)).sum()
-            
-            if new_cleaned_grid_num > 0:
-                self.cleaned[ys, xs] = 1 # cleaned_layer에 cover한 영역을 표시
-                reward += float(new_cleaned_grid_num * self.cfg.uncleaned_reward)
-            else: # 이미 모든 pixel이 청소되어 있는 경우 penalty 부여
-                reward += float(self.cfg.cleaned_penalty)
-            
-            reward += float(self.cfg.step_penalty) # Step penalty 추가
-            
-            return reward, False
-
-        # if (self.obstacles[ys, xs] == 1).any():
-        #     return float(self.cfg.obstacle_penalty), True
-
-        # cleaned_vals = self.cleaned[ys, xs]
-
-        # # reward only for coverable cells
-        # if self.coverable is None:
-        #     mask = np.ones_like(cleaned_vals, dtype=np.uint8)
-        # else:
-        #     mask = (self.coverable[ys, xs] == 1)
-
-        # newly = ((cleaned_vals == 0) & mask).astype(bool)
-        # already = ((cleaned_vals == 1) & mask).astype(bool)
-
-        # reward = newly.sum() * self.cfg.uncleaned_reward + already.sum() * self.cfg.cleaned_penalty
-        # self.cleaned[ys[newly], xs[newly]] = 1
+            return new_cleaned_num, revisit_degree, True
         
-        # return float(reward), False
+        # 3. 일반적인 경우
+        xs, ys = self._get_footprint_coords(cx, cy)
+        if flag:
+            new_cleaned_num = ((self.cleaned[ys, xs] == 0) & (self.coverable[ys, xs] == 1)).sum()
+            revisit_degree = float(self.cleaned[ys, xs].sum() / self.robot_area)
+        self.cleaned[ys, xs] = np.where(self.cleaned[ys, xs] < 255, self.cleaned[ys, xs]+1, 255) # cleaned_map update: Overflow 고려
+        return new_cleaned_num, revisit_degree, False
 
 
-    def _coverage(self) -> float:
+    @property
+    def coverage(self) -> float:
+        
         if self.coverable is None:
             free = (self.obstacles == 0)
             total = int(free.sum())
             if total == 0:
                 return 0.0
-            cleaned_free = int((self.cleaned & free).sum())
+            cleaned_mask = (self.cleaned > 0)
+            cleaned_free = int((cleaned_mask & free).sum())
             return cleaned_free / total
 
         if self.total_coverable_area == 0:
             return 0.0
         
-        cleaned_coverable = int((self.cleaned & self.coverable).sum())
-        return cleaned_coverable / self.total_coverable_area
+        return float(self.coveraged_area / self.total_coverable_area)
+    
+    
+    # def coverage(self) -> float:
+    #     if self.coverable is None:
+    #         free = (self.obstacles == 0)
+    #         total = int(free.sum())
+    #         if total == 0:
+    #             return 0.0
+    #         cleaned_mask = (self.cleaned > 0)
+    #         cleaned_free = int((cleaned_mask & free).sum())
+    #         return cleaned_free / total
+
+    #     if self.total_coverable_area == 0:
+    #         return 0.0
+        
+    #     cleaned_mask = (self.cleaned > 0)
+    #     cleaned_coverable = int((cleaned_mask & self.coverable).sum())
+    #     return cleaned_coverable / self.total_coverable_area
 
 
     def _ray_distance_forward(self, cx: int, cy: int, d: int) -> int:
@@ -376,7 +386,7 @@ class DQNCoverageEnv(gym.Env):
         ray_norm = (ray_norm / max(1, self.max_forward))*2-1
         
         # Coverage 비율: [0, 1] 범위의 숫자를 [-1, 1] 범위로 정규화
-        cov = self._coverage()
+        cov = self.coverage
         cov_norm = cov*2-1
 
         obs_vec = np.concatenate([
@@ -423,12 +433,13 @@ class DQNCoverageEnv(gym.Env):
                 raise ValueError("Obstacles were not removed before forced robot placement.")
         self.dir = int(self.env_rng.integers(0, 4))
         
-        # Coverable grid를 계산 (Training 시에도 이용)
+        # Coverable grid를 계산
         self.reachable = self._compute_reachable_centers(*self.pos)
         self.coverable = self._compute_coverable_cells_from_reachable(self.reachable)
-        _, _ = self._apply_footprint_rewards(cx, cy) # cleaned_layer에 robot이 cover한 영역을 표시
-        self.total_coverable_area = int(self.coverable.sum())
-        self.last_coverage = self._coverage()
+        new_cleaned_num, _, _ = self._mark_trajectory(cx, cy) # cleaned_layer에 robot이 cover한 영역을 표시
+        self.coveraged_area = new_cleaned_num # Cover된 영역의 넓이
+        self.total_coverable_area = int(self.coverable.sum()) # Cover할 수 있는 영역의 넓이
+        self.last_coverage = self.coverage
         self.no_progress_cnt = 0
         
         self.steps = 0
@@ -448,31 +459,57 @@ class DQNCoverageEnv(gym.Env):
         collision = False
         success = False
 
-        # ---- 다음 위치로 이동: Collision이 일어나면 더 나아가지 않음 ----
+        ############### 다음 위치로 이동: Collision이 일어나면 더 나아가지 않음 ###############
         # Collision이 일어나면, collision 사실을 info에 넣어 알리기만 하고 더 나아가지 않음
         # 이 작업은 training 시와 test 시에 동일하게 동작함.
         dx, dy = self.dir_vecs[action]
         cx, cy = self.pos
         nx, ny = int(cx + dx), int(cy + dy)
         
-        reward, collided = self._apply_footprint_rewards(nx, ny) # 다음 위치로 이동할 때의 reward와 충돌 여부를 얻음
-        if self.dir != action: # 이전에 진행한 step과 다른 방향으로 진행한 경우
-            reward += self.cfg.turn_penalty
+        # ------------------------------------------------------------
+        # [REWARD FUNCTION]
+        # ------------------------------------------------------------
+        new_cleaned_num, revisit_degree, collided = self._mark_trajectory(nx, ny) # 다음 위치로 이동하면서 trajectory를 표시하고 새롭게 cover한 grid 수와 충돌 여부를 얻음
+        self.coveraged_area += new_cleaned_num
+        
+        # 1. Step penalty
+        reward -= self.cfg.step_penalty
+        
+        if collided:
+            # 2. Obstacle penalty
+            reward -= self.cfg.obstacle_penalty            
+        else:
+            if new_cleaned_num > 0:
+                # 3. Cover reward
+                reward += self.cfg.uncleaned_reward * new_cleaned_num
+                reward += self.coverage * self.cfg.step_penalty # 새로운 grid를 cover하면 step_penalty를 완화
+            else:
+                # 4. Cleaned grid penalty
+                reward -= revisit_degree * self.cfg.cleaned_penalty
+            
+        # 5. Turn penalty
+        if self.dir != action: 
+            reward -= self.cfg.turn_penalty
+        
+        # 6. Complete reward
+        if self.coverage >= self.cfg.target_coverage:
+            reward += self.cfg.complete_reward
+        # ------------------------------------------------------------
         
         if collided:
             collision = True
             self.collision_count += 1
-            reward = self.cfg.obstacle_penalty
             nx, ny = cx, cy # 충돌이 일어나면 로봇을 움직이지 않음
-        cx, cy = nx, ny
+        cx, cy = nx, ny # 위치 update
+        self.dir = action # 방향 update
         self.pos = (cx, cy)
         self.traj.append(self.pos) # 충돌이 일어났더라도 self.traj에 좌표를 저장
-        # ---------------------------------------------------------
+        ############################################################################
         
         # ---- Terminate과 Truncated 조건 ----
         # Terminate: Coverage를 성공한 경우 & Collision이 일어난 경우
         # Truncate: 전체 step 수가 max_steps를 넘은 경우 & Coverage가 증가하지 않는 상태로 일정 이상의 step을 수행한 경우
-        cur_coverage = self._coverage()
+        cur_coverage = self.coverage
         # Coverage가 더 이상 증가하지 않은 step 수를 셈
         if cur_coverage > self.last_coverage:
             self.no_progress_cnt = 0
@@ -529,7 +566,7 @@ class DQNCoverageEnv(gym.Env):
 
         # cleaned
         # 현재 로봇 위치를 점으로 찍음
-        axes[0, 1].imshow(self.cleaned, cmap='gray_r', origin='lower')
+        axes[0, 1].imshow(self.cleaned, cmap='hot', origin='lower')
         cx, cy = self.pos
         axes[0, 1].plot(cx, cy, 'r.') # 로봇 위치를 빨간 점으로 표시
         axes[0, 1].set_title(f"Cleaned Area (Coverage: {self.last_coverage:.2%})")
@@ -654,7 +691,6 @@ class DQNCoverageEnv(gym.Env):
         # ---------------------------------------------
         
         self.fig.tight_layout()
-    
     
     def get_visualized_img(self, img_choice: str = 'traj') -> np.ndarray:
 

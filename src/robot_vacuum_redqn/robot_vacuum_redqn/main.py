@@ -151,6 +151,7 @@ def parse_args():
     env_set_group.add_argument('--obstacle_penalty', type=float, default=-10.0, help='Obstalce penalty (Default: -10.0)')
     env_set_group.add_argument('--turn_penalty', type=float, default=-0.1, help='Turning penalty (Default: -0.1)')
     env_set_group.add_argument('--step_penalty', type=float, default=-0.01, help='Step penalty (Default: -0.01)')
+    env_set_group.add_argument('--complete_reward', type=float, default=10.0, help='Complete_reward (Default: 10.0)')
     # -----------------------------
     
     args = parser.parse_args()
@@ -850,12 +851,14 @@ class TrainDQN():
                     self.optimizer.step()
                     
                     # TensorBoard 또는 wandb 기록
+                    sigma_logs = self.policy_net.get_sigma_data()
                     if self.tb_writer:
                         self.tb_writer.add_scalar("Train/Loss", loss.item(), self.total_steps)
                         self.tb_writer.add_scalar("Train/Q_value_mean", curr_q.mean().item(), self.total_steps)
                     if self.wandb_run:
                         self.wandb_run.log({"Train/Loss": loss.item(),
-                                            "Train/Q_value_mean": curr_q.mean().item()}, step=self.total_steps)
+                                            "Train/Q_value_mean": curr_q.mean().item()}, 
+                                            **sigma_logs, step=self.total_steps)
                     if self.args.use_vessl:
                         vessl.log(step=self.total_steps, 
                                            payload={"Train/Loss": loss.item(), 
@@ -906,7 +909,8 @@ class TrainDQN():
                     vessl.log(step=episode, payload={"Visualization/Robot_path": vessl.Image(map_img)})
             
             # Episode 결과 출력        
-            print(f"Episode: {episode}, Warmup: {warmup}, Reward: {episode_reward:.2f}, Steps: {steps}, Total_steps: {self.total_steps}, Epsilon: {epsilon:.3f}", flush=True)
+            print(f"Episode: {episode}, Warmup: {warmup}, Reward: {episode_reward:.2f}, Steps: {steps}, Total_steps: {self.total_steps}", flush=True)
+                  
             if not warmup:
                 print(f"\tLoss: {loss:.2f}", flush=True)
 

@@ -151,10 +151,11 @@ class EnvConfig:
     
     # Reward function parameter (footprint-based)
     uncleaned_reward: float = 1.0
-    cleaned_penalty: float = -0.1
-    obstacle_penalty: float = -10.0
-    turn_penalty: float = -0.1
-    step_penalty: float = -0.01
+    cleaned_penalty: float = 0.1
+    obstacle_penalty: float = 10.0
+    turn_penalty: float = 0.1
+    step_penalty: float = 0.01
+    complete_reward: float = 1.0
     
     def _to_grid(self, value: float) -> int:
         """cm 단위를 grid 단위로 변환 (최소 1 그리드 보장)"""
@@ -204,16 +205,16 @@ class EnvConfig:
             raise ValueError(f"local_view({self.local_view}) is too big. It should be smaller than {min(self.map_height, self.map_width)}.")
         
         # 5. Reward 수치 경고
-        if self.uncleaned_reward <= 0:
-            warnings.warn(f"uncleaned_reward({self.uncleaned_reward}) is negative. It should be positive value.")
-        if self.cleaned_penalty >= 0:
-            warnings.warn(f"cleaned_penalty({self.cleaned_penalty}) is positive. It should be negative value.")
-        if self.obstacle_penalty >= 0:
-            warnings.warn(f"obstacle_penalty({self.obstacle_penalty}) is positive. It should be negative value.")
-        if self.turn_penalty >= 0:
-            warnings.warn(f"turn_penalty({self.turn_penalty}) is positive. It should be negative value.")
-        if self.step_penalty >= 0:
-            warnings.warn(f"step_penalty({self.step_penalty}) is positive. It should be negative value.")          
+        if self.uncleaned_reward < 0:
+            warnings.warn(f"uncleaned_reward({self.uncleaned_reward}) is negative. All reward hyperparameters should be positive value.")
+        if self.cleaned_penalty < 0:
+            warnings.warn(f"cleaned_penalty({self.cleaned_penalty}) is negative. All reward hyperparameters should be positive value.")
+        if self.obstacle_penalty < 0:
+            warnings.warn(f"obstacle_penalty({self.obstacle_penalty}) is negative. All reward hyperparameters should be positive value.")
+        if self.turn_penalty < 0:
+            warnings.warn(f"turn_penalty({self.turn_penalty}) is negative. All reward hyperparameters should be positive value.")
+        if self.step_penalty < 0:
+            warnings.warn(f"step_penalty({self.step_penalty}) is negative. All reward hyperparameters should be positive value.")          
     
     def __post_init__(self):
         
