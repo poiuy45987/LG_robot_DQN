@@ -97,6 +97,7 @@ class DQNCoverageEnv(gym.Env):
         self.H = cfg.H; self.W = cfg.W
         self.obstacles = None     # 장애물의 위치를 표시하는 layer: uint8 [H,W] (장애물: 1, 빈 공간: 0)
         self.cleaned = None       # 로봇이 청소한 grid를 표시하는 layer: uint8 [H,W] (Cleaned: 1, Uncleaned: 0)
+        self.visited = None       # 로봇의 중심이 지나갔던 grid를 표시하는 layer: uint8 [H,W] (방문한 수를 표시)
         self.collision_map = None # Obstacle dilated map: uint8 [H,W] (Dilated obstacles: 1, 빈 공간: 0)
         self.reachable = None     # Reachable robot centers: uint8 [H,W] (Reachable center: 1, Unreachable center: 0)
         self.coverable = None     # Coverable cells: uint8 [H,W] (Coverable grid: 1, Uncoverable grid: 0)
@@ -222,8 +223,8 @@ class DQNCoverageEnv(gym.Env):
         coverable &= (self.obstacles == 0).astype(np.uint8)
         return coverable
     
-    
-    def _mark_trajectory(self, cx: int, cy: int, flag: bool=True) -> tuple[int, float, bool]:
+    # FIXME: revisit_degree 삭제할지 결정. 주석에서도 삭제
+    def _mark_trajectory(self, cx: int, cy: int, flag: bool=True) -> tuple[int, bool]:
         """
         로봇 중심이 (cx, cy)일 때 cleaned_map에 발자국을 찍는 method
 
@@ -233,29 +234,34 @@ class DQNCoverageEnv(gym.Env):
         Return:
             tuple[int, bool]: 
                 - new_cleaned_num (int): 새롭게 cover한 grid 수
+                - collided (bool): 충돌 여부
+            
+            삭제한 return:
                 - revisit_degree (float): 로봇 청소기가 현재 위치한 영역을 이전에 얼마나 청소했는지 표시하는 인자. 
                     1.0 이상이면 영역의 grid 모두가 이전에 청소한 적이 있음. 숫자가 클수록 더 자주 청소했다는 의미
-                - collided (bool): 충돌 여부
         """
         
         new_cleaned_num = 0
-        revisit_degree = 0.0
+        # revisit_degree = 0.0
         
         # 1. 중심 좌표가 맵을 벗어나는 경우
         if not self._in_bounds_center(cx, cy):
-            return new_cleaned_num, revisit_degree, True
+            return new_cleaned_num, True
         
         # 2. 로봇이 장애물과 충돌하는 경우
         if self._collides(cx, cy):
-            return new_cleaned_num, revisit_degree, True
+            return new_cleaned_num, True
         
         # 3. 일반적인 경우
         xs, ys = self._get_footprint_coords(cx, cy)
         if flag:
             new_cleaned_num = ((self.cleaned[ys, xs] == 0) & (self.coverable[ys, xs] == 1)).sum()
-            revisit_degree = float(self.cleaned[ys, xs].sum() / self.robot_area)
-        self.cleaned[ys, xs] = np.where(self.cleaned[ys, xs] < 255, self.cleaned[ys, xs]+1, 255) # cleaned_map update: Overflow 고려
-        return new_cleaned_num, revisit_degree, False
+            # revisit_degree = float(self.cleaned[ys, xs].sum() / self.robot_area)
+        # self.cleaned[ys, xs] = np.where(self.cleaned[ys, xs] < 255, self.cleaned[ys, xs]+1, 255) # cleaned_map update: Overflow 고려
+        self.cleaned[ys, xs] = 1 # cleaned_map은 무조건 1로만 덮어씌움
+        self.visited[cy, cx] = self.visited[cy, cx]+1 if self.visited[cy, cx] < 255 else 255 # visited_map은 다시 방문할 때마다 1을 추가 (Overflow 고려)
+        
+        return new_cleaned_num, False
 
 
     @property
@@ -313,6 +319,17 @@ class DQNCoverageEnv(gym.Env):
             return len(line) # 장애물이 없으면 최대 거리 반환
 
     def _crop_patch(self, arr: np.ndarray, cx: int, cy: int, value: int | list | tuple = 0) -> np.ndarray:
+        """
+        전체 map data에서 local map data를 뽑는 method
+
+        Args:
+            arr (np.ndarray): 전체 map data, Shape: (C, H, W) or (H, W)
+            cx, cy (int): Local map 중심의 좌표
+            value (int | list | tuple, optional): 각 채널에서 local data를 뽑을 때 padding value. 채널 순서대로 지정
+
+        Returns:
+            np.ndarray: Local map data, Shape: (C, H, W) or (H, W)
+        """
         
         r = self.local_view//2
         px, py = cx+r, cy+r
@@ -363,10 +380,10 @@ class DQNCoverageEnv(gym.Env):
     def _get_obs(self):
         
         cx, cy = self.pos
-        # 로봇의 위치가 표시된 agent_layer 생성 후 local_map 정보를 담음
-        agent_layer = self._get_agent_layer(cx, cy)
-        full_layer = np.stack([agent_layer, self.cleaned, self.obstacles], axis=0)
-        patch = self._crop_patch(full_layer, cx, cy, value=[0, 0, 1])
+        
+        # local_map 정보가 담긴 patch를 얻음
+        full_layer = np.stack([self.collision_map, self.cleaned, self.visited], axis=0)
+        patch = self._crop_patch(full_layer, cx, cy, value=[1, 0, 0])
         
         # 학습에 도움이 될 만한 수치적인 정보를 생성
         # 로봇의 위치 정보: [-1, 1]의 범위로 정규화
@@ -397,6 +414,45 @@ class DQNCoverageEnv(gym.Env):
         ], axis=0).astype(np.float32)
         
         return {"map": patch, "vec": obs_vec, 'action_mask': action_mask}
+    
+    # def _get_obs(self):
+        
+    #     cx, cy = self.pos
+        
+    #     # local_map 정보가 담긴 patch를 얻음
+    #     agent_layer = self._get_agent_layer(cx, cy)
+    #     full_layer = np.stack([agent_layer, self.cleaned, self.obstacles], axis=0)
+    #     patch = self._crop_patch(full_layer, cx, cy, value=[0, 0, 1])
+        
+    #     # 학습에 도움이 될 만한 수치적인 정보를 생성
+    #     # 로봇의 위치 정보: [-1, 1]의 범위로 정규화
+    #     x_norm = (cx/(self.W-1))*2-1
+    #     y_norm = (cy/(self.H-1))*2-1
+
+    #     # dir_onehot
+    #     dir_onehot = np.zeros(4, dtype=np.float32)
+    #     dir_onehot[self.dir] = 1.0
+
+    #     # 4방향에서 바라본 여유 공간: [-1, 1]이 범위로 정규화
+    #     ray_norm = np.zeros(4, dtype=np.float32)
+    #     for d in range(4):
+    #         ray_norm[d] = self._ray_distance_forward(cx, cy, d)
+    #     # 여유 공간을 보고 충돌할 수 있는 action을 제외하기 위한 action_mask를 생성
+    #     action_mask = (ray_norm != 0).astype(np.float32)
+    #     ray_norm = (ray_norm / max(1, self.max_forward))*2-1
+        
+    #     # Coverage 비율: [0, 1] 범위의 숫자를 [-1, 1] 범위로 정규화
+    #     cov = self.coverage
+    #     cov_norm = cov*2-1
+
+    #     obs_vec = np.concatenate([
+    #         np.array([x_norm, y_norm], dtype=np.float32),
+    #         dir_onehot,
+    #         ray_norm,
+    #         np.array([cov_norm], dtype=np.float32),
+    #     ], axis=0).astype(np.float32)
+        
+    #     return {"map": patch, "vec": obs_vec, 'action_mask': action_mask}
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed) # 난수 생성기 self.np_random가 생성됨. 첫 episode에는 seed 초기화가 일어남. 다음 episode부터는 seed 초기화를 수행하지 않음.(seed=None)
@@ -414,7 +470,8 @@ class DQNCoverageEnv(gym.Env):
             )
 
         # 청소된 grid를 표시하는 layer
-        self.cleaned = np.zeros((self.H, self.W), dtype=np.uint8) # 장애물도 청소한 grid로 간주
+        self.cleaned = np.zeros((self.H, self.W), dtype=np.uint8)
+        self.visited = np.zeros((self.H, self.W), dtype=np.uint8)
 
         # 출발 위치와 방향 선정: 동시에 self.cleaned에서 로봇이 차지하는 영역을 변환
         for _ in range(20000):
@@ -436,7 +493,7 @@ class DQNCoverageEnv(gym.Env):
         # Coverable grid를 계산
         self.reachable = self._compute_reachable_centers(*self.pos)
         self.coverable = self._compute_coverable_cells_from_reachable(self.reachable)
-        new_cleaned_num, _, _ = self._mark_trajectory(cx, cy) # cleaned_layer에 robot이 cover한 영역을 표시
+        new_cleaned_num, _ = self._mark_trajectory(cx, cy) # cleaned_layer에 robot이 cover한 영역을 표시
         self.coveraged_area = new_cleaned_num # Cover된 영역의 넓이
         self.total_coverable_area = int(self.coverable.sum()) # Cover할 수 있는 영역의 넓이
         self.last_coverage = self.coverage
@@ -469,7 +526,7 @@ class DQNCoverageEnv(gym.Env):
         # ------------------------------------------------------------
         # [REWARD FUNCTION]
         # ------------------------------------------------------------
-        new_cleaned_num, revisit_degree, collided = self._mark_trajectory(nx, ny) # 다음 위치로 이동하면서 trajectory를 표시하고 새롭게 cover한 grid 수와 충돌 여부를 얻음
+        new_cleaned_num, collided = self._mark_trajectory(nx, ny) # 다음 위치로 이동하면서 trajectory를 표시하고 새롭게 cover한 grid 수와 충돌 여부를 얻음
         self.coveraged_area += new_cleaned_num
         
         # 1. Step penalty
@@ -485,13 +542,17 @@ class DQNCoverageEnv(gym.Env):
                 reward += self.coverage * self.cfg.step_penalty # 새로운 grid를 cover하면 step_penalty를 완화
             else:
                 # 4. Cleaned grid penalty
-                reward -= revisit_degree * self.cfg.cleaned_penalty
+                revisit_count = self.visited[ny, nx]-1 # 처음 방문은 제외
+                reward -= revisit_count * self.cfg.cleaned_penalty
+                
+                # 5. Intrinsic reward
+                reward += self.cfg.intrinsic_reward * np.exp(-revisit_count)
             
-        # 5. Turn penalty
+        # 6. Turn penalty
         if self.dir != action: 
             reward -= self.cfg.turn_penalty
         
-        # 6. Complete reward
+        # 7. Complete reward
         if self.coverage >= self.cfg.target_coverage:
             reward += self.cfg.complete_reward
         # ------------------------------------------------------------
@@ -566,17 +627,17 @@ class DQNCoverageEnv(gym.Env):
 
         # cleaned
         # 현재 로봇 위치를 점으로 찍음
-        axes[0, 1].imshow(self.cleaned, cmap='hot', origin='lower')
+        axes[0, 1].imshow(self.cleaned, cmap='gray_r', origin='lower')
         cx, cy = self.pos
         axes[0, 1].plot(cx, cy, 'r.') # 로봇 위치를 빨간 점으로 표시
         axes[0, 1].set_title(f"Cleaned Area (Coverage: {self.last_coverage:.2%})")
         
-        # agent_layer
+        # visited
         # 현재 로봇 위치를 점으로 찍음
-        axes[1, 1].imshow(agent_layer, cmap='gray_r', origin='lower')
+        axes[1, 1].imshow(self.visited, cmap='gray_r', origin='lower')
         cx, cy = self.pos
         axes[1, 1].plot(cx, cy, 'r.') # 로봇 위치를 빨간 점으로 표시
-        axes[1, 1].set_title(f"Agent layer")
+        axes[1, 1].set_title(f"Visited layer")
         
         # reachable
         axes[0, 2].imshow(self.reachable, cmap='gray_r', origin='lower')
@@ -591,25 +652,28 @@ class DQNCoverageEnv(gym.Env):
     def _draw_traj(self):
         
         self.fig.clear() # 이전 그림 지우기
-        self.fig.set_size_inches(8, 8)
+        self.fig.set_size_inches(18, 8)
         agent_layer = self._get_agent_layer(*self.pos)
         
-        ax = self.fig.add_subplot(1, 1, 1)
+        ax1 = self.fig.add_subplot(1, 2, 1) # 장애물, cleaned 영역, 로봇이 움직인 경로 등을 보여줌
+        ax2 = self.fig.add_subplot(1, 2, 2) # 장애물, visited map을 보여줌. 로봇이 같은 지점을 얼마나 자주 방문했는지 보여줌.
         
-        # Map에서 시각화
-        total_map = np.zeros_like(self.obstacles)
-        total_map[self.coverable == 0] = 4 # Cover 불가능한 영역을 칠함
-        total_map[self.obstacles == 1] = 1 # Obstacle 표시
-        total_map[self.cleaned == 1] = 2   # Cleaned 영역 표시
-        total_map[agent_layer == 1] = 3    # 현재 로봇 위치 표시
+        # --------------------------------------------------------------------
+        # [Trajectory map 시각화]
+        # --------------------------------------------------------------------
+        traj_map = np.zeros_like(self.obstacles)
+        traj_map[self.coverable == 0] = 4 # Cover 불가능한 영역을 칠함
+        traj_map[self.obstacles == 1] = 1 # Obstacle 표시
+        traj_map[self.cleaned > 0] = 2   # Cleaned 영역 표시
+        traj_map[agent_layer == 1] = 3    # 현재 로봇 위치 표시
         custom_cmap = ListedColormap(['white', 'black', 'yellow', 'red', 'blue'])
-        ax.imshow(total_map, cmap=custom_cmap, origin='lower', vmin=0, vmax=4)
+        ax1.imshow(traj_map, cmap=custom_cmap, origin='lower', vmin=0, vmax=4)
         # 로봇이 움직인 궤적 표시
         if len(self.traj) > 1:
             traj_arr = np.array(self.traj)
-            ax.plot(traj_arr[:, 0], traj_arr[:, 1], color='lime', linewidth=1.5, alpha=0.8, zorder=5)
-            ax.plot(traj_arr[0, 0], traj_arr[0, 1], color='purple', marker='o', zorder=6)
-        legend_elements = [
+            ax1.plot(traj_arr[:, 0], traj_arr[:, 1], color='lime', linewidth=1.5, alpha=0.8, zorder=5)
+            ax1.plot(traj_arr[0, 0], traj_arr[0, 1], color='purple', marker='o', zorder=6)
+        legend_elements_1 = [
             Patch(facecolor='black', edgecolor='black', label='Obstacles'),
             Patch(facecolor='yellow', edgecolor='yellow', label='Cleaned region'),
             Patch(facecolor='red', edgecolor='red', label='Robot'),
@@ -617,9 +681,53 @@ class DQNCoverageEnv(gym.Env):
             Line2D([0], [0], color='lime', lw=1.5, label='Trajectory'),
             Line2D([0], [0], marker='o', color='purple', label='Start_pos', markerfacecolor='purple', linestyle='None'),
         ]
-        ax.legend(handles=legend_elements, loc='upper left', bbox_to_anchor=(1.05, 1))
-        ax.set_title(f"Coverage: {self.last_coverage:.2f}")
-        ax.text(0, -0.1, f"Path length: {len(self.traj)}", transform=ax.transAxes, ha="left", va="top", fontsize=11, color='black')
+        ax1.legend(handles=legend_elements_1, loc='upper left', bbox_to_anchor=(1.05, 1))
+        ax1.set_title(f"Coverage: {self.last_coverage:.2f}")
+        ax1.text(0, -0.1, f"Path length: {len(self.traj)}", transform=ax1.transAxes, ha="left", va="top", fontsize=11, color='black')
+        # --------------------------------------------------------------------
+        
+        # --------------------------------------------------------------------
+        # [Visited map 시각화]
+        # --------------------------------------------------------------------
+        
+        # Color 지정: RGB값
+        obs_c = [0, 0, 0]; unc_c = [0, 0, 1]
+        
+        img2 = ax2.imshow(self.visited, cmap='YlOrRd', origin='lower', vmin=0, vmax=10) # self.visited을 시각화
+        cbar = self.fig.colorbar(img2, ax=ax2, 
+                                 orientation='horizontal',
+                                 pad=0.1,
+                                 shrink=0.8,
+                                 aspect=30,
+                                 fraction=0.05) # colorbar 추가
+        cbar.set_label('Visit Count (Penalty Intensity)', fontsize=10)
+        
+        # Obstacle을 표시
+        obs_map = np.zeros((*self.visited.shape, 4)) # RGBA 형식
+        obs_map[self.obstacles == 1] = [*obs_c, 1]
+        ax2.imshow(obs_map, origin='lower')
+        
+        # Uncoverable 영역을 표시
+        unc_map = np.zeros((*self.visited.shape, 4)) # RGBA 형식
+        unc_map[self.coverable == 0] = [*unc_c, 1]
+        ax2.imshow(unc_map, origin='lower')
+        
+        # 시작 위치와 현재 위치 표시
+        if len(self.traj) > 1:
+            traj_arr = np.array(self.traj)
+            ax2.plot(traj_arr[0, 0], traj_arr[0, 1], color='purple', marker='o', zorder=3)
+            ax2.plot(traj_arr[-1, 0], traj_arr[-1, 1], color='green', marker='o', zorder=4)
+
+        legend_elements_2 = [
+            Patch(facecolor=obs_c, edgecolor=obs_c, label='Obstacles'),
+            Patch(facecolor=unc_c, edgecolor=unc_c, label='Uncoverable region'),
+            Line2D([0], [0], marker='o', color='purple', label='Start_pos', markerfacecolor='purple', linestyle='None'),
+            Line2D([0], [0], marker='o', color='green', label='Final_pos', markerfacecolor='green', linestyle='None'),
+        ]
+        ax2.legend(handles=legend_elements_2, loc='upper left', bbox_to_anchor=(1.05, 1))
+        ax2.set_title("Visited map")
+        # --------------------------------------------------------------------
+        
         self.fig.tight_layout()
         
     def _draw_obs(self):
@@ -642,19 +750,23 @@ class DQNCoverageEnv(gym.Env):
         ax3 = self.fig.add_subplot(gs[0, 2])
         axes = [ax1, ax2, ax3]
             
-        # obstacles
-        axes[0].imshow(obs['map'][2], cmap='gray_r', origin='lower')
+        # collision_map
+        img0 = axes[0].imshow(obs['map'][0], cmap='gray_r', origin='lower')
         axes[0].plot(H//2, W//2, 'r.')
-        axes[0].set_title("Obstacles local view")
+        axes[0].set_title("Collision_map local view")
         legend_elements0 = [
             Patch(facecolor='black', edgecolor='black', label='Obstacles'),
             Patch(facecolor='white', edgecolor='black', label='Free space'),
         ]
         axes[0].legend(handles=legend_elements0, loc='upper left', bbox_to_anchor=(0, -0.1))
+        # 그래프 위치를 맞추기 위한 가상의 colorbar
+        cbar_fake0 = self.fig.colorbar(img0, ax=axes[0], orientation='horizontal', 
+                                      pad=0.1, shrink=0.8, aspect=30, fraction=0.05)
+        cbar_fake0.ax.set_visible(False)
 
         # cleaned
         # 현재 로봇 위치를 점으로 찍음
-        axes[1].imshow(obs['map'][1], cmap='gray_r', origin='lower')
+        img1 = axes[1].imshow(obs['map'][1], cmap='gray_r', origin='lower')
         axes[1].plot(H//2, W//2, 'r.') # 로봇 위치를 빨간 점으로 표시
         axes[1].set_title("Cleaned map local view")
         legend_elements1 = [
@@ -662,17 +774,28 @@ class DQNCoverageEnv(gym.Env):
             Patch(facecolor='white', edgecolor='black', label='Uncovered space'),
         ]
         axes[1].legend(handles=legend_elements1, loc='upper left', bbox_to_anchor=(0, -0.1))
+        # 그래프 위치를 맞추기 위한 가상의 colorbar
+        cbar_fake1 = self.fig.colorbar(img1, ax=axes[1], orientation='horizontal', 
+                                      pad=0.1, shrink=0.8, aspect=30, fraction=0.05)
+        cbar_fake1.ax.set_visible(False)
         
-        # agent_layer
+        # visited
         # 현재 로봇 위치를 점으로 찍음
-        axes[2].imshow(obs['map'][0], cmap='gray_r', origin='lower')
+        img2 = axes[2].imshow(obs['map'][2], cmap='YlOrRd', origin='lower', vmin=0, vmax=10)
+        cbar = self.fig.colorbar(img2, ax=axes[2], 
+                                 orientation='horizontal',
+                                 pad=0.1,
+                                 shrink=0.8,
+                                 aspect=30,
+                                 fraction=0.05) # colorbar 추가
+        cbar.set_label('Visit Count (Penalty Intensity)', fontsize=10)
         axes[2].plot(H//2, W//2, 'r.') # 로봇 위치를 빨간 점으로 표시
-        axes[2].set_title(f"Agent layer local view")
-        legend_elements2 = [
-            Patch(facecolor='black', edgecolor='black', label='Robot'),
-            Patch(facecolor='white', edgecolor='black', label='Non-robot'),
-        ]
-        axes[2].legend(handles=legend_elements2, loc='upper left', bbox_to_anchor=(0, -0.1))
+        axes[2].set_title(f"Visited layer local view")
+        # legend_elements2 = [ # 그래프 높이를 맞추기 위한 가상의 범례
+        #     Patch(facecolor='none', edgecolor='none', label=' '),
+        #     Patch(facecolor='none', edgecolor='none', label=' '),
+        # ]
+        # axes[2].legend(handles=legend_elements2, loc='upper left', bbox_to_anchor=(0, -0.1), frameon=False)
         # -----------------------------
         
         # ---- obs의 vec data를 text 형식으로 출력하기 ----

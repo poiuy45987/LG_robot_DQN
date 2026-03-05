@@ -39,6 +39,9 @@ class TrainConfig: # Training과 관련된 설정들
     use_noisy: bool = False
     target_with_noisy: bool = False
     
+    # --- Action masking ---
+    use_action_masking: bool = False
+    
     # --- State pre-processing 및 Q-value ---
     grid_map_size: int = 51
     do_normalize: bool = False
@@ -156,6 +159,7 @@ class EnvConfig:
     turn_penalty: float = 0.1
     step_penalty: float = 0.01
     complete_reward: float = 1.0
+    intrinsic_reward: float = 1.0
     
     def _to_grid(self, value: float) -> int:
         """cm 단위를 grid 단위로 변환 (최소 1 그리드 보장)"""
@@ -214,7 +218,11 @@ class EnvConfig:
         if self.turn_penalty < 0:
             warnings.warn(f"turn_penalty({self.turn_penalty}) is negative. All reward hyperparameters should be positive value.")
         if self.step_penalty < 0:
-            warnings.warn(f"step_penalty({self.step_penalty}) is negative. All reward hyperparameters should be positive value.")          
+            warnings.warn(f"step_penalty({self.step_penalty}) is negative. All reward hyperparameters should be positive value.")
+        if self.complete_reward < 0:
+            warnings.warn(f"complete_reward({self.complete_reward}) is negative. All reward hyperparameters should be positive value.")        
+        if self.intrinsic_reward < 0:
+            warnings.warn(f"intrinsic_reward({self.intrinsic_reward}) is negative. All reward hyperparameters should be positive value.")
     
     def __post_init__(self):
         

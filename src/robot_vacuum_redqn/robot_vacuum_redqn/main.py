@@ -92,6 +92,9 @@ def parse_args():
     train_set_group.add_argument('--use_noisy', action='store_true', help='Use noisy layers in the network')
     train_set_group.add_argument('--target_with_noisy', action='store_true', help='Use noisy layers in the target network') 
     
+    # Action masking 설정
+    train_set_group.add_argument('--use_action_masking', action='store_true', help='Use action masking on training') 
+    
     # State pre-processing 설정
     train_set_group.add_argument('--grid_map_size', type=int, default=51, help='Network input으로 넣어주는 grid map의 height와 width를 설정')
     train_set_group.add_argument('--do_normalize', action='store_true', help='Do normalize on grid map data')
@@ -468,9 +471,26 @@ class TrainDQN():
         else:
             raise ValueError(f"Unsupported mode: {mode}. Expected 'model' or 'checkpoint'.")
         
-    def _get_action(self, env: DQNCoverageEnv, state, action_mask, mode='test', options=None) -> int:
-        
-        # action_mask는 greedy action을 선택할 때만 사용. Warmup, epsilon 탐험, collision 이후 랜덤 탐험 시에는 action_mask 적용 X
+    def _get_action(self, env: DQNCoverageEnv, state, action_mask, use_masking: bool=True, mode: str='test', **kwargs) -> int:
+        """
+        환경과 state가 주어졌을 때 action을 얻는 method
+
+        Args:
+            env (DQNCoverageEnv): action을 얻고자 하는 environment
+            state: Q-network에 통과시키기 위한 state
+            action_mask: 장애물에 충돌하는 action을 masking하기 위한 array
+            use_masking (bool, optional): Action masking을 진행할지 결정. Defaults to True.
+            mode (str, optional): 'train' 또는 'test' 중 선택할 mode를 결정. Defaults to 'test'.
+            **kwargs: 추가적인 설정
+                - warmup (bool): 현재가 buffer에 data를 쌓기 위한 warmup 과정인지 여부
+                - last_action (int): 이전 step에서 수행한 action. 이전 step에서 충돌이 일어났을 때 다음 action으로 이 action을 제외하기 위해 받음
+                - last_collision (bool): 이전 step에서 충돌했는지 여부.
+
+        Returns:
+            int: 선택한 action (0: E, 1: N, 2: W, 3: S)
+        """
+        # action_mask는 test 시에는 반드시 사용. training 시에는 masking 유무를 선택
+        # greedy action을 선택할 때만 사용. Warmup, epsilon 탐험, collision 이후 랜덤 탐험 시에는 action_mask 적용 X
         
         def _get_greedy_action(use_softmax=False) -> int:
             # Action을 Q-value로 뽑지 않더라도 일단 Q-value를 얻어서 관찰
@@ -483,16 +503,19 @@ class TrainDQN():
             # 사방이 막힌 경우
             if not torch.any(action_mask > 0):
                 return q_values.argmax().item()
+            
+            # Action masking 여부에 따라 action_mask를 수정
+            masked_q_values = q_values.clone()
+            if use_masking:
+                masked_q_values[action_mask == 0] = -1e9
                 
             if use_softmax:
-                masked_q_values = q_values + (1-action_mask)*-1e9 # mask==0.0인 곳은 매우 작은 수를 더하여 확률을 0에 가깝게 만듦
                 probs = F.softmax(masked_q_values / self.train_cfg.softmax_temp, dim=1).cpu().numpy().flatten() # 확률값 계산
-                probs[action_mask.cpu().numpy().flatten() == 0] = 0  # action_mask가 0인 곳은 확률을 0으로 만듦
+                if use_masking:
+                    probs[action_mask.cpu().numpy().flatten() == 0] = 0  # action_mask가 0인 곳은 확률을 0으로 만듦
                 probs = probs / (probs.sum() + 1e-8) # 확률 합이 1이 안 될 경우를 대비해 normalize (안전장치)
                 action = self.train_rng.choice(len(probs), p=probs)
             else:
-                masked_q_values = q_values.clone()
-                masked_q_values[action_mask == 0] = -1e9
                 action = masked_q_values.argmax().item()
             
             return action
@@ -500,10 +523,9 @@ class TrainDQN():
         if mode == 'train':
             
             # options 인자 받기
-            assert options is not None
-            warmup = options['warmup']
-            last_action = options['last_action']
-            last_collision = options['last_collision']
+            warmup = kwargs.get('warmup', False)
+            last_action = kwargs.get('last_action', None)
+            last_collision = kwargs.get('last_collision', False)
             
             # 1. 이전 step에서 collision이 일어났으면 이전 step에서 수행한 action을 제외하고 action을 랜덤 선택: Warmup인 경우에도 똑같이 수행
             if last_collision and last_action is not None: 
@@ -534,8 +556,7 @@ class TrainDQN():
             raise ValueError(f"Unsupported mode: {mode}. Expected 'train' or 'test'.")
         
     def _pre_process_obs(self, obs, target_dim=51) -> dict:
-        """
-        """
+        
         # map data 변환: H와 W를 target_dim으로 변환
         hwc_map = np.transpose(obs['map'], (1, 2, 0)) # obs의 map data가 (C, H, W) 형태이므로 이를 (H, W, C) 형태로 변환
         resized_hwc_map = cv2.resize(hwc_map, (target_dim, target_dim), interpolation=cv2.INTER_NEAREST)
@@ -621,13 +642,16 @@ class TrainDQN():
         
         # [1] 디버그 모드일 때 사용할 도화지(fig)를 미리 딱 한 번만 만듭니다.
         if debug:
-            fig, axes = plt.subplots(1, 2, figsize=(12, 5))
+            fig, axes = plt.subplots(2, 1, figsize=(18, 18))
+            # 초기 이미지
+            init_traj_img = env.get_visualized_img(img_choice='traj')
+            init_obs_img = env.get_visualized_img(img_choice='obs')
             # 초기 빈 이미지 설치
-            im_traj = axes[0].imshow(np.zeros((self.args.grid_map_size, self.args.grid_map_size, 3)))
-            im_obs = axes[1].imshow(np.zeros((self.args.grid_map_size, self.args.grid_map_size, 3)))
-            text_traj = axes[0].text(0.5, -0.15, "", transform=axes[0].transAxes, ha="center", fontsize=11, color='black')
-            axes[0].set_title("Trajectory")
-            axes[1].set_title("Observation")
+            im_traj = axes[0].imshow(init_traj_img)
+            im_obs = axes[1].imshow(init_obs_img)
+            text_traj = axes[0].text(0.5, 0, "", transform=axes[0].transAxes, ha="center", fontsize=15, color='black')
+            axes[0].set_title("Trajectory", fontsize=20)
+            axes[1].set_title("Observation", fontsize=20)
             for ax in axes: ax.axis('off')
             plt.tight_layout()
             
@@ -778,12 +802,8 @@ class TrainDQN():
                 state = {"map": map_tensor, "vec": vec_tensor}
                 
                 # Action 선택: Warmup 중에는 100% random, 그 이후에는 epsilon 기법 사용
-                action_options = {
-                    "warmup": warmup,
-                    "last_action": last_action,
-                    "last_collision": last_collision,
-                }
-                action = self._get_action(self.env, state, action_mask, mode='train', options=action_options)
+                action = self._get_action(self.env, state, action_mask, use_masking=self.train_cfg.use_action_masking, mode='train', 
+                                          warmup=warmup, last_action=last_action, last_collision=last_collision)
                 
                 # ----------------------------- Action 수행 ---------------------------------
                 next_obs, reward, terminated, truncated, info = self.env.step(action)
@@ -857,8 +877,7 @@ class TrainDQN():
                         self.tb_writer.add_scalar("Train/Q_value_mean", curr_q.mean().item(), self.total_steps)
                     if self.wandb_run:
                         self.wandb_run.log({"Train/Loss": loss.item(),
-                                            "Train/Q_value_mean": curr_q.mean().item()}, 
-                                            **sigma_logs, step=self.total_steps)
+                                            "Train/Q_value_mean": curr_q.mean().item(), **sigma_logs}, step=self.total_steps)
                     if self.args.use_vessl:
                         vessl.log(step=self.total_steps, 
                                            payload={"Train/Loss": loss.item(), 
