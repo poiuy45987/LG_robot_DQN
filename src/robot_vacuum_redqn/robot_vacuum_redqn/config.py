@@ -8,7 +8,7 @@ class TrainConfig: # Training과 관련된 설정들
     
     # --- Training 설정 및 Warmup ---
     buffer_size: int = 500000
-    warmup_episodes: int = 20
+    # warmup_episodes: int = 20
     warmup_ep_steps: int = 10000
     warmup_tot_steps: int = 200000
     max_episodes: int = 30000
@@ -50,6 +50,9 @@ class TrainConfig: # Training과 관련된 설정들
     # --- Map 설정 ---
     reset_only_start_pos: bool = False
     
+    # --- DQN extension 선택 여부 ---
+    double_dqn: bool = False
+    
     def _validate_configs(self):
         
         # Training episode와 step 수, buffer 관련 설정
@@ -57,8 +60,8 @@ class TrainConfig: # Training과 관련된 설정들
             raise ValueError(f"buffer_size({self.buffer_size}) should be bigger than batch_size({self.batch_size}).")
         if self.buffer_size <= self.warmup_tot_steps:
             raise ValueError(f"buffer_size({self.buffer_size}) should be bigger than warmup_tot_steps({self.warmup_tot_steps}).")
-        if self.max_episodes <= self.warmup_episodes:
-            raise ValueError(f"max_episodes({self.max_episodes}) should be bigger than warmup_episodes({self.warmup_episodes}).")
+        # if self.max_episodes <= self.warmup_episodes:
+        #     raise ValueError(f"max_episodes({self.max_episodes}) should be bigger than warmup_episodes({self.warmup_episodes}).")
         
         # Optimizer 관련 설정
         if self.lr <= 0:

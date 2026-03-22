@@ -13,10 +13,10 @@ from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
 import argparse
+from dataclasses import dataclass
 
 from .config import EnvConfig, DEFAULT_SEED
 from .map_generator import generate_house_like_obstacles
-
 
 def get_args():
     
@@ -56,8 +56,68 @@ def visualize_mask(robot_size: int):
     plt.title(f"Robot Mask (Size: {robot_size}x{robot_size})")
     plt.colorbar(label='Mask Value')
     plt.show()
+
+# Environment에서 trajectory 정보를 저장하기 위한 class. 이용하기 편하게 하기 위한 method가 포함되어 있음.
+class Trajectory:
+    """
+    Step이 수행된 후의 상태를 저장
+    steps:              Step 수. 로봇 청소기의 최초 위치는 steps=0
+    pos:                해당 step에서 로봇 청소기의 위치
+    covered_cells:      해당 로봇 청소기 위치로 이동하면서 새롭게 cover한 cell들의 indices, Numpy array: (N, 2)
+    covered_cell_num:   해당 step에서 cover한 cell 수
+    dir:                해당 step에서 로봇이 바라보고 있는 방향
     
-class DQNCoverageEnv(gym.Env):
+    """
+
+    def __init__(self, keys=None):
+        
+        # Trajectory에 저장할 key들을 정의
+        if keys is None:
+            keys = ['steps', 'pos', 'covered_cells', 'covered_cell_num', 'add_visited',
+                    'collision_count', 'dir', 'no_progress_cnt', 'last_coverage']
+        
+        # Data를 저장하는 dictionary    
+        self._data = {key: [] for key in keys}
+        
+    def __len__(self):
+        
+        lengths = {len(key_data) for key_data in self._data.values()} # 각 data의 len을 set 형태로 담음
+        
+        # Data가 아예 없는 경우
+        if not lengths:
+            return 0
+        
+        # Data를 담는 list가 생성된 경우: 모든 data list의 길이는 같아야 함.
+        assert len(lengths) == 1
+        return next(iter(lengths))
+    
+    def append(self, traj_data: dict):
+        try:
+            for key in self._data.keys():
+                self._data[key].append(traj_data[key])
+        except KeyError as e:
+            raise KeyError(f"Error in appending trajectory: Lost key {e}")
+    
+    def pop(self):
+        """
+        마지막에 저장된 data를 제거
+        """
+        # 가장 처음 데이터(로봇이 처음 방안에 배치되었을 때의 데이터)는 보호
+        if len(self) <= 1:
+            print("Trajectory is at its initial state. Nothing to pop.")
+            return None
+            
+        popped_data = {key: self._data[key].pop() for key in self._data}
+        return popped_data
+    
+    def get_pos_traj(self):
+        
+        assert 'pos' in self._data
+        
+        return np.array(self._data['pos'])  
+        
+        
+class CoverageEnv(gym.Env):
     metadata = {"render_modes": []}
 
     def __init__(self, cfg: EnvConfig, seed: int | None = None):
@@ -119,7 +179,7 @@ class DQNCoverageEnv(gym.Env):
             (-1,  0),  # W
             ( 0, -1),  # S
         ]
-        self.traj = []         # 로봇 중심이 한 episode에서 이동한 경로
+        self.traj = Trajectory()         # 로봇 중심이 한 episode에서 이동한 경로
         # --------------------------------
         
         # ---- 7. 기타 사용하기 좋은 지표들 ----
@@ -224,17 +284,21 @@ class DQNCoverageEnv(gym.Env):
         return coverable
     
     # FIXME: revisit_degree 삭제할지 결정. 주석에서도 삭제
-    def _mark_trajectory(self, cx: int, cy: int, flag: bool=True) -> tuple[int, bool]:
+    # FIXME: 이 함수를 env 밖에서도 사용하고 있음.
+    
+    def mark_trajectory(self, cx: int, cy: int, flag: bool=True, virtual: bool=False) -> tuple[int, bool, np.ndarray]:
         """
         로봇 중심이 (cx, cy)일 때 cleaned_map에 발자국을 찍는 method
 
         Args:
             cx, cy (int): 로봇 중심의 좌표
             flag (bool): new_cleaned_num, revisit_degree의 계산 여부를 정함
+            virtual (bool): 로봇을 실제로 맵 상에서 이동시킬지 결정. True인 경우, 로봇을 실제로 이동시키지는 않고 이동시켰을 때의 정보만 출력
         Return:
             tuple[int, bool]: 
                 - new_cleaned_num (int): 새롭게 cover한 grid 수
                 - collided (bool): 충돌 여부
+                - new_cleaned_grid_indices (np.ndarray): 새롭게 cover한 grid의 좌표. (N, 2)의 형태. Cover한 grid의 (x좌표, y좌표)가 N개 나열되어 있음
             
             삭제한 return:
                 - revisit_degree (float): 로봇 청소기가 현재 위치한 영역을 이전에 얼마나 청소했는지 표시하는 인자. 
@@ -244,24 +308,36 @@ class DQNCoverageEnv(gym.Env):
         new_cleaned_num = 0
         # revisit_degree = 0.0
         
+        new_cleaned_grid_indices = None
+        
         # 1. 중심 좌표가 맵을 벗어나는 경우
         if not self._in_bounds_center(cx, cy):
-            return new_cleaned_num, True
+            return new_cleaned_num, True, new_cleaned_grid_indices
         
         # 2. 로봇이 장애물과 충돌하는 경우
         if self._collides(cx, cy):
-            return new_cleaned_num, True
+            return new_cleaned_num, True, new_cleaned_grid_indices
         
         # 3. 일반적인 경우
         xs, ys = self._get_footprint_coords(cx, cy)
         if flag:
-            new_cleaned_num = ((self.cleaned[ys, xs] == 0) & (self.coverable[ys, xs] == 1)).sum()
+            new_cleaned_mark = (self.cleaned[ys, xs] == 0) & (self.coverable[ys, xs] == 1)
+            new_cleaned_x = xs[new_cleaned_mark]; new_cleaned_y = ys[new_cleaned_mark]
+            
+            if len(new_cleaned_y) > 0:
+                new_cleaned_grid_indices = np.column_stack((new_cleaned_y, new_cleaned_x)) # Shape: (N, 2)
+                new_cleaned_num = len(new_cleaned_y)
             # revisit_degree = float(self.cleaned[ys, xs].sum() / self.robot_area)
         # self.cleaned[ys, xs] = np.where(self.cleaned[ys, xs] < 255, self.cleaned[ys, xs]+1, 255) # cleaned_map update: Overflow 고려
-        self.cleaned[ys, xs] = 1 # cleaned_map은 무조건 1로만 덮어씌움
-        self.visited[cy, cx] = self.visited[cy, cx]+1 if self.visited[cy, cx] < 255 else 255 # visited_map은 다시 방문할 때마다 1을 추가 (Overflow 고려)
         
-        return new_cleaned_num, False
+        # virtual인 경우 map에 trajectory를 표시하지 않음.
+        if not virtual:
+            self.cleaned[ys, xs] = 1 # cleaned_map은 무조건 1로만 덮어씌움
+            self.visited[cy, cx] = self.visited[cy, cx]+1 if self.visited[cy, cx] < 255 else 255 # visited_map은 다시 방문할 때마다 1을 추가 (Overflow 고려)
+        
+        # FIXME: 가상으로 이동해본 뒤 다시 경로를 회복하는 알고리즘은 어떻게 구현할 것인가?
+        
+        return new_cleaned_num, False, new_cleaned_grid_indices
 
 
     @property
@@ -280,25 +356,6 @@ class DQNCoverageEnv(gym.Env):
             return 0.0
         
         return float(self.coveraged_area / self.total_coverable_area)
-    
-    
-    # def coverage(self) -> float:
-    #     if self.coverable is None:
-    #         free = (self.obstacles == 0)
-    #         total = int(free.sum())
-    #         if total == 0:
-    #             return 0.0
-    #         cleaned_mask = (self.cleaned > 0)
-    #         cleaned_free = int((cleaned_mask & free).sum())
-    #         return cleaned_free / total
-
-    #     if self.total_coverable_area == 0:
-    #         return 0.0
-        
-    #     cleaned_mask = (self.cleaned > 0)
-    #     cleaned_coverable = int((cleaned_mask & self.coverable).sum())
-    #     return cleaned_coverable / self.total_coverable_area
-
 
     def _ray_distance_forward(self, cx: int, cy: int, d: int) -> int:
         dx, dy = self.dir_vecs[d]
@@ -376,7 +433,7 @@ class DQNCoverageEnv(gym.Env):
         
         return agent_layer
         
-    
+    # FIXME: Map data state를 수정
     def _get_obs(self):
         
         cx, cy = self.pos
@@ -453,60 +510,144 @@ class DQNCoverageEnv(gym.Env):
     #     ], axis=0).astype(np.float32)
         
     #     return {"map": patch, "vec": obs_vec, 'action_mask': action_mask}
+    
+    def _get_traj_data(self, new_cleaned_num: int, new_covered_cell_indices: np.array, add_visted: bool = True) -> dict:
+        """
+        Trajectory class에 저장할 단일 data를 생성하는 method
+        Action이 수행된 후의 data를 저장
+
+        Args:
+            new_cleaned_num (int): 새롭게 cover한 grid 수
+            new_covered_cell_indices (np.array): 새롭게 cover한 grid의 좌표 indices
+
+        Returns:
+            dict: Trajectory class에 맞는 dict 형태
+        """
+        
+        traj_data = {
+            'steps': self.steps,
+            'pos': self.pos,
+            'covered_cells': new_covered_cell_indices,
+            'covered_cell_num': new_cleaned_num,
+            'add_visited': add_visted,
+            'collision_count': self.collision_count,
+            'dir': self.dir,
+            'no_progress_cnt': self.no_progress_cnt,
+            'last_coverage': self.last_coverage,
+        }
+        
+        return traj_data
+    
+    def _back_step_by_traj_data(self, traj_data: dict):
+        
+        # self.steps = traj_data['steps']
+        # self.pos = traj_data['steps']
+        # self.dir = traj_data['dir']
+        
+        px, py = traj_data['pos']
+        cx = traj_data['covered_cells'][:, 0]; cy = traj_data['covered_cells'][:, 1]
+        
+        if not self.visited[py, px] > 0:
+            self.visited[py, px] -= 1
+        
+        if len(cx) > 0:
+            self.cleaned[cy, cx] = np.where(self.cleaned[cy, cx] > 0, self.cleaned[cy, cx]-1, 0)
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed) # 난수 생성기 self.np_random가 생성됨. 첫 episode에는 seed 초기화가 일어남. 다음 episode부터는 seed 초기화를 수행하지 않음.(seed=None)
 
-        # Map 생성
-        # 시작 지점만 reset하고 map은 그대로 사용하는 경우에는 map을 다시 생성하지 않음
-        if self.obstacles is None or options is None or not options['reset_only_start_pos']: # 아직 장애물이 아예 생성되지 않은 경우 or start_pos만 reset하는 경우
-            self.obstacles = generate_house_like_obstacles(self.cfg, self.map_rng) # 장애물의 위치를 표시하는 layer
-            # 장애물을 dilation해서 collision_map 생성
-            self.collision_map = cv2.dilate(
-                self.obstacles, 
-                self.robot_mask, 
-                borderType=cv2.BORDER_CONSTANT, 
-                borderValue=1
-            )
-
-        # 청소된 grid를 표시하는 layer
-        self.cleaned = np.zeros((self.H, self.W), dtype=np.uint8)
-        self.visited = np.zeros((self.H, self.W), dtype=np.uint8)
-
-        # 출발 위치와 방향 선정: 동시에 self.cleaned에서 로봇이 차지하는 영역을 변환
-        for _ in range(20000):
-            cx = int(self.env_rng.integers(self.robot_half_size, self.W - self.robot_half_size))
-            cy = int(self.env_rng.integers(self.robot_half_size, self.H - self.robot_half_size))
-            collided = self._collides(cx, cy) # 현재 로봇 청소기가 있는 영역을 cleaned_layer에 추가
-            if not collided:
-                self.pos = (cx, cy)
-                break
-        else:
-            print("Force the robot position to the center.")
-            xs, ys = self._get_footprint_coords(self.W//2, self.H//2)
-            self.obstacles[ys, xs] = 0
-            collided = self._collides(cx, cy)
-            if collided:
-                raise ValueError("Obstacles were not removed before forced robot placement.")
-        self.dir = int(self.env_rng.integers(0, 4))
+        coverable_area_rate = 0
         
-        # Coverable grid를 계산
-        self.reachable = self._compute_reachable_centers(*self.pos)
-        self.coverable = self._compute_coverable_cells_from_reachable(self.reachable)
-        new_cleaned_num, _ = self._mark_trajectory(cx, cy) # cleaned_layer에 robot이 cover한 영역을 표시
-        self.coveraged_area = new_cleaned_num # Cover된 영역의 넓이
-        self.total_coverable_area = int(self.coverable.sum()) # Cover할 수 있는 영역의 넓이
-        self.last_coverage = self.coverage
-        self.no_progress_cnt = 0
-        
-        self.steps = 0
-        self.traj = [self.pos]
-        self.collision_count = 0
+        while coverable_area_rate < 0.5:
+            
+            # Map 생성
+            # 시작 지점만 reset하고 map은 그대로 사용하는 경우에는 map을 다시 생성하지 않음
+            if self.obstacles is None or options is None or not options['reset_only_start_pos']: # 아직 장애물이 아예 생성되지 않은 경우 or start_pos만 reset하는 경우
+                self.obstacles = generate_house_like_obstacles(self.cfg, self.map_rng) # 장애물의 위치를 표시하는 layer
+                # 장애물을 dilation해서 collision_map 생성
+                self.collision_map = cv2.dilate(
+                    self.obstacles, 
+                    self.robot_mask, 
+                    borderType=cv2.BORDER_CONSTANT, 
+                    borderValue=1
+                )
+
+            # 청소된 grid를 표시하는 layer
+            self.cleaned = np.zeros((self.H, self.W), dtype=np.uint8)
+            self.visited = np.zeros((self.H, self.W), dtype=np.uint8)
+
+            # 출발 위치와 방향 선정: 동시에 self.cleaned에서 로봇이 차지하는 영역을 변환
+            for _ in range(20000):
+                cx = int(self.env_rng.integers(self.robot_half_size, self.W - self.robot_half_size))
+                cy = int(self.env_rng.integers(self.robot_half_size, self.H - self.robot_half_size))
+                collided = self._collides(cx, cy) # 현재 로봇 청소기가 있는 영역을 cleaned_layer에 추가
+                if not collided:
+                    self.pos = (cx, cy)
+                    break
+            else:
+                print("Force the robot position to the center.")
+                xs, ys = self._get_footprint_coords(self.W//2, self.H//2)
+                self.obstacles[ys, xs] = 0
+                collided = self._collides(cx, cy)
+                if collided:
+                    raise ValueError("Obstacles were not removed before forced robot placement.")
+            self.dir = int(self.env_rng.integers(0, 4))
+            
+            # Coverable grid를 계산
+            self.reachable = self._compute_reachable_centers(*self.pos)
+            self.coverable = self._compute_coverable_cells_from_reachable(self.reachable)
+            self.total_coverable_area = int(self.coverable.sum()) # Cover할 수 있는 영역의 넓이
+            
+            # 변수 초기화
+            self.steps = 0
+            self.no_progress_cnt = 0
+            self.collision_count = 0
+            
+            # 로봇이 (cx, cy)로 이동했을 때 로봇의 궤적, coverage 정도 등을 update
+            new_cleaned_num, collided, new_cleaned_grid_indices = self.mark_trajectory(cx, cy) # cleaned_layer에 robot이 cover한 영역을 표시
+            self.coveraged_area += new_cleaned_num # Cover된 영역의 넓이
+            self.last_coverage = self.coverage
+            
+            # Trajectory에 저장
+            self.traj.append(self._get_traj_data(new_cleaned_num, new_cleaned_grid_indices))     
+            
+            coverable_area_rate = self.total_coverable_area / (self.H * self.W) # coverable_area_rate이 너무 낮으면 맵을 재생성해야 함.
 
         return self._get_obs(), {"Start_pos": self.pos}
 
+    def get_next_pos(self, action: int) -> tuple[int, int]:
+        dx, dy = self.dir_vecs[action]
+        cx, cy = self.pos
+        return int(cx + dx), int(cy + dy)
+    
+    def get_next_action_from_next_pos(self, next_pos: tuple[int, int]) -> int:
+        cx, cy = self.pos; nx, ny = next_pos
+        for action, dir_vec in enumerate(self.dir_vecs):
+            dx, dy = dir_vec
+            if nx == cx+dx and ny == cy+dy:
+                return action
+        else:
+            raise ValueError(f"We can't arrived at next_pos {next_pos} from start_pos {self.pos} by one action!")
+            
+    def _get_env_state(self):
+        
+        prev_state = {
+            'steps': self.steps,
+            'pos': self.pos,
+            'coveraged_area': self.coveraged_area,            
+        }
+        
+        return prev_state
+    
+    def _set_env_state(self, prev_state):
+        
+        self.steps = prev_state['steps']
+        self.pos = prev_state['pos']
+        self.coveraged_area = prev_state['coveraged_area']
+        
+    # FIXME: step의 virtual mode 보완
     def step(self, action):
-
+            
         self.steps += 1
 
         # 초기 설정 값
@@ -519,16 +660,26 @@ class DQNCoverageEnv(gym.Env):
         ############### 다음 위치로 이동: Collision이 일어나면 더 나아가지 않음 ###############
         # Collision이 일어나면, collision 사실을 info에 넣어 알리기만 하고 더 나아가지 않음
         # 이 작업은 training 시와 test 시에 동일하게 동작함.
-        dx, dy = self.dir_vecs[action]
+        
+        # ---------- 다음 위치로 이동하면서 새롭게 cover한 grid를 칠하고, 그 수와 충돌 여부를 얻음. ----------
         cx, cy = self.pos
-        nx, ny = int(cx + dx), int(cy + dy)
+        nx, ny = self.get_next_pos(action)
+        
+        # self.visited의 값이 255 이상이면, 해당 grid를 방문해도 수가 증가하지 않음.
+        # 이 정보를 trajectory에 저장하여 backstep 시 map layer 복원에 사용
+        add_visited = True
+        if self.visited[nx, ny] >= 255:
+            add_visited = False
+        
+        new_cleaned_num, collided, new_cleaned_grid_indices = self.mark_trajectory(nx, ny) 
+        self.coveraged_area += new_cleaned_num
+        if collided:
+            add_visited = False
+        # -------------------------------------------------------------------------------------------
         
         # ------------------------------------------------------------
         # [REWARD FUNCTION]
         # ------------------------------------------------------------
-        new_cleaned_num, collided = self._mark_trajectory(nx, ny) # 다음 위치로 이동하면서 trajectory를 표시하고 새롭게 cover한 grid 수와 충돌 여부를 얻음
-        self.coveraged_area += new_cleaned_num
-        
         # 1. Step penalty
         reward -= self.cfg.step_penalty
         
@@ -536,17 +687,17 @@ class DQNCoverageEnv(gym.Env):
             # 2. Obstacle penalty
             reward -= self.cfg.obstacle_penalty            
         else:
+            revisit_count = self.visited[ny, nx]-1 # 처음 방문은 제외
             if new_cleaned_num > 0:
                 # 3. Cover reward
                 reward += self.cfg.uncleaned_reward * new_cleaned_num
                 reward += self.coverage * self.cfg.step_penalty # 새로운 grid를 cover하면 step_penalty를 완화
             else:
                 # 4. Cleaned grid penalty
-                revisit_count = self.visited[ny, nx]-1 # 처음 방문은 제외
                 reward -= revisit_count * self.cfg.cleaned_penalty
                 
-                # 5. Intrinsic reward
-                reward += self.cfg.intrinsic_reward * np.exp(-revisit_count)
+            # 5. Intrinsic reward
+            reward += self.cfg.intrinsic_reward * np.exp(-revisit_count)
             
         # 6. Turn penalty
         if self.dir != action: 
@@ -557,6 +708,7 @@ class DQNCoverageEnv(gym.Env):
             reward += self.cfg.complete_reward
         # ------------------------------------------------------------
         
+        # 상태 update
         if collided:
             collision = True
             self.collision_count += 1
@@ -564,7 +716,6 @@ class DQNCoverageEnv(gym.Env):
         cx, cy = nx, ny # 위치 update
         self.dir = action # 방향 update
         self.pos = (cx, cy)
-        self.traj.append(self.pos) # 충돌이 일어났더라도 self.traj에 좌표를 저장
         ############################################################################
         
         # ---- Terminate과 Truncated 조건 ----
@@ -606,8 +757,59 @@ class DQNCoverageEnv(gym.Env):
             "Episode_collision": self.collision_count,
         }
         # ----------------------------------
+        
+        # Trajectory data를 저장
+        self.traj.append(self._get_traj_data(new_cleaned_num, new_cleaned_grid_indices, add_visited))
 
         return self._get_obs(), reward, terminated, truncated, info
+    
+    def one_step_back(self, remain_collision_count: bool = False):
+        """_summary_
+
+        Args:
+            remain_collision_count (bool, optional): 가상의 step을 수행한 뒤 다시 back step을 하는 경우, collision count를 유지해야 함. Defaults to False.
+        """
+        
+        last_traj_data = self.traj.pop()
+        
+        # Instance variable 변경
+        self.steps = last_traj_data['steps']
+        self.pos = last_traj_data['pos']
+        self.dir = last_traj_data['dir']
+        self.no_progress_cnt = last_traj_data['no_progress_cnt']
+        self.last_coverage = last_traj_data['last_coverage']
+        
+        if remain_collision_count:
+            self.collision_count = last_traj_data['collision_count']
+        
+        # Map layer 변경
+        px, py = last_traj_data['pos']
+        
+        if last_traj_data['covered_cell_num'] > 0:
+            self.coveraged_area -= last_traj_data['covered_cell_num']
+            cx = last_traj_data['covered_cells'][:, 0]; cy = last_traj_data['covered_cells'][:, 1]
+            self.cleaned[cy, cx] = 0
+            
+        if last_traj_data['add_visited']:
+            self.visited[py, px] = self.visited[py, px]-1 if self.visited[py, px] > 0 else 0
+        
+        
+    def backstep(self, step_num: int = 1):
+        """
+        step_num만큼 뒤로 돌아감.
+
+        Args:
+            step_num (int, optional): _description_. Defaults to 1.
+        """
+        
+        if len(self.traj) <= step_num + 1:
+            print(f"Cannnot backstep {step_num} steps. Only {len(self)-1} steps are available.")
+            return
+        
+        while step_num > 0:
+            
+            self._one_step_back()
+            step_num -= 1
     
     def _draw_layer(self):
         
@@ -670,7 +872,7 @@ class DQNCoverageEnv(gym.Env):
         ax1.imshow(traj_map, cmap=custom_cmap, origin='lower', vmin=0, vmax=4)
         # 로봇이 움직인 궤적 표시
         if len(self.traj) > 1:
-            traj_arr = np.array(self.traj)
+            traj_arr = self.traj.get_pos_traj()
             ax1.plot(traj_arr[:, 0], traj_arr[:, 1], color='lime', linewidth=1.5, alpha=0.8, zorder=5)
             ax1.plot(traj_arr[0, 0], traj_arr[0, 1], color='purple', marker='o', zorder=6)
         legend_elements_1 = [
@@ -714,7 +916,7 @@ class DQNCoverageEnv(gym.Env):
         
         # 시작 위치와 현재 위치 표시
         if len(self.traj) > 1:
-            traj_arr = np.array(self.traj)
+            traj_arr = self.traj.get_pos_traj()
             ax2.plot(traj_arr[0, 0], traj_arr[0, 1], color='purple', marker='o', zorder=3)
             ax2.plot(traj_arr[-1, 0], traj_arr[-1, 1], color='green', marker='o', zorder=4)
 
@@ -854,7 +1056,7 @@ if __name__ == "__main__":
     # environment가 잘 생성되었는지 테스트하는 코드
     args = get_args()
     cfg = EnvConfig()
-    env = DQNCoverageEnv(cfg, seed=42)
+    env = CoverageEnv(cfg, seed=42)
 
     # 0. Robot visualize
     if args.robot:
