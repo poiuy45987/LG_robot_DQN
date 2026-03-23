@@ -337,10 +337,12 @@ class CoverageEnv(gym.Env):
             new_cleaned_mark = (self.cleaned[ys, xs] == 0) & (self.coverable[ys, xs] == 1)
             new_cleaned_x = xs[new_cleaned_mark]; new_cleaned_y = ys[new_cleaned_mark]
             
-            if len(new_cleaned_y) > 0:
+            if len(new_cleaned_x) > 0:
                 new_cleaned_grid_indices = np.column_stack((new_cleaned_x, new_cleaned_y)) # Shape: (N, 2)
                 new_cleaned_num = len(new_cleaned_x)
+                
             # revisit_degree = float(self.cleaned[ys, xs].sum() / self.robot_area)
+            
         # self.cleaned[ys, xs] = np.where(self.cleaned[ys, xs] < 255, self.cleaned[ys, xs]+1, 255) # cleaned_map update: Overflow 고려
         
         # virtual인 경우 map에 trajectory를 표시하지 않음.
@@ -728,7 +730,7 @@ class CoverageEnv(gym.Env):
                 reward += self.coverage * self.cfg.step_penalty # 새로운 grid를 cover하면 step_penalty를 완화
             else:
                 # 4. Cleaned grid penalty
-                reward -= revisit_count * self.cfg.cleaned_penalty
+                reward -= max(revisit_count, 1) * self.cfg.cleaned_penalty
                 
             # 5. Intrinsic reward
             reward += self.cfg.intrinsic_reward * np.exp(-revisit_count)
