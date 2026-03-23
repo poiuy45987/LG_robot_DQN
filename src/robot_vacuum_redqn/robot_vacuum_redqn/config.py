@@ -114,8 +114,8 @@ class EnvConfig:
     # ---- house map params ----
     
     grid_size: float = 4.0 # cm 단위
-    map_height: float = 800.0 # cm 단위
-    map_width: float = 800.0 # cm 단위
+    map_height: float = 400.0 # cm 단위
+    map_width: float = 400.0 # cm 단위
     
     # Map 크기를 grid 단위로 변환
     H: int = field(init=False)

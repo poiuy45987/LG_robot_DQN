@@ -110,6 +110,19 @@ class Trajectory:
         popped_data = {key: self._data[key].pop() for key in self._data}
         return popped_data
     
+    def get_last_data(self):
+        
+        if len(self) <= 0:
+            print("Trajectory is empty. Cannot get last data.")
+            return None
+        
+        last_data = {key: self._data[key][-1] for key in self._data}
+        return last_data
+    
+    def clear(self):
+        for key in self._data.keys():
+                self._data[key] = []
+    
     def get_pos_traj(self):
         
         assert 'pos' in self._data
@@ -325,8 +338,8 @@ class CoverageEnv(gym.Env):
             new_cleaned_x = xs[new_cleaned_mark]; new_cleaned_y = ys[new_cleaned_mark]
             
             if len(new_cleaned_y) > 0:
-                new_cleaned_grid_indices = np.column_stack((new_cleaned_y, new_cleaned_x)) # Shape: (N, 2)
-                new_cleaned_num = len(new_cleaned_y)
+                new_cleaned_grid_indices = np.column_stack((new_cleaned_x, new_cleaned_y)) # Shape: (N, 2)
+                new_cleaned_num = len(new_cleaned_x)
             # revisit_degree = float(self.cleaned[ys, xs].sum() / self.robot_area)
         # self.cleaned[ys, xs] = np.where(self.cleaned[ys, xs] < 255, self.cleaned[ys, xs]+1, 255) # cleaned_map update: Overflow 고려
         
@@ -336,7 +349,6 @@ class CoverageEnv(gym.Env):
             self.visited[cy, cx] = self.visited[cy, cx]+1 if self.visited[cy, cx] < 255 else 255 # visited_map은 다시 방문할 때마다 1을 추가 (Overflow 고려)
         
         # FIXME: 가상으로 이동해본 뒤 다시 경로를 회복하는 알고리즘은 어떻게 구현할 것인가?
-        
         return new_cleaned_num, False, new_cleaned_grid_indices
 
 
@@ -362,12 +374,33 @@ class CoverageEnv(gym.Env):
         ex = cx + dx*self.max_forward; ex = int(max(0, min(self.W-1, ex)))
         ey = cy + dy*self.max_forward; ey = int(max(0, min(self.H-1, ey)))
         
-        if dx != 0: # 가로 방향으로 이동하는 경우
-            step = 1 if dx > 0 else -1
-            line = self.collision_map[cy, cx+step:ex+step:step]
-        else: # 세로 방향으로 이동하는 경우
-            step = 1 if dy > 0 else -1
-            line = self.collision_map[cy+step:ey+step:step, cx]
+        x_start = cx + dx; x_end = ex + dx
+        y_start = cy + dy; y_end = ey + dy
+        
+        if dx != 0:
+            line_x_idx_raw = np.arange(x_start, x_end, dx)
+            line_x_idx = np.clip(np.round(line_x_idx_raw), 0, self.W-1).astype(int)
+        else:
+            line_x_idx = cx
+            
+        if dy != 0:
+            line_y_idx_raw = np.arange(y_start, y_end, dy)
+            line_y_idx = np.clip(np.round(line_y_idx_raw), 0, self.H-1).astype(int)
+        else:
+            line_y_idx = cy
+        
+        line = self.collision_map[line_y_idx, line_x_idx]
+        
+        # if dx != 0: # 가로 방향으로 이동하는 경우
+        #     x_start = cx + dx; x_end = ex + dx
+        #     y_start = cy + dy; y_end = ey + dy
+        #     line_x_idx = np.arange(x_start, x_end, dx).astype(int)
+        #     line_y_idx = np.arange(y_start, y_end, dy).astype(int)
+        #     line = self.collision_map[line_y_idx, line_x_idx]
+        #     line = self.collision_map[cy, cx+step:ex+step:step]
+        # else: # 세로 방향으로 이동하는 경우
+        #     step = 1 if dy > 0 else -1
+        #     line = self.collision_map[cy+step:ey+step:step, cx]
             
         obstacles = np.where(line == 1)[0]
         if len(obstacles) > 0:
@@ -605,14 +638,15 @@ class CoverageEnv(gym.Env):
             
             # 로봇이 (cx, cy)로 이동했을 때 로봇의 궤적, coverage 정도 등을 update
             new_cleaned_num, collided, new_cleaned_grid_indices = self.mark_trajectory(cx, cy) # cleaned_layer에 robot이 cover한 영역을 표시
-            self.coveraged_area += new_cleaned_num # Cover된 영역의 넓이
+            self.coveraged_area = new_cleaned_num # Cover된 영역의 넓이
             self.last_coverage = self.coverage
             
             # Trajectory에 저장
+            self.traj.clear()
             self.traj.append(self._get_traj_data(new_cleaned_num, new_cleaned_grid_indices))     
             
             coverable_area_rate = self.total_coverable_area / (self.H * self.W) # coverable_area_rate이 너무 낮으면 맵을 재생성해야 함.
-
+            
         return self._get_obs(), {"Start_pos": self.pos}
 
     def get_next_pos(self, action: int) -> tuple[int, int]:
@@ -671,7 +705,7 @@ class CoverageEnv(gym.Env):
         if self.visited[nx, ny] >= 255:
             add_visited = False
         
-        new_cleaned_num, collided, new_cleaned_grid_indices = self.mark_trajectory(nx, ny) 
+        new_cleaned_num, collided, new_cleaned_grid_indices = self.mark_trajectory(nx, ny)
         self.coveraged_area += new_cleaned_num
         if collided:
             add_visited = False
@@ -770,27 +804,28 @@ class CoverageEnv(gym.Env):
             remain_collision_count (bool, optional): 가상의 step을 수행한 뒤 다시 back step을 하는 경우, collision count를 유지해야 함. Defaults to False.
         """
         
-        last_traj_data = self.traj.pop()
+        last_map_vary_data = self.traj.pop() # Map을 변화한 방식에 관한 데이터
+        last_instance_data = self.traj.get_last_data() # 가장 마지막 position, direction, step 수 등에 관한 데이터
         
         # Instance variable 변경
-        self.steps = last_traj_data['steps']
-        self.pos = last_traj_data['pos']
-        self.dir = last_traj_data['dir']
-        self.no_progress_cnt = last_traj_data['no_progress_cnt']
-        self.last_coverage = last_traj_data['last_coverage']
+        self.steps = last_instance_data['steps']
+        self.pos = last_instance_data['pos']
+        self.dir = last_instance_data['dir']
+        self.no_progress_cnt = last_instance_data['no_progress_cnt']
+        self.last_coverage = last_instance_data['last_coverage']
         
         if remain_collision_count:
-            self.collision_count = last_traj_data['collision_count']
+            self.collision_count = last_instance_data['collision_count']
         
         # Map layer 변경
-        px, py = last_traj_data['pos']
+        px, py = last_instance_data['pos']
         
-        if last_traj_data['covered_cell_num'] > 0:
-            self.coveraged_area -= last_traj_data['covered_cell_num']
-            cx = last_traj_data['covered_cells'][:, 0]; cy = last_traj_data['covered_cells'][:, 1]
+        if last_map_vary_data['covered_cell_num'] > 0:
+            self.coveraged_area -= last_map_vary_data['covered_cell_num']
+            cx = last_map_vary_data['covered_cells'][:, 0]; cy = last_map_vary_data['covered_cells'][:, 1]
             self.cleaned[cy, cx] = 0
             
-        if last_traj_data['add_visited']:
+        if last_map_vary_data['add_visited']:
             self.visited[py, px] = self.visited[py, px]-1 if self.visited[py, px] > 0 else 0
         
         
@@ -808,7 +843,7 @@ class CoverageEnv(gym.Env):
         
         while step_num > 0:
             
-            self._one_step_back()
+            self.one_step_back(remain_collision_count=True)
             step_num -= 1
     
     def _draw_layer(self):

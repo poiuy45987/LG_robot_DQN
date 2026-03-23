@@ -72,6 +72,8 @@ class DQNAgent:
         # Environment 조성을 위한 config
         env_cfg = EnvConfig(**{k: v for k, v in vars(args).items() if k in EnvConfig.__dataclass_fields__})
         
+        # Action masking 관련
+        
         # Train과 관련된 instance 변수는 mode가 train일 때만 생성
         if args.mode == 'train':
             
@@ -248,7 +250,7 @@ class DQNAgent:
 
                     # Replay buffer loading
                     replay_buffer_file_path = os.path.join(checkpoint_dir, self.args.buffer_file_name)
-                    self._save_memory(replay_buffer_file_path)
+                    self._load_memory(replay_buffer_file_path)
                     
                 else:
                     print("No checkpoint files found!", flush=True)
@@ -263,17 +265,36 @@ class DQNAgent:
     
     def _load_memory(self, file_path: str):
         
-        if os.path.exists(file_path):
-            data = np.load(file_path)
-            self.memory = list(zip(
-                data['obs'], 
-                data['action'], 
-                data['reward'], 
-                data['next_obs'], 
-                data['done']
-            ))
-        else:
-            print("No memory file found.")
+        # 파일 존재 여부 확인
+        if not os.path.exists(file_path):
+            print(f"No memory file found at: {file_path}")
+            return
+        
+        # 저장한 메모리 불러오기
+        data = np.load(file_path)
+        obs_keys = [k[4:] for k in data.files if k.startswith('obs_')]
+        
+        # Dictionary 재조립 (Reconstruct dict lists)
+        num_samples = len(data['action'])
+        reconstructed_obs = []
+        reconstructed_next_obs = []
+
+        for i in range(num_samples):
+            # 각 스텝마다 딕셔너리 생성
+            obs_dict = {k: data[f'obs_{k}'][i] for k in obs_keys}
+            next_obs_dict = {k: data[f'next_obs_{k}'][i] for k in obs_keys}
+            
+            reconstructed_obs.append(obs_dict)
+            reconstructed_next_obs.append(next_obs_dict)
+
+        # 4. 기존 self.memory 구조인 [(s, a, r, ns, d), ...] 형태로 zip
+        self.memory = list(zip(
+            reconstructed_obs,
+            data['action'],
+            data['reward'],
+            reconstructed_next_obs,
+            data['done']
+        ))
 
     def _save_model(self, mode='model', info=None):
         
@@ -346,62 +367,58 @@ class DQNAgent:
     def _save_memory(self, file_path: str):
         # self.memory: [(s,a,r...), (s,a,r...)]
         # zip(*self.memory): (s,s...), (a,a...), (r,r...)
-        obs, actions, rewards, next_obs, dones = zip(*self.memory)
-
-        # 2. 넘파이 배열로 변환하여 압축 저장 (항상 기존 파일 덮어쓰기)
-        np.savez_compressed(
-            file_path,
-            obs=np.array(obs, dtype=np.float32),
-            action=np.array(actions, dtype=np.uint8),
-            reward=np.array(rewards, dtype=np.float32),
-            next_obs=np.array(next_obs, dtype=np.float32),
-            done=np.array(dones, dtype=np.bool_)
-        )
+        obs_list, actions, rewards, next_obs_list, dones = zip(*self.memory)
+        
+        save_dict = {
+            'action': np.array(actions, dtype=np.uint8),
+            'reward': np.array(rewards, dtype=np.float32),
+            'done': np.array(dones, dtype=np.bool_)
+        }
+        
+        for key in obs_list[0].keys():
+            save_dict[f'obs_{key}'] = np.array([o[key] for o in obs_list])
+            save_dict[f'next_obs_{key}'] = np.array([no[key] for no in next_obs_list])
+        
+        np.savez_compressed(file_path, **save_dict)
      
-    def _decide_action_masking(self, env: CoverageEnv, action: int, mode: str = 'test') -> bool:
+    def _decide_action_masking(self, env: CoverageEnv, action: int, mode: str = 'test', reset: bool = False) -> bool:
         
         # Action masking을 결정하는 parameters
         ks = 15 if mode == 'train' else 7
         kp = 3
         
-        # Coverage와 position를 history로 저장
-        try:
-            check_ks = False; check_kp = False; check_collision = False
-            
-            # 다음 좌표 계산
-            cx, cy = env.pos
-            dx, dy = env.dir_vecs[action]
-            nx = cx+dx; ny = cy+dy
-            
-            # Action masking 여부 계산
-            if len(self.coverage_hist) >= ks:
-                check_ks = (self.coverage_hist[-ks] == env.coverage)
-                
-            if (len(self.coverage_hist) >= kp) and (len(self.pos_hist >= kp)):
-                before_kp_pos_x, before_kp_pos_y = self.pos_hist[-kp]
-                dist = abs(cx-before_kp_pos_x) + abs(cy-before_kp_pos_y)
-                check_kp = (self.coverage_hist[-kp] == env.coverage) and (dist <= 1)
-            
-            _, check_collision = env.mark_trajectory(nx, ny, flag=False, virtual=True)
-            
-            # Coverage와 position의 history 저장
-            self.coverage_hist.append(env.coverage)
-            self.pos_hist.append(env.pos)
-            
-            return (check_ks or check_kp or check_collision)
-        
-        except AttributeError:
+        if reset:
             max_len = max(ks, kp)
             self.coverage_hist = deque(maxlen=max_len)
             self.pos_hist = deque(maxlen=max_len)
-            
-            # 첫 데이터 삽입 후 기본값 반환
-            self.coverage_hist.append(env.coverage)
-            self.pos_hist.append(tuple(env.pos))
-            return False
         
-        except Exception as e:
-            raise Exception(f"Unexpected error in action masking: {e}") from e
+        # Coverage와 position를 history로 저장
+        check_ks = False; check_kp = False; check_collision = False
+        
+        # 다음 좌표 계산
+        cx, cy = env.pos
+        dx, dy = env.dir_vecs[action]
+        nx = cx+dx; ny = cy+dy
+        
+        # Action masking 여부 계산
+        if len(self.coverage_hist) >= ks:
+            check_ks = (self.coverage_hist[-ks] == env.coverage)
+            
+        if (len(self.coverage_hist) >= kp) and (len(self.pos_hist) >= kp):
+            before_kp_pos_x, before_kp_pos_y = self.pos_hist[-kp]
+            dist = abs(cx-before_kp_pos_x) + abs(cy-before_kp_pos_y)
+            check_kp = (self.coverage_hist[-kp] == env.coverage) and (dist <= 1)
+        
+        _, check_collision, _ = env.mark_trajectory(nx, ny, flag=False, virtual=True)
+        
+        # Coverage와 position의 history 저장
+        self.coverage_hist.append(env.coverage)
+        self.pos_hist.append(env.pos)
+        
+        return (check_ks or check_kp or check_collision)
+        
+        # except Exception as e:
+        #     raise Exception(f"Unexpected error in action masking: {e}") from e
     
     # # RL policy와 heuristic action mode를 전환
     # def _switch_to_heuristic(self):
@@ -410,7 +427,7 @@ class DQNAgent:
     # def _switch_to_RL_policy(self):
     #     self.get_heu_act = False
     
-    def _get_action(self, env: CoverageEnv, processed_obs, mode: str='test') -> int:
+    def _get_action(self, env: CoverageEnv, processed_obs, mode: str='test', reset: bool = False) -> int:
         
         # # options 인자 받기
         # warmup = kwargs.get('warmup', False)
@@ -442,9 +459,8 @@ class DQNAgent:
         vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
         state = {'map': map_tensor, 'vec': vec_tensor}
         action_RL = self._get_RL_action(state, mode) # Policy network를 통과시켜서 얻은 action
-        
         # RL policy와 heuristic policy 중 무엇을 사용할지 결정
-        if self._decide_action_masking(env, action_RL, mode): # Heuristic action을 사용
+        if self._decide_action_masking(env, action_RL, mode, reset): # Heuristic action을 사용
             
             # action_RL을 수행: next_state, reward, terminated 및 truncated 여부 등을 받음.
             # environment 내에서 trajectory의 변화는 없지만, replay buffer에는 transition data를 저장함.
@@ -457,6 +473,9 @@ class DQNAgent:
             return self._get_heuristic_action(env) # Heuristic action을 return
         
         else: # RL policy action을 사용
+            
+            if not hasattr(self, 'dijkstra_traj'):
+                self.dijkstra_traj = []
             
             # Heuristic 방법으로 만든 trajectory를 RL policy가 따라가는 경우, self.dijkstra_traj를 유지
             if self.dijkstra_traj:
@@ -493,7 +512,7 @@ class DQNAgent:
         
         if not hasattr(self, 'dijkstra_traj'):
             self.dijkstra_traj = []
-        
+
         if len(self.dijkstra_traj) > 0: # 이미 생성한 경로가 있으면 다음 action을 출력
             next_pos = self.dijkstra_traj.pop(0)
             return env.get_next_action_from_next_pos(next_pos)
@@ -506,10 +525,9 @@ class DQNAgent:
         
         while queue:
             curr_pos = queue.popleft()
-            
             for dir_vec in env.dir_vecs:
                 next_pos = (curr_pos[0]+dir_vec[0], curr_pos[1]+dir_vec[1])
-                new_cleaned_num, collided = env._mark_trajectory(*next_pos, virtual=True) # FIXME
+                new_cleaned_num, collided, _ = env.mark_trajectory(*next_pos, virtual=True) # FIXME
                 if not collided and next_pos not in visited:
                     visited.add(next_pos)
                     parent[next_pos] = curr_pos
@@ -517,7 +535,7 @@ class DQNAgent:
                 
                 if new_cleaned_num > 0: # 새로운 grid를 밟을 수 있는 위치를 발견하면 그 위치로 이동하는 경로를 생성
                     self._get_dijkstra_traj_from_parent(parent, next_pos)
-                    return
+                    return env.get_next_action_from_next_pos(self.dijkstra_traj.pop(0))
         
         
     # State만 받는 것으로 수정    
@@ -726,6 +744,7 @@ class DQNAgent:
     def _test_one_map(self, env: CoverageEnv, obs: dict, debug: bool = False) -> float:
         
         done = False
+        reset = True
         last_obs = obs
         last_info = None
         debug_skip_count = 0
@@ -751,40 +770,17 @@ class DQNAgent:
         
         while not done:
             processed_obs = self._pre_process_obs(last_obs, target_dim=self.train_cfg.grid_map_size)
-            map_tensor = torch.from_numpy(processed_obs['map']).float().to(self.device).unsqueeze(0)
-            vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
-            action_mask = torch.from_numpy(processed_obs['action_mask']).to(self.device).unsqueeze(0)
-            state = {"map": map_tensor, "vec": vec_tensor}
-            
-            action = self._get_RL_action(env, state, action_mask, mode='test')
+            action = self._get_action(env, processed_obs, mode='test', reset=reset)
             
             if debug: # FIXME: backstep 가는 method 추가
-                # [2] 텍스트 정보만 살짝 지우고 다시 출력 (그림은 건드리지 않음)
-                #clear_output(wait=True)
-                
-                # with torch.no_grad():
-                #     q_values = self.policy_net(map_tensor, vec_tensor).squeeze().cpu().numpy()
-                
-                # action_list = ['E', 'N', 'W', 'S']
-                # action_info = (f"[Selected action]: {action_list[action]}\n"
-                #                f"[Q-values] E: {q_values[0]:.2f}, N: {q_values[1]:.2f}, W: {q_values[2]:.2f}, S: {q_values[3]:.2f}")
-                
-                # # [3] 데이터만 가져와서 기존 이미지 객체에 덮어쓰기 (가장 핵심)
-                # traj_img = env.get_visualized_img(img_choice='traj')
-                # obs_img = env.get_visualized_img(img_choice='obs')
-                
-                # im_traj.set_data(traj_img)
-                # im_obs.set_data(obs_img)
-                # text_traj.set_text(action_info)
-                
-                # # [4] 화면 갱신 (도화지 위치는 그대로, 내용물만 부드럽게 변경)
-                # display_handle.update(fig)
                 
                 if debug_skip_count > 0:
                     debug_skip_count -= 1
                 else:
                     
                     with torch.no_grad():
+                        map_tensor = torch.from_numpy(processed_obs['map']).float().to(self.device).unsqueeze(0)
+                        vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
                         q_values = self.policy_net(map_tensor, vec_tensor).squeeze().cpu().numpy()
                     
                     action_list = ['E', 'N', 'W', 'S']
@@ -802,16 +798,31 @@ class DQNAgent:
                     # [4] 화면 갱신 (도화지 위치는 그대로, 내용물만 부드럽게 변경)
                     display_handle.update(fig)
                     
-                    user_val = input("Next step: [Enter] | Auto: [Number] | Exit: [q] >> ")
+                    user_val = input("Next step: [Enter] | Auto: [Number: If want to backstep, input negative number] | Exit: [q] >> ")
+                    user_val = user_val.strip()
+                    
                     if user_val.lower() == 'q':
                         break
-                    if user_val.strip().isdigit():
-                        debug_skip_count = int(user_val) - 1
+                    
+                    try:
+                        val = int(user_val)
+                        if val < 0:
+                            backstep_num = abs(val)
+                            env.backstep(backstep_num)
+                            continue
+                        elif val > 0:
+                            debug_skip_count = int(user_val) - 1
+                        else:
+                            continue
+                    except ValueError:
+                        print("숫자 또는 'q'를 입력해주세요.")
 
             next_obs, _, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             last_obs = next_obs
             last_info = info
+            
+            reset = False
         
         #print(env.traj)
         return last_info['Coverage']        
@@ -854,6 +865,7 @@ class DQNAgent:
             steps = 0           # Episode의 진행한 step 수
             done_ep = False     # Episode 종료 조건: truncated(Episode를 조기 종료) | (terminate & Success) (Collision인 경우는 종료 X)
             warmup = False      # 현재 buffer에 data를 쌓고만 있는지 parameter도 같이 update 중인지 결정
+            reset = True        # 첫 번째 action을 선택할 때, action masking을 위한 buffer를 초기화
             
             # FIXME: last_action, last_collision 삭제
             # # Collision 시 다음 step에서는 이전에 수행한 action을 하지 않기 위해 이전에 수행한 action을 저장
@@ -887,9 +899,10 @@ class DQNAgent:
                     self.wandb_run.log({"Train/Episodes": episode}, step=self.total_steps)
                 
                 # Action 선택: Warmup 중에는 100% random, 그 이후에는 epsilon 기법 사용
-                action = self._get_action(self.env, processed_obs, mode='train')
+                action = self._get_action(self.env, processed_obs, mode='train', reset=reset)
+                reset = False
                 
-                
+                c_pos = self.env.pos
                 # if self.get_heu_act:
                 #     action = self._get_heuristic_action(self.env)
                 # else:
@@ -1017,7 +1030,7 @@ class DQNAgent:
                 self._validation(episode)
             
             # Map 기록 저장
-            if (warmup and episode % 4 == 0) or (not warmup and episode % 20 == 0):
+            if (warmup and episode % 1 == 0) or (not warmup and episode % 5 == 0):
                 map_img = self.env.get_visualized_img(img_choice='traj')
                 if self.tb_writer:
                     self.tb_writer.add_image("Visualization/Robot_path", map_img, episode, dataformats="HWC")
