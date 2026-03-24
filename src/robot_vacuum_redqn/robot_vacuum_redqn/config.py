@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 import warnings
 
 DEFAULT_SEED = 42
+ACTION_NUM = 16
 
 @dataclass
 class TrainConfig: # Training과 관련된 설정들

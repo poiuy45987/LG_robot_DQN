@@ -20,7 +20,7 @@ from PIL import Image
 from IPython.display import display, clear_output
 
 # 앞서 정의한 클래스들을 임포트한다고 가정 (또는 같은 파일에 위치)
-from .config import EnvConfig, TrainConfig, DEFAULT_SEED
+from .config import EnvConfig, TrainConfig, DEFAULT_SEED, ACTION_NUM
 from .environment import CoverageEnv
 from .redqn_network import CNN_ReDQN
 
@@ -62,7 +62,7 @@ class DQNAgent:
         
         # Policy network 조성
         network_config = {
-            'action_size': 4,
+            'action_size': ACTION_NUM,
             'use_noisy': args.use_noisy,
             'grid_map_size': args.grid_map_size,
             'do_normalize': args.do_normalize,
@@ -711,7 +711,7 @@ class DQNAgent:
                 cur_coverage = self._test_one_map(self.valid_env, obs) # Coverage 성능을 평가
                 
                 # Coverage 값이 유효한 경우에만 저장: Reachable grid의 수가 전체 grid 수의 절반은 넘어야 함.
-                if self.valid_env.reachable.sum() >= self.valid_env.H * self.valid_env.W * 0.5:
+                if self.valid_env.coverable.sum() >= self.valid_env.H * self.valid_env.W * 0.5:
                     coverage.append(cur_coverage) # Coverage 평균을 구하기 위해 cur_coverage를 저장
                     if cur_coverage > max_coverage:
                         max_coverage = cur_coverage
@@ -734,7 +734,7 @@ class DQNAgent:
                                 'Validation/Best_path': wandb.Image(max_coverage_traj_img)}, step=self.total_steps)
         if self.args.use_vessl:
             vessl.log(step=episode, payload={'Validation/Coverage_mean': coverage_mean,
-                                                      'Validation/Best_path': vessl.Image(max_coverage_traj_img)})
+                                             'Validation/Best_path': vessl.Image(max_coverage_traj_img)})
         
         # Validation 결과 출력
         print(f"[Validation] Episode {episode}: Coverage Mean = {coverage_mean:.4f}, Best Coverage Mean = {self.best_coverage_mean:.4f}", flush=True)
@@ -902,7 +902,6 @@ class DQNAgent:
                 action = self._get_action(self.env, processed_obs, mode='train', reset=reset)
                 reset = False
                 
-                c_pos = self.env.pos
                 # if self.get_heu_act:
                 #     action = self._get_heuristic_action(self.env)
                 # else:

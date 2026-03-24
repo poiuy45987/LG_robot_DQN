@@ -1,0 +1,22 @@
+No checkpoint files found!
+Table 2: Failed to place a table after max trials.
+Table 3: Failed to place a table after max trials.
+Table 4: Failed to place a table after max trials.
+Table 5: Failed to place a table after max trials.
+------------------------------
+  [System Configuration]
+  > Device: CPU
+------------------------------
+------------------------------
+  [System Configuration]
+  > Device: CPU
+------------------------------
+No checkpoint files found!
+Table 2: Failed to place a table after max trials.
+Table 3: Failed to place a table after max trials.
+Table 4: Failed to place a table after max trials.
+Table 5: Failed to place a table after max trials.
+/home/poiuy/lg_robot/src/robot_vacuum_redqn/robot_vacuum_redqn/environment.py:772: RuntimeWarning: overflow encountered in scalar negative
+
+/home/poiuy/lg_robot/src/robot_vacuum_redqn/robot_vacuum_redqn/environment.py:772: RuntimeWarning: overflow encountered in exp
+

@@ -15,7 +15,7 @@ from matplotlib.lines import Line2D
 import argparse
 from dataclasses import dataclass
 
-from .config import EnvConfig, DEFAULT_SEED, ACTION_NUM
+from .config import EnvConfig, DEFAULT_SEED
 from .map_generator import generate_house_like_obstacles
 
 def get_args():
@@ -158,17 +158,12 @@ class CoverageEnv(gym.Env):
         # -------------------------
         
         # ---- 3. Observation_space, Action_space ----
-        
-        # # 각도 종류: -90~90도 각도를 직진을 포함한 각도로 등분 + 유턴
-        # ang_seg_num = 6 # 0~90도 사이 각도를 나누는 간격 수
-        # ACTION_NUM = 2 * ang_seg_num + 2 # 전체 angle 종류: 0~90, -90~0를 각각 ang_seg_num개의 구간으로 나눠서 얻은 2*ang_seg_num+1가지의 각도 + 유턴
-        self.action_space = spaces.Discrete(ACTION_NUM, seed=self._seed)
-        
         self.local_view = self.cfg.local_view
         self.observation_space = spaces.Dict({
             "map": spaces.Box(low=0, high=1, shape=(3, self.local_view, self.local_view), dtype=np.uint8),
-            "vec": spaces.Box(low=-1.0, high=1.0, shape=(2+ACTION_NUM+ACTION_NUM+1,), dtype=np.float32), # 2+4+4+1
+            "vec": spaces.Box(low=-1.0, high=1.0, shape=(2+4+4+1,), dtype=np.float32), # 2+4+4+1
         })
+        self.action_space = spaces.Discrete(4, seed=self._seed)
         # --------------------------------------------
         
         # ---- 4. Map 관련 변수 ----
@@ -191,14 +186,12 @@ class CoverageEnv(gym.Env):
         # ---- 6. 로봇의 현재 위치와 방향 ----
         self.pos = None        # 로봇 중심의 현재 위치 (x, y)
         self.dir = None        # 로봇이 바라보는 방향(이전에 진행한 방향) (0: E, 1: N, 2: W, 3: S)
-        
-        # 방향 전환 선택지
-        step_len = 1
-        angles_rad = np.linspace(0, 2*np.pi, ACTION_NUM, endpoint=False)
-        self.dir_vecs = np.column_stack([np.cos(angles_rad), np.sin(angles_rad)]) * step_len
-        self.base_dir_vecs = [(1, 0), (-1, 0), (0, 1), (0, -1)] # Reachable grid 계산용
-        
-        # 로봇의 trajectory 저장
+        self.dir_vecs = [
+            ( 1,  0),  # E
+            ( 0,  1),  # N
+            (-1,  0),  # W
+            ( 0, -1),  # S
+        ]
         self.traj = Trajectory()         # 로봇 중심이 한 episode에서 이동한 경로
         # --------------------------------
         
@@ -220,37 +213,14 @@ class CoverageEnv(gym.Env):
         self.warmup = warmup
         self.warmup_steps = ep_steps
     
-    def _in_bounds_center(self, cx: float, cy: float) -> bool:
-        robot_r = self.robot_size / 2.0
-        eps = 1e-7
-        return (robot_r-1-eps < cx < self.W-robot_r+eps) and (robot_r-1-eps <= cy < self.H-robot_r+eps)
+    def _in_bounds_center(self, cx: int, cy: int) -> bool:
+        return (self.robot_half_size <= cx < self.W - self.robot_half_size) and (self.robot_half_size <= cy < self.H - self.robot_half_size)
 
-    def _get_footprint_coords(self, cx: float, cy: float) -> tuple[np.ndarray, np.ndarray]:
-        robot_r = self.robot_size / 2.0
-        eps = 1e-7 # 부동소수점 오차 방지용
-        
-        # 좌표가 정수로 들어올 경우, robot_mask_offsets을 활용
-        if cx.is_integer() and cy.is_integer():
-            return int(cx) + self.robot_mask_offsets[:, 0], int(cy) + self.robot_mask_offsets[:, 1]
-        
-        # 좌표가 실수일 경우
-        # Index 탐색 범위 설정
-        x_min = cx - robot_r; x_max = cx + robot_r
-        y_min = cy - robot_r; y_max = cy + robot_r
-        
-        # 격자 생성
-        x_indices = np.arange(np.ceil(x_min-eps), np.floor(x_max+eps) + 1, dtype=int)
-        y_indices = np.arange(np.ceil(y_min-eps), np.floor(y_max+eps) + 1, dtype=int)
-        xs, ys = np.meshgrid(x_indices, y_indices)
-        xs = xs.flatten(); ys = ys.flatten()
-
-        # 원형 영역 안에 들어오는 grid 좌표를 얻음
-        dist_2 = (cx - xs)**2 + (cy - ys)**2
-        in_range = dist_2 <= (robot_r+eps)**2
-        xs = xs[in_range]; ys = ys[in_range]
-        
+    # 중심 좌표를 받아서 로봇이 차지하는 영역(footprint) 좌표를 반환
+    def _get_footprint_coords(self, cx: int, cy: int) -> tuple[np.ndarray, np.ndarray]:
+        xs = cx + self.robot_mask_offsets[:, 0]
+        ys = cy + self.robot_mask_offsets[:, 1]
         return xs, ys
-
     
     def _collides(self, *args) -> bool:
         """
@@ -261,21 +231,15 @@ class CoverageEnv(gym.Env):
         
         arg1, arg2 = args
         if np.isscalar(arg1) and np.isscalar(arg2):
-            
-            cx, cy = float(arg1), float(arg2)
-            
-            # 좌표가 정수로 주어지고 collision_map이 있는 경우
-            if cx.is_integer() and cy.is_integer() and self.collision_map is not None:
-                cx, cy = int(cx), int(cy)
+            cx, cy = int(arg1), int(arg2)
+            if self.collision_map is not None:
                 if not (0 <= cx < self.W and 0 <= cy < self.H):
                     return True
                 return bool(self.collision_map[cy, cx])
-                        
-            # 좌표가 실수이거나 collision map이 없는 경우
-            if not self._in_bounds_center(cx, cy):
-                return True
-            xs, ys = self._get_footprint_coords(cx, cy)
-            
+            else:
+                if not self._in_bounds_center(cx, cy):
+                    return True
+                xs, ys = self._get_footprint_coords(cx, cy)
         elif isinstance(arg1, np.ndarray) and isinstance(arg2, np.ndarray):
             xs, ys = arg1, arg2
         else:
@@ -289,13 +253,12 @@ class CoverageEnv(gym.Env):
         reachable = np.zeros((self.H, self.W), dtype=np.uint8)
 
         q = deque()
-        start_cx = int(start_cx); start_cy = int(start_cy)
         reachable[start_cy, start_cx] = 1
         q.append((start_cx, start_cy))
 
         while q:
             x, y = q.popleft()
-            for dx, dy in self.base_dir_vecs: # Reachable grid는 상, 하, 좌, 우 방향으로만 확인.
+            for dx, dy in self.dir_vecs:
                 nx, ny = x + dx, y + dy
                 if not (0 <= nx < self.W and 0 <= ny < self.H):
                     continue
@@ -335,7 +298,8 @@ class CoverageEnv(gym.Env):
     
     # FIXME: revisit_degree 삭제할지 결정. 주석에서도 삭제
     # FIXME: 이 함수를 env 밖에서도 사용하고 있음.
-    def mark_trajectory(self, cx: float, cy: float, flag: bool=True, virtual: bool=False) -> tuple[int, bool, np.ndarray]:
+    
+    def mark_trajectory(self, cx: int, cy: int, flag: bool=True, virtual: bool=False) -> tuple[int, bool, np.ndarray]:
         """
         로봇 중심이 (cx, cy)일 때 cleaned_map에 발자국을 찍는 method
 
@@ -364,11 +328,11 @@ class CoverageEnv(gym.Env):
             return new_cleaned_num, True, new_cleaned_grid_indices
         
         # 2. 로봇이 장애물과 충돌하는 경우
-        xs, ys = self._get_footprint_coords(cx, cy)
-        if self._collides(xs, ys):
+        if self._collides(cx, cy):
             return new_cleaned_num, True, new_cleaned_grid_indices
         
         # 3. 일반적인 경우
+        xs, ys = self._get_footprint_coords(cx, cy)
         if flag:
             new_cleaned_mark = (self.cleaned[ys, xs] == 0) & (self.coverable[ys, xs] == 1)
             new_cleaned_x = xs[new_cleaned_mark]; new_cleaned_y = ys[new_cleaned_mark]
@@ -384,9 +348,9 @@ class CoverageEnv(gym.Env):
         # virtual인 경우 map에 trajectory를 표시하지 않음.
         if not virtual:
             self.cleaned[ys, xs] = 1 # cleaned_map은 무조건 1로만 덮어씌움
-            cx = int(cx+0.5); cy = int(cy+0.5) # 실수 좌표를 반올림
             self.visited[cy, cx] = self.visited[cy, cx]+1 if self.visited[cy, cx] < 255 else 255 # visited_map은 다시 방문할 때마다 1을 추가 (Overflow 고려)
-
+        
+        # FIXME: 가상으로 이동해본 뒤 다시 경로를 회복하는 알고리즘은 어떻게 구현할 것인가?
         return new_cleaned_num, False, new_cleaned_grid_indices
 
 
@@ -407,70 +371,46 @@ class CoverageEnv(gym.Env):
         
         return float(self.coveraged_area / self.total_coverable_area)
 
-    # def _ray_distance_forward(self, cx: float, cy: float, d: int) -> int:
-    #     dx, dy = self.dir_vecs[d]
-    #     ex = cx + dx*self.max_forward; ex = int(max(0, min(self.W-1, ex)))
-    #     ey = cy + dy*self.max_forward; ey = int(max(0, min(self.H-1, ey)))
+    def _ray_distance_forward(self, cx: int, cy: int, d: int) -> int:
+        dx, dy = self.dir_vecs[d]
+        ex = cx + dx*self.max_forward; ex = int(max(0, min(self.W-1, ex)))
+        ey = cy + dy*self.max_forward; ey = int(max(0, min(self.H-1, ey)))
         
-    #     x_start = cx + dx; x_end = ex + dx
-    #     y_start = cy + dy; y_end = ey + dy
+        x_start = cx + dx; x_end = ex + dx
+        y_start = cy + dy; y_end = ey + dy
         
-    #     if dx != 0:
-    #         line_x_idx_raw = np.arange(x_start, x_end, dx)
-    #         line_x_idx = np.clip(np.round(line_x_idx_raw), 0, self.W-1).astype(int)
-    #     else:
-    #         line_x_idx = cx
-            
-    #     if dy != 0:
-    #         line_y_idx_raw = np.arange(y_start, y_end, dy)
-    #         line_y_idx = np.clip(np.round(line_y_idx_raw), 0, self.H-1).astype(int)
-    #     else:
-    #         line_y_idx = cy
-        
-    #     line = self.collision_map[line_y_idx, line_x_idx]
-            
-    #     obstacles = np.where(line == 1)[0]
-    #     if len(obstacles) > 0:
-    #         return int(obstacles[0]) # 첫 번째 장애물까지의 거리
-    #     else:
-    #         return len(line) # 장애물이 없으면 최대 거리 반환
-
-    def _ray_distance_forward(self, cx: float, cy: float, d: int) -> float:
-        dx, dy = self.dir_vecs[d] # dx, dy는 실수
-        
-        # 1. 샘플링할 거리 배열 생성 (0부터 max_forward까지 1씩 증가)
-        steps = np.arange(1, self.max_forward + 1)
-        
-        # 2. 각 step에서의 실제 물리적 위치(실수) 계산
-        line_x = cx + steps * dx
-        line_y = cy + steps * dy
-        
-        # 3. 맵 경계 내에 있는 좌표만 필터링
-        valid = (line_x >= -0.5) & (line_x < self.W - 0.5) & \
-                (line_y >= -0.5) & (line_y < self.H - 0.5)
-        
-        if not np.any(valid): # 모든 방향으로의 이동이 map을 벗어나는 경우
-            return 0.0
-        
-        # 4. 실수 좌표를 가장 가까운 정수 격자 인덱스로 변환 (반올림)
-        line_x_idx = np.floor(line_x[valid]+0.5).astype(int)
-        line_y_idx = np.floor(line_y[valid]+0.5).astype(int)
-        
-        # 5. collision_map에서 해당 경로의 장애물 여부를 한 번에 추출
-        # Advanced Indexing 사용
-        line_values = self.collision_map[line_y_idx, line_x_idx]
-        
-        # 6. 첫 번째 장애물 위치 찾기
-        hit_indices = np.where(line_values == 1)[0]
-        
-        if len(hit_indices) > 0:
-            # 첫 번째 충돌 지점까지의 거리 (steps 배열에서의 인덱스 활용)
-            return float(steps[valid][hit_indices[0]])
+        if dx != 0:
+            line_x_idx_raw = np.arange(x_start, x_end, dx)
+            line_x_idx = np.clip(np.round(line_x_idx_raw), 0, self.W-1).astype(int)
         else:
-            # 장애물이 없으면 레이가 맵 끝까지 간 거리 반 len(line_x_idx)이 아님에 주의
-            return float(len(line_x_idx))
+            line_x_idx = cx
+            
+        if dy != 0:
+            line_y_idx_raw = np.arange(y_start, y_end, dy)
+            line_y_idx = np.clip(np.round(line_y_idx_raw), 0, self.H-1).astype(int)
+        else:
+            line_y_idx = cy
+        
+        line = self.collision_map[line_y_idx, line_x_idx]
+        
+        # if dx != 0: # 가로 방향으로 이동하는 경우
+        #     x_start = cx + dx; x_end = ex + dx
+        #     y_start = cy + dy; y_end = ey + dy
+        #     line_x_idx = np.arange(x_start, x_end, dx).astype(int)
+        #     line_y_idx = np.arange(y_start, y_end, dy).astype(int)
+        #     line = self.collision_map[line_y_idx, line_x_idx]
+        #     line = self.collision_map[cy, cx+step:ex+step:step]
+        # else: # 세로 방향으로 이동하는 경우
+        #     step = 1 if dy > 0 else -1
+        #     line = self.collision_map[cy+step:ey+step:step, cx]
+            
+        obstacles = np.where(line == 1)[0]
+        if len(obstacles) > 0:
+            return int(obstacles[0]) # 첫 번째 장애물까지의 거리
+        else:
+            return len(line) # 장애물이 없으면 최대 거리 반환
 
-    def _crop_patch(self, arr: np.ndarray, cx: float, cy: float, value: int | list | tuple = 0) -> np.ndarray:
+    def _crop_patch(self, arr: np.ndarray, cx: int, cy: int, value: int | list | tuple = 0) -> np.ndarray:
         """
         전체 map data에서 local map data를 뽑는 method
 
@@ -482,7 +422,7 @@ class CoverageEnv(gym.Env):
         Returns:
             np.ndarray: Local map data, Shape: (C, H, W) or (H, W)
         """
-        cx = int(cx+0.5); cy = int(cy+0.5)
+        
         r = self.local_view//2
         px, py = cx+r, cy+r
         
@@ -514,22 +454,17 @@ class CoverageEnv(gym.Env):
         return patch
 
     
-    def _get_agent_layer(self, cx: float, cy: float):
+    def _get_agent_layer(self, cx: int, cy: int):
         
         assert not self._collides(cx, cy)
         
         self.H, self.W = self.obstacles.shape
         agent_layer = np.zeros((self.H, self.W), dtype=np.uint8)
         
-        if cx.is_integer() and cy.is_integer():
-            cx = int(cx); cy = int(cy)
-            x0, x1 = int(cx-self.robot_half_size), int(cx+self.robot_half_size+1)
-            y0, y1 = int(cy-self.robot_half_size), int(cy+self.robot_half_size+1)
-            agent_layer[y0:y1, x0:x1] = self.robot_mask
+        x0, x1 = int(cx-self.robot_half_size), int(cx+self.robot_half_size+1)
+        y0, y1 = int(cy-self.robot_half_size), int(cy+self.robot_half_size+1)
         
-        else: 
-            xs, ys = self._get_footprint_coords(cx, cy)
-            agent_layer[ys, xs] = 1
+        agent_layer[y0:y1, x0:x1] = self.robot_mask
         
         return agent_layer
         
@@ -548,13 +483,12 @@ class CoverageEnv(gym.Env):
         y_norm = (cy/(self.H-1))*2-1
 
         # dir_onehot
-        num_action = self.action_space.n
-        dir_onehot = np.zeros(num_action, dtype=np.float32)
+        dir_onehot = np.zeros(4, dtype=np.float32)
         dir_onehot[self.dir] = 1.0
 
-        # 각 방향에서 바라본 여유 공간: [-1, 1]이 범위로 정규화
-        ray_norm = np.zeros(num_action, dtype=np.float32)
-        for d in range(num_action):
+        # 4방향에서 바라본 여유 공간: [-1, 1]이 범위로 정규화
+        ray_norm = np.zeros(4, dtype=np.float32)
+        for d in range(4):
             ray_norm[d] = self._ray_distance_forward(cx, cy, d)
         # 여유 공간을 보고 충돌할 수 있는 action을 제외하기 위한 action_mask를 생성
         action_mask = (ray_norm != 0).astype(np.float32)
@@ -573,6 +507,44 @@ class CoverageEnv(gym.Env):
         
         return {"map": patch, "vec": obs_vec, 'action_mask': action_mask}
     
+    # def _get_obs(self):
+        
+    #     cx, cy = self.pos
+        
+    #     # local_map 정보가 담긴 patch를 얻음
+    #     agent_layer = self._get_agent_layer(cx, cy)
+    #     full_layer = np.stack([agent_layer, self.cleaned, self.obstacles], axis=0)
+    #     patch = self._crop_patch(full_layer, cx, cy, value=[0, 0, 1])
+        
+    #     # 학습에 도움이 될 만한 수치적인 정보를 생성
+    #     # 로봇의 위치 정보: [-1, 1]의 범위로 정규화
+    #     x_norm = (cx/(self.W-1))*2-1
+    #     y_norm = (cy/(self.H-1))*2-1
+
+    #     # dir_onehot
+    #     dir_onehot = np.zeros(4, dtype=np.float32)
+    #     dir_onehot[self.dir] = 1.0
+
+    #     # 4방향에서 바라본 여유 공간: [-1, 1]이 범위로 정규화
+    #     ray_norm = np.zeros(4, dtype=np.float32)
+    #     for d in range(4):
+    #         ray_norm[d] = self._ray_distance_forward(cx, cy, d)
+    #     # 여유 공간을 보고 충돌할 수 있는 action을 제외하기 위한 action_mask를 생성
+    #     action_mask = (ray_norm != 0).astype(np.float32)
+    #     ray_norm = (ray_norm / max(1, self.max_forward))*2-1
+        
+    #     # Coverage 비율: [0, 1] 범위의 숫자를 [-1, 1] 범위로 정규화
+    #     cov = self.coverage
+    #     cov_norm = cov*2-1
+
+    #     obs_vec = np.concatenate([
+    #         np.array([x_norm, y_norm], dtype=np.float32),
+    #         dir_onehot,
+    #         ray_norm,
+    #         np.array([cov_norm], dtype=np.float32),
+    #     ], axis=0).astype(np.float32)
+        
+    #     return {"map": patch, "vec": obs_vec, 'action_mask': action_mask}
     
     def _get_traj_data(self, new_cleaned_num: int, new_covered_cell_indices: np.array, add_visted: bool = True) -> dict:
         """
@@ -601,7 +573,6 @@ class CoverageEnv(gym.Env):
         
         return traj_data
     
-    # FIXME: 삭제?
     def _back_step_by_traj_data(self, traj_data: dict):
         
         # self.steps = traj_data['steps']
@@ -609,15 +580,13 @@ class CoverageEnv(gym.Env):
         # self.dir = traj_data['dir']
         
         px, py = traj_data['pos']
-        px = int(px+0.5); py = int(py+0.5) # 실수 좌표를 반올림: self.visited를 수정한 grid 좌표
-        
-        covered_x = traj_data['covered_cells'][:, 0]; covered_y = traj_data['covered_cells'][:, 1]
+        cx = traj_data['covered_cells'][:, 0]; cy = traj_data['covered_cells'][:, 1]
         
         if not self.visited[py, px] > 0:
             self.visited[py, px] -= 1
         
-        if len(covered_x) > 0:
-            self.cleaned[covered_y, covered_x] = np.where(self.cleaned[covered_y, covered_x] > 0, self.cleaned[covered_y, covered_x]-1, 0)
+        if len(cx) > 0:
+            self.cleaned[cy, cx] = np.where(self.cleaned[cy, cx] > 0, self.cleaned[cy, cx]-1, 0)
 
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed) # 난수 생성기 self.np_random가 생성됨. 첫 episode에는 seed 초기화가 일어남. 다음 episode부터는 seed 초기화를 수행하지 않음.(seed=None)
@@ -648,18 +617,16 @@ class CoverageEnv(gym.Env):
                 cy = int(self.env_rng.integers(self.robot_half_size, self.H - self.robot_half_size))
                 collided = self._collides(cx, cy) # 현재 로봇 청소기가 있는 영역을 cleaned_layer에 추가
                 if not collided:
-                    self.pos = (float(cx), float(cy))
+                    self.pos = (cx, cy)
                     break
             else:
                 print("Force the robot position to the center.")
-                cx = self.W//2; cy = self.H//2
-                self.pos = (float(cx), float(cy))
-                xs, ys = self._get_footprint_coords(cx, cy)
+                xs, ys = self._get_footprint_coords(self.W//2, self.H//2)
                 self.obstacles[ys, xs] = 0
                 collided = self._collides(cx, cy)
                 if collided:
                     raise ValueError("Obstacles were not removed before forced robot placement.")
-            self.dir = int(self.env_rng.integers(0, self.action_space.n))
+            self.dir = int(self.env_rng.integers(0, 4))
             
             # Coverable grid를 계산
             self.reachable = self._compute_reachable_centers(*self.pos)
@@ -684,22 +651,20 @@ class CoverageEnv(gym.Env):
             
         return self._get_obs(), {"Start_pos": self.pos}
 
-    def get_next_pos(self, action: int) -> tuple[float, float]:
+    def get_next_pos(self, action: int) -> tuple[int, int]:
         dx, dy = self.dir_vecs[action]
         cx, cy = self.pos
-        return float(cx + dx), float(cy + dy)
+        return int(cx + dx), int(cy + dy)
     
-    def get_next_action_from_next_pos(self, next_pos: tuple[float, float]) -> int:
-        eps = 1e-7
+    def get_next_action_from_next_pos(self, next_pos: tuple[int, int]) -> int:
         cx, cy = self.pos; nx, ny = next_pos
         for action, dir_vec in enumerate(self.dir_vecs):
             dx, dy = dir_vec
-            if abs(nx - (cx+dx)) < eps and abs(ny - (cy+dy)) < eps:
+            if nx == cx+dx and ny == cy+dy:
                 return action
         else:
             raise ValueError(f"We can't arrived at next_pos {next_pos} from start_pos {self.pos} by one action!")
-    
-    # FIXME: 삭제?        
+            
     def _get_env_state(self):
         
         prev_state = {
@@ -710,14 +675,13 @@ class CoverageEnv(gym.Env):
         
         return prev_state
     
-    # FIXME: 삭제?
     def _set_env_state(self, prev_state):
         
         self.steps = prev_state['steps']
         self.pos = prev_state['pos']
         self.coveraged_area = prev_state['coveraged_area']
         
-    
+    # FIXME: step의 virtual mode 보완
     def step(self, action):
             
         self.steps += 1
@@ -740,7 +704,7 @@ class CoverageEnv(gym.Env):
         # self.visited의 값이 255 이상이면, 해당 grid를 방문해도 수가 증가하지 않음.
         # 이 정보를 trajectory에 저장하여 backstep 시 map layer 복원에 사용
         add_visited = True
-        if self.visited[int(ny+0.5), int(nx+0.5)] >= 255:
+        if self.visited[nx, ny] >= 255:
             add_visited = False
         
         new_cleaned_num, collided, new_cleaned_grid_indices = self.mark_trajectory(nx, ny)
@@ -759,7 +723,7 @@ class CoverageEnv(gym.Env):
             # 2. Obstacle penalty
             reward -= self.cfg.obstacle_penalty            
         else:
-            revisit_count = self.visited[int(ny+0.5), int(nx+0.5)]-1 # 처음 방문은 제외
+            revisit_count = self.visited[ny, nx]-1 # 처음 방문은 제외
             if new_cleaned_num > 0:
                 # 3. Cover reward
                 reward += self.cfg.uncleaned_reward * new_cleaned_num
@@ -864,7 +828,6 @@ class CoverageEnv(gym.Env):
             self.cleaned[cy, cx] = 0
             
         if last_map_vary_data['add_visited']:
-            px = int(px+0.5); py = int(py+0.5)
             self.visited[py, px] = self.visited[py, px]-1 if self.visited[py, px] > 0 else 0
         
         
@@ -1151,7 +1114,7 @@ if __name__ == "__main__":
     # Debug step() method
     if args.debug_step:
         # action_seq = [0]*150 + [1]*3 + [3]*150 + [2]*250 + [3]*100 + [1]*200
-        action_seq = [0]*1000 + [3]*1000 + [2]*1000 + [1]*1000
+        action_seq = [0]*1000 + [3]*1000 + [2]*1000 + [1] * 1000
         for action in action_seq:
             obs, reward, terminated, truncated, info = env.step(action)
         if args.see_map:

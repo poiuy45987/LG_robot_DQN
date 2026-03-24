@@ -1,0 +1,27 @@
+{
+  "os": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "python": "CPython 3.12.12",
+  "startedAt": "2026-03-24T09:28:31.160127Z",
+  "program": "/home/poiuy/lg_robot/src/robot_vacuum_redqn/robot_vacuum_redqn/for_local.ipynb",
+  "codePath": "/home/poiuy/lg_robot/src/robot_vacuum_redqn/robot_vacuum_redqn/for_local.ipynb",
+  "codePathLocal": "src/robot_vacuum_redqn/robot_vacuum_redqn/for_local.ipynb",
+  "git": {
+    "remote": "https://github.com/poiuy45987/LG_robot_DQN.git",
+    "commit": "1a35edb6edf70715e14c1e5a49bd344348a865f4"
+  },
+  "root": "/home/poiuy/lg_robot",
+  "host": "BOOK-DL8VJNIDA0",
+  "executable": "/home/poiuy/miniconda3/envs/lgrobot/bin/python",
+  "cpu_count": 8,
+  "cpu_count_logical": 16,
+  "disk": {
+    "/": {
+      "total": "1081101176832",
+      "used": "32927858688"
+    }
+  },
+  "memory": {
+    "total": "8095203328"
+  },
+  "writerId": "m489hx8fi5oeoywuiackxj3uwwnuzuc3"
+}

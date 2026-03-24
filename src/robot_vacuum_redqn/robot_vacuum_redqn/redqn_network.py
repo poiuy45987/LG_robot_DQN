@@ -53,7 +53,7 @@ class NoisyLinear(nn.Module):
 
 class CNN_ReDQN(nn.Module):
     def __init__(self, **kwargs):
-        super(CNN_ReDQN, self).__init__()
+        super().__init__()
         
         # kwargs 처리
         self.action_size = kwargs.get('action_size', 4)
@@ -86,7 +86,7 @@ class CNN_ReDQN(nn.Module):
         
         # Vector encoder
         self.vec_encoder = nn.Sequential(
-            nn.Linear(11, 32),
+            nn.Linear(2+self.action_size*2+1, 32),
             nn.ReLU(),
             nn.Linear(32, 64),
             nn.ReLU(),
