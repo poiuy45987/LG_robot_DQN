@@ -220,37 +220,88 @@ class CoverageEnv(gym.Env):
         self.warmup = warmup
         self.warmup_steps = ep_steps
     
+    # def _in_bounds_center(self, cx: float, cy: float) -> bool:
+    #     robot_r = self.robot_size / 2.0
+    #     eps = 1e-7
+    #     return (robot_r-1-eps < cx < self.W-robot_r+eps) and (robot_r-1-eps <= cy < self.H-robot_r+eps)
+    
+    def _float_to_int_coord(self, cx: float, cy: float) -> tuple[int, int]:
+        return int(cx+0.5), int(cy+0.5)
+
+    # def _in_bounds_center(self, cx: float, cy: float) -> bool:
+    #     robot_r = self.robot_size / 2.0
+    #     eps = 1e-7
+    #     return (robot_r-1-eps < cx < self.W-robot_r+eps) and (robot_r-1-eps <= cy < self.H-robot_r+eps)
+    
     def _in_bounds_center(self, cx: float, cy: float) -> bool:
-        robot_r = self.robot_size / 2.0
-        eps = 1e-7
-        return (robot_r-1-eps < cx < self.W-robot_r+eps) and (robot_r-1-eps <= cy < self.H-robot_r+eps)
+        cx, cy = self._float_to_int_coord(cx, cy)
+        return (self.robot_half_size <= cx < self.W - self.robot_half_size) and (self.robot_half_size <= cy < self.H - self.robot_half_size)
+
+    # def _get_footprint_coords(self, cx: float, cy: float) -> tuple[np.ndarray, np.ndarray]:
+    #     robot_r = self.robot_size / 2.0
+    #     eps = 1e-7 # 부동소수점 오차 방지용
+        
+    #     # 좌표가 정수로 들어올 경우, robot_mask_offsets을 활용
+    #     if (isinstance(cx, int) and isinstance(cy, int)) or (cx.is_integer() and cy.is_integer()):
+    #         return int(cx) + self.robot_mask_offsets[:, 0], int(cy) + self.robot_mask_offsets[:, 1]
+        
+    #     # 좌표가 실수일 경우
+    #     # Index 탐색 범위 설정
+    #     x_min = cx - robot_r; x_max = cx + robot_r
+    #     y_min = cy - robot_r; y_max = cy + robot_r
+        
+    #     # 격자 생성
+    #     x_indices = np.arange(np.ceil(x_min-eps), np.floor(x_max+eps) + 1, dtype=int)
+    #     y_indices = np.arange(np.ceil(y_min-eps), np.floor(y_max+eps) + 1, dtype=int)
+    #     xs, ys = np.meshgrid(x_indices, y_indices)
+    #     xs = xs.flatten(); ys = ys.flatten()
+
+    #     # 원형 영역 안에 들어오는 grid 좌표를 얻음
+    #     dist_2 = (cx - xs)**2 + (cy - ys)**2
+    #     in_range = dist_2 <= (robot_r+eps)**2
+    #     xs = xs[in_range]; ys = ys[in_range]
+        
+    #     return xs, ys
 
     def _get_footprint_coords(self, cx: float, cy: float) -> tuple[np.ndarray, np.ndarray]:
-        robot_r = self.robot_size / 2.0
-        eps = 1e-7 # 부동소수점 오차 방지용
         
-        # 좌표가 정수로 들어올 경우, robot_mask_offsets을 활용
-        if cx.is_integer() and cy.is_integer():
-            return int(cx) + self.robot_mask_offsets[:, 0], int(cy) + self.robot_mask_offsets[:, 1]
+        cx, cy = self._float_to_int_coord(cx, cy)
         
-        # 좌표가 실수일 경우
-        # Index 탐색 범위 설정
-        x_min = cx - robot_r; x_max = cx + robot_r
-        y_min = cy - robot_r; y_max = cy + robot_r
-        
-        # 격자 생성
-        x_indices = np.arange(np.ceil(x_min-eps), np.floor(x_max+eps) + 1, dtype=int)
-        y_indices = np.arange(np.ceil(y_min-eps), np.floor(y_max+eps) + 1, dtype=int)
-        xs, ys = np.meshgrid(x_indices, y_indices)
-        xs = xs.flatten(); ys = ys.flatten()
-
-        # 원형 영역 안에 들어오는 grid 좌표를 얻음
-        dist_2 = (cx - xs)**2 + (cy - ys)**2
-        in_range = dist_2 <= (robot_r+eps)**2
-        xs = xs[in_range]; ys = ys[in_range]
-        
+        xs = cx + self.robot_mask_offsets[:, 0]
+        ys = cy + self.robot_mask_offsets[:, 1]
         return xs, ys
 
+    
+    # def _collides(self, *args) -> bool:
+    #     """
+    #     Case 1: _collides(cx, cy) -> 중심 좌표로 경계 및 장애물 체크
+    #     Case 2: _collides(xs, ys) -> 이미 계산된 마스크 좌표 배열들로 장애물 체크
+    #     """
+    #     assert len(args) == 2
+        
+    #     arg1, arg2 = args
+    #     if np.isscalar(arg1) and np.isscalar(arg2):
+            
+    #         cx, cy = float(arg1), float(arg2)
+            
+    #         # 좌표가 정수로 주어지고 collision_map이 있는 경우
+    #         if cx.is_integer() and cy.is_integer() and self.collision_map is not None:
+    #             cx, cy = int(cx), int(cy)
+    #             if not (0 <= cx < self.W and 0 <= cy < self.H):
+    #                 return True
+    #             return bool(self.collision_map[cy, cx])
+                        
+    #         # 좌표가 실수이거나 collision map이 없는 경우
+    #         if not self._in_bounds_center(cx, cy):
+    #             return True
+    #         xs, ys = self._get_footprint_coords(cx, cy)
+            
+    #     elif isinstance(arg1, np.ndarray) and isinstance(arg2, np.ndarray):
+    #         xs, ys = arg1, arg2
+    #     else:
+    #         raise TypeError("Input must be tuple of scalar or tuple of np.ndarray")
+            
+    #     return bool((self.obstacles[ys, xs] == 1).any())
     
     def _collides(self, *args) -> bool:
         """
@@ -261,21 +312,15 @@ class CoverageEnv(gym.Env):
         
         arg1, arg2 = args
         if np.isscalar(arg1) and np.isscalar(arg2):
-            
-            cx, cy = float(arg1), float(arg2)
-            
-            # 좌표가 정수로 주어지고 collision_map이 있는 경우
-            if cx.is_integer() and cy.is_integer() and self.collision_map is not None:
-                cx, cy = int(cx), int(cy)
+            cx, cy = self._float_to_int_coord(arg1, arg2)
+            if self.collision_map is not None:
                 if not (0 <= cx < self.W and 0 <= cy < self.H):
                     return True
                 return bool(self.collision_map[cy, cx])
-                        
-            # 좌표가 실수이거나 collision map이 없는 경우
-            if not self._in_bounds_center(cx, cy):
-                return True
-            xs, ys = self._get_footprint_coords(cx, cy)
-            
+            else:
+                if not self._in_bounds_center(cx, cy):
+                    return True
+                xs, ys = self._get_footprint_coords(cx, cy)
         elif isinstance(arg1, np.ndarray) and isinstance(arg2, np.ndarray):
             xs, ys = arg1, arg2
         else:
@@ -353,7 +398,6 @@ class CoverageEnv(gym.Env):
                 - revisit_degree (float): 로봇 청소기가 현재 위치한 영역을 이전에 얼마나 청소했는지 표시하는 인자. 
                     1.0 이상이면 영역의 grid 모두가 이전에 청소한 적이 있음. 숫자가 클수록 더 자주 청소했다는 의미
         """
-        
         new_cleaned_num = 0
         # revisit_degree = 0.0
         
@@ -436,7 +480,8 @@ class CoverageEnv(gym.Env):
     #         return len(line) # 장애물이 없으면 최대 거리 반환
 
     def _ray_distance_forward(self, cx: float, cy: float, d: int) -> float:
-        dx, dy = self.dir_vecs[d] # dx, dy는 실수
+        
+        dx = self.dir_vecs[d][0]; dy = self.dir_vecs[d][1] # dx, dy는 실수
         
         # 1. 샘플링할 거리 배열 생성 (0부터 max_forward까지 1씩 증가)
         steps = np.arange(1, self.max_forward + 1)
@@ -482,7 +527,7 @@ class CoverageEnv(gym.Env):
         Returns:
             np.ndarray: Local map data, Shape: (C, H, W) or (H, W)
         """
-        cx = int(cx+0.5); cy = int(cy+0.5)
+        cx, cy = self._float_to_int_coord(cx, cy)
         r = self.local_view//2
         px, py = cx+r, cy+r
         
@@ -644,16 +689,16 @@ class CoverageEnv(gym.Env):
 
             # 출발 위치와 방향 선정: 동시에 self.cleaned에서 로봇이 차지하는 영역을 변환
             for _ in range(20000):
-                cx = int(self.env_rng.integers(self.robot_half_size, self.W - self.robot_half_size))
-                cy = int(self.env_rng.integers(self.robot_half_size, self.H - self.robot_half_size))
+                cx = float(self.env_rng.integers(self.robot_half_size, self.W - self.robot_half_size))
+                cy = float(self.env_rng.integers(self.robot_half_size, self.H - self.robot_half_size))
                 collided = self._collides(cx, cy) # 현재 로봇 청소기가 있는 영역을 cleaned_layer에 추가
                 if not collided:
-                    self.pos = (float(cx), float(cy))
+                    self.pos = (cx, cy)
                     break
             else:
                 print("Force the robot position to the center.")
-                cx = self.W//2; cy = self.H//2
-                self.pos = (float(cx), float(cy))
+                cx = float(self.W//2); cy = float(self.H//2)
+                self.pos = (cx, cy)
                 xs, ys = self._get_footprint_coords(cx, cy)
                 self.obstacles[ys, xs] = 0
                 collided = self._collides(cx, cy)
@@ -685,7 +730,7 @@ class CoverageEnv(gym.Env):
         return self._get_obs(), {"Start_pos": self.pos}
 
     def get_next_pos(self, action: int) -> tuple[float, float]:
-        dx, dy = self.dir_vecs[action]
+        dx = self.dir_vecs[action][0]; dy = self.dir_vecs[action][1]
         cx, cy = self.pos
         return float(cx + dx), float(cy + dy)
     
@@ -693,7 +738,7 @@ class CoverageEnv(gym.Env):
         eps = 1e-7
         cx, cy = self.pos; nx, ny = next_pos
         for action, dir_vec in enumerate(self.dir_vecs):
-            dx, dy = dir_vec
+            dx = dir_vec[0]; dy = dir_vec[1]
             if abs(nx - (cx+dx)) < eps and abs(ny - (cy+dy)) < eps:
                 return action
         else:

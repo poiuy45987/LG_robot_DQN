@@ -249,8 +249,8 @@ class DQNAgent:
                     print(f"Resumed training from episode {checkpoint_data['episode']} with reward {checkpoint_data['episode_reward']}", flush=True)
 
                     # Replay buffer loading
-                    replay_buffer_file_path = os.path.join(checkpoint_dir, self.args.buffer_file_name)
-                    self._load_memory(replay_buffer_file_path)
+                    # replay_buffer_file_path = os.path.join(checkpoint_dir, self.args.buffer_file_name)
+                    # self._load_memory(replay_buffer_file_path)
                     
                 else:
                     print("No checkpoint files found!", flush=True)
@@ -358,8 +358,8 @@ class DQNAgent:
             torch.save(checkpoint, save_path)
             
             # Replay buffer 저장
-            replay_buffer_file_path = os.path.join(checkpoint_dir, self.args.buffer_file_name)
-            self._save_memory(replay_buffer_file_path)
+            # replay_buffer_file_path = os.path.join(checkpoint_dir, self.args.buffer_file_name)
+            # self._save_memory(replay_buffer_file_path)
             
         else:
             raise ValueError(f"Unsupported mode: {mode}. Expected 'model' or 'checkpoint'.")
@@ -397,7 +397,7 @@ class DQNAgent:
         
         # 다음 좌표 계산
         cx, cy = env.pos
-        dx, dy = env.dir_vecs[action]
+        dx = env.dir_vecs[action][0]; dy = env.dir_vecs[action][1]
         nx = cx+dx; ny = cy+dy
         
         # Action masking 여부 계산
@@ -525,9 +525,9 @@ class DQNAgent:
         
         while queue:
             curr_pos = queue.popleft()
-            for dir_vec in env.dir_vecs:
+            for dir_vec in env.base_dir_vecs:
                 next_pos = (curr_pos[0]+dir_vec[0], curr_pos[1]+dir_vec[1])
-                new_cleaned_num, collided, _ = env.mark_trajectory(*next_pos, virtual=True) # FIXME
+                new_cleaned_num, collided, _ = env.mark_trajectory(int(next_pos[0]+0.5), int(next_pos[1]+0.5), virtual=True) # FIXME
                 if not collided and next_pos not in visited:
                     visited.add(next_pos)
                     parent[next_pos] = curr_pos
