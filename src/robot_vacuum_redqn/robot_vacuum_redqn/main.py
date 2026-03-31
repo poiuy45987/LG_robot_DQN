@@ -30,7 +30,7 @@ def parse_args():
     parser.add_argument('--pre_model_name', type=str, default=None, help='Pre-trained model file name for continued training')
     parser.add_argument('--model_name', type=str, default='model.pth', help='Model file name for saving or loading')
     parser.add_argument('--best_path_img_name', type=str, default='best_coverage_path.png', help='Best path image file name')
-    parser.add_argument('--buffer_file_name', type=str, default='replay_buffer_latest.npz', help='Replay buffer file name')
+    # parser.add_argument('--buffer_file_name', type=str, default='replay_buffer_latest.npz', help='Replay buffer file name')
     
     # ---- Training hyperparameter 설정 ----
     
@@ -131,6 +131,8 @@ def parse_args():
     env_set_group.add_argument('--local_view', type=float, default=200.0, help='Observation으로 출력할 local view의 크기: 단위 cm (Default: 200.0)')
     env_set_group.add_argument('--max_forward', type=float, default=50.0, help='한 방향으로 이동할 수 있는 최대 거리를 정규화하기 위한 수치: 단위 cm (Default: 50.0)')
     env_set_group.add_argument('--robot_size', type=float, default=36.0, help='로봇의 지름: 단위 cm (Default: 36.0)')
+    env_set_group.add_argument('--stack_steps', type=int, default=3, help='Map의 observation data의 step 수 (Default: 3)')
+    
     
     # Reward function 관련 설정
     env_set_group.add_argument('--uncleaned_reward', type=float, default=1.0, help='Uncleaned grid reward (Default: 1.0)')

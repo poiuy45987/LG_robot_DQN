@@ -465,10 +465,11 @@ class DQNAgent:
             # action_RL을 수행: next_state, reward, terminated 및 truncated 여부 등을 받음.
             # environment 내에서 trajectory의 변화는 없지만, replay buffer에는 transition data를 저장함.
             # 수행한 뒤, action을 수행하기 전의 환경으로 돌아감.
-            next_obs, reward, terminated, truncated, info = env.step(action_RL)
-            next_processed_obs = self._pre_process_obs(next_obs, target_dim=self.train_cfg.grid_map_size)
-            self.memory.append((processed_obs, action_RL, reward, next_processed_obs, terminated)) # processed_obs의 map data는 np.uint8 형태, Memory 용량을 줄임
-            env.one_step_back()
+            if mode == 'train':
+                next_obs, reward, terminated, truncated, info = env.step(action_RL)
+                next_processed_obs = self._pre_process_obs(next_obs, target_dim=self.train_cfg.grid_map_size)
+                self.memory.append((processed_obs, action_RL, reward, next_processed_obs, terminated)) # processed_obs의 map data는 np.uint8 형태, Memory 용량을 줄임
+                env.one_step_back()
             
             return self._get_heuristic_action(env) # Heuristic action을 return
         
@@ -523,9 +524,16 @@ class DQNAgent:
         visited = {start}       # set 형태. 탐색을 빠르게 수행. BFS를 하면서 지나간 grid를 저장하기 위한 용도
         parent = {start: None}  # 해당 grid로 오기 위해 어떤 grid를 거쳤는지 저장.
         
+        # 갇히는 문제를 해결하기 위해 마지막 action을 얻음
+        last_action = env.dir
+        action_num = env.action_space.n
+        back_action = (last_action + (action_num / 2)) % action_num
+        back_action_tuple = (env.dir_vecs[back_action][0], env.dir_vecs[back_action][1])
+        base_dir_vecs = env.base_dir_vecs.copy().append(back_action_tuple)
+        
         while queue:
             curr_pos = queue.popleft()
-            for dir_vec in env.base_dir_vecs:
+            for dir_vec in base_dir_vecs:
                 next_pos = (curr_pos[0]+dir_vec[0], curr_pos[1]+dir_vec[1])
                 new_cleaned_num, collided, _ = env.mark_trajectory(int(next_pos[0]+0.5), int(next_pos[1]+0.5), virtual=True) # FIXME
                 if not collided and next_pos not in visited:
@@ -536,6 +544,7 @@ class DQNAgent:
                 if new_cleaned_num > 0: # 새로운 grid를 밟을 수 있는 위치를 발견하면 그 위치로 이동하는 경로를 생성
                     self._get_dijkstra_traj_from_parent(parent, next_pos)
                     return env.get_next_action_from_next_pos(self.dijkstra_traj.pop(0))
+            base_dir_vecs = env.base_dir_vecs
         
         
     # State만 받는 것으로 수정    
@@ -769,7 +778,7 @@ class DQNAgent:
             plt.close(fig) # 별도의 정적 출력이 생기지 않도록 닫기
         
         while not done:
-            processed_obs = self._pre_process_obs(last_obs, target_dim=self.train_cfg.grid_map_size)
+            processed_obs = self._pre_process_obs(last_obs, target_dim=self.args.grid_map_size)
             action = self._get_action(env, processed_obs, mode='test', reset=reset)
             
             if debug: # FIXME: backstep 가는 method 추가

@@ -155,6 +155,7 @@ class EnvConfig:
     local_view: int = 200  # 단위: cm
     max_forward: int = 50 # 단위: cm
     robot_size: float = 36.0 # cm 단위
+    stack_steps: int = 3 # Map의 observation data의 step 수
     
     # Reward function parameter (footprint-based)
     uncleaned_reward: float = 1.0

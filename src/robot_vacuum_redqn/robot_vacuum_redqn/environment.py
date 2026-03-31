@@ -190,7 +190,7 @@ class CoverageEnv(gym.Env):
         
         # ---- 6. 로봇의 현재 위치와 방향 ----
         self.pos = None        # 로봇 중심의 현재 위치 (x, y)
-        self.dir = None        # 로봇이 바라보는 방향(이전에 진행한 방향) (0: E, 1: N, 2: W, 3: S)
+        self.dir = None        # 로봇이 바라보는 방향(이전에 진행한 방향)
         
         # 방향 전환 선택지
         step_len = 1
@@ -215,6 +215,9 @@ class CoverageEnv(gym.Env):
         self.fig = Figure()
         self.canvas = FigureCanvasAgg(self.fig)
         # ----------------------------------------------------
+        
+        # method에서 사용하는 변수
+        self._prev_xs = None; self._prev_ys = None
 
     def set_env_mode(self, warmup: bool = False, ep_steps: int = 2000):
         self.warmup = warmup
@@ -271,37 +274,6 @@ class CoverageEnv(gym.Env):
         ys = cy + self.robot_mask_offsets[:, 1]
         return xs, ys
 
-    
-    # def _collides(self, *args) -> bool:
-    #     """
-    #     Case 1: _collides(cx, cy) -> 중심 좌표로 경계 및 장애물 체크
-    #     Case 2: _collides(xs, ys) -> 이미 계산된 마스크 좌표 배열들로 장애물 체크
-    #     """
-    #     assert len(args) == 2
-        
-    #     arg1, arg2 = args
-    #     if np.isscalar(arg1) and np.isscalar(arg2):
-            
-    #         cx, cy = float(arg1), float(arg2)
-            
-    #         # 좌표가 정수로 주어지고 collision_map이 있는 경우
-    #         if cx.is_integer() and cy.is_integer() and self.collision_map is not None:
-    #             cx, cy = int(cx), int(cy)
-    #             if not (0 <= cx < self.W and 0 <= cy < self.H):
-    #                 return True
-    #             return bool(self.collision_map[cy, cx])
-                        
-    #         # 좌표가 실수이거나 collision map이 없는 경우
-    #         if not self._in_bounds_center(cx, cy):
-    #             return True
-    #         xs, ys = self._get_footprint_coords(cx, cy)
-            
-    #     elif isinstance(arg1, np.ndarray) and isinstance(arg2, np.ndarray):
-    #         xs, ys = arg1, arg2
-    #     else:
-    #         raise TypeError("Input must be tuple of scalar or tuple of np.ndarray")
-            
-    #     return bool((self.obstacles[ys, xs] == 1).any())
     
     def _collides(self, *args) -> bool:
         """
@@ -378,8 +350,7 @@ class CoverageEnv(gym.Env):
         coverable &= (self.obstacles == 0).astype(np.uint8)
         return coverable
     
-    # FIXME: revisit_degree 삭제할지 결정. 주석에서도 삭제
-    # FIXME: 이 함수를 env 밖에서도 사용하고 있음.
+    
     def mark_trajectory(self, cx: float, cy: float, flag: bool=True, virtual: bool=False) -> tuple[int, bool, np.ndarray]:
         """
         로봇 중심이 (cx, cy)일 때 cleaned_map에 발자국을 찍는 method
@@ -398,6 +369,7 @@ class CoverageEnv(gym.Env):
                 - revisit_degree (float): 로봇 청소기가 현재 위치한 영역을 이전에 얼마나 청소했는지 표시하는 인자. 
                     1.0 이상이면 영역의 grid 모두가 이전에 청소한 적이 있음. 숫자가 클수록 더 자주 청소했다는 의미
         """
+        
         new_cleaned_num = 0
         # revisit_degree = 0.0
         
@@ -427,10 +399,26 @@ class CoverageEnv(gym.Env):
         
         # virtual인 경우 map에 trajectory를 표시하지 않음.
         if not virtual:
-            self.cleaned[ys, xs] = 1 # cleaned_map은 무조건 1로만 덮어씌움
+            # self.cleaned[ys, xs] = 1 # cleaned_map은 무조건 1로만 덮어씌움
+            
+            # self.cleaned 수정: 이전 step에서 차지하지 않았던 grid의 수치를 1 올림
+            if self._prev_xs is not None and self._prev_ys is not None:
+                curr_idx = ys * self.W + xs
+                prev_idx = self._prev_xs * self.W + self._prev_ys
+                new_mask = ~np.isin(curr_idx, prev_idx)
+                new_xs, new_ys = xs[new_mask], ys[new_mask]
+            else:
+                new_xs, new_ys = xs, ys
+            self.cleaned[new_ys, new_xs] = np.where(self.cleaned[new_ys, new_xs] < 255, self.cleaned[new_ys, new_xs]+1, 255) # cleaned_map update: Overflow 고려
+                
+            
             cx = int(cx+0.5); cy = int(cy+0.5) # 실수 좌표를 반올림
             self.visited[cy, cx] = self.visited[cy, cx]+1 if self.visited[cy, cx] < 255 else 255 # visited_map은 다시 방문할 때마다 1을 추가 (Overflow 고려)
 
+            # FIXME: 이 변수를 reset에 선언
+            self._prev_xs = xs.copy(); self._prev_ys = ys.copy()
+        
+        
         return new_cleaned_num, False, new_cleaned_grid_indices
 
 
@@ -515,6 +503,7 @@ class CoverageEnv(gym.Env):
             # 장애물이 없으면 레이가 맵 끝까지 간 거리 반 len(line_x_idx)이 아님에 주의
             return float(len(line_x_idx))
 
+    
     def _crop_patch(self, arr: np.ndarray, cx: float, cy: float, value: int | list | tuple = 0) -> np.ndarray:
         """
         전체 map data에서 local map data를 뽑는 method
@@ -557,6 +546,57 @@ class CoverageEnv(gym.Env):
             raise ValueError(f"Invalid observation dimension: {arr.ndim}. Expected 2 or 3.")
         
         return patch
+    
+    
+    # def _crop_patch(self, arr: np.ndarray, cx: float, cy: float, value: int | list | tuple = 0) -> np.ndarray:
+    #     """
+    #     전체 map data에서 local map data를 뽑는 method
+
+    #     Args:
+    #         arr (np.ndarray): 전체 map data, Shape: (C, H, W) or (H, W)
+    #         cx, cy (int): Local map 중심의 좌표
+    #         value (int | list | tuple, optional): 각 채널에서 local data를 뽑을 때 padding value. 채널 순서대로 지정
+
+    #     Returns:
+    #         np.ndarray: Local map data, Shape: (C, H, W) or (H, W)
+    #     """
+    #     cx, cy = self._float_to_int_coord(cx, cy)
+    #     r = self.local_view//2
+    #     px, py = cx+r+1, cy+r+1
+        
+    #     if arr.ndim == 2:
+    #         assert isinstance(value, int)
+    #         padded = np.pad(arr, pad_width=r+1, mode="constant", constant_values=value)
+    #         patch = padded[py-r-1:py+r+2, px-r-1:px+r+2]
+            
+    #         # 가장자리에 평균값 데이터 추가
+    #         if cx > r:
+    #             patch[1:-1, 0] = np.mean(padded[min(0, py-r):py+r+1, r+1:px-r])
+            
+    #         if cx <
+                
+            
+    #     elif arr.ndim == 3:
+            
+    #         num_channels = arr.shape[0]
+    #         if isinstance(value, (list, tuple)):
+    #             if len(value) != num_channels:
+    #                 raise ValueError(f"Length of value ({len(value)}) must match num_channels ({num_channels})")
+    #             pad_vals = value
+    #         else:
+    #             pad_vals = [value] * num_channels
+                
+    #         padded_channels = [
+    #             np.pad(arr[i], pad_width=r+1, mode="constant", constant_values=pad_vals[i])
+    #             for i in range(num_channels)
+    #         ]
+    #         final_padded = np.stack(padded_channels, axis=0)
+    #         patch = final_padded[:, py-r-1:py+r+2, px-r-1:px+r+2]
+            
+    #     else:
+    #         raise ValueError(f"Invalid observation dimension: {arr.ndim}. Expected 2 or 3.")
+        
+    #     return patch
 
     
     def _get_agent_layer(self, cx: float, cy: float):
@@ -583,10 +623,21 @@ class CoverageEnv(gym.Env):
         
         cx, cy = self.pos
         
-        # local_map 정보가 담긴 patch를 얻음
-        full_layer = np.stack([self.collision_map, self.cleaned, self.visited], axis=0)
-        patch = self._crop_patch(full_layer, cx, cy, value=[1, 0, 0])
+        # ---------------- Local map data ----------------
+        # 1. 현재 step에서 local_map 정보가 담긴 patch를 얻음
+        full_layer = np.stack([self.obstacles, self.cleaned, self.visited], axis=0)
+        current_patch = self._crop_patch(full_layer, cx, cy, value=[1, 0, 0])
         
+        # 2. 현재 step의 local_map 정보를 self.patch_stack에 저장.
+        if len(self.patch_stack) == 0:
+            self.patch_stack.extend([current_patch] * self.cfg.patch_stack_num)
+        else:
+            self.patch_stack.append(current_patch)
+        
+        # 3. self.patch_stack에 저장된 patch들을 합쳐서 observation으로 사용
+        total_patch = np.concatenate(list(self.patch_stack), axis=0).astype(np.float32)
+        # ------------------------------------------------
+            
         # 학습에 도움이 될 만한 수치적인 정보를 생성
         # 로봇의 위치 정보: [-1, 1]의 범위로 정규화
         x_norm = (cx/(self.W-1))*2-1
@@ -616,7 +667,7 @@ class CoverageEnv(gym.Env):
             np.array([cov_norm], dtype=np.float32),
         ], axis=0).astype(np.float32)
         
-        return {"map": patch, "vec": obs_vec, 'action_mask': action_mask}
+        return {"map": total_patch, "vec": obs_vec, 'action_mask': action_mask}
     
     
     def _get_traj_data(self, new_cleaned_num: int, new_covered_cell_indices: np.array, add_visted: bool = True) -> dict:
@@ -726,6 +777,8 @@ class CoverageEnv(gym.Env):
             self.traj.append(self._get_traj_data(new_cleaned_num, new_cleaned_grid_indices))     
             
             coverable_area_rate = self.total_coverable_area / (self.H * self.W) # coverable_area_rate이 너무 낮으면 맵을 재생성해야 함.
+        
+        self.patch_stack = deque(maxlen=self.cfg.local_view_steps) # Observation 정보를 얻는 local map step 수
             
         return self._get_obs(), {"Start_pos": self.pos}
 
@@ -987,20 +1040,31 @@ class CoverageEnv(gym.Env):
         traj_map[self.obstacles == 1] = 1 # Obstacle 표시
         traj_map[self.cleaned > 0] = 2   # Cleaned 영역 표시
         traj_map[agent_layer == 1] = 3    # 현재 로봇 위치 표시
-        custom_cmap = ListedColormap(['white', 'black', 'yellow', 'red', 'blue'])
+        
+        # 색깔 설정
+        color_bg = [1, 1, 1]                    # 흰색 (Index 0)
+        color_obs = [0, 0, 0]                   # 검정 (Index 1)
+        color_cleaned = [0.72, 0.88, 1.0]       # 빨강 (Index 2)
+        color_robot = [0, 0, 1]                 # 진한 파랑 (Index 3)
+        color_uncoverable = [1.0, 0.65, 0.65]   # 하늘색 (Index 4)
+        color_traj = [0.1216, 0.4667, 0.7059]   # 연한 파랑
+        color_start = 'purple'
+        color_end = 'green'
+        
+        custom_cmap = ListedColormap([color_bg, color_obs, color_cleaned, color_robot, color_uncoverable])
         ax1.imshow(traj_map, cmap=custom_cmap, origin='lower', vmin=0, vmax=4)
         # 로봇이 움직인 궤적 표시
         if len(self.traj) > 1:
             traj_arr = self.traj.get_pos_traj()
-            ax1.plot(traj_arr[:, 0], traj_arr[:, 1], color='lime', linewidth=1.5, alpha=0.8, zorder=5)
-            ax1.plot(traj_arr[0, 0], traj_arr[0, 1], color='purple', marker='o', zorder=6)
+            ax1.plot(traj_arr[:, 0], traj_arr[:, 1], color=color_traj, linewidth=1.5, alpha=0.8, zorder=5)
+            ax1.plot(traj_arr[0, 0], traj_arr[0, 1], color=color_start, marker='o', zorder=6)
         legend_elements_1 = [
-            Patch(facecolor='black', edgecolor='black', label='Obstacles'),
-            Patch(facecolor='yellow', edgecolor='yellow', label='Cleaned region'),
-            Patch(facecolor='red', edgecolor='red', label='Robot'),
-            Patch(facecolor='blue', edgecolor='blue', label='Uncoverable region'),
-            Line2D([0], [0], color='lime', lw=1.5, label='Trajectory'),
-            Line2D([0], [0], marker='o', color='purple', label='Start_pos', markerfacecolor='purple', linestyle='None'),
+            Patch(facecolor=color_obs, edgecolor=color_obs, label='Obstacles'),
+            Patch(facecolor=color_cleaned, edgecolor=color_cleaned, label='Cleaned region'),
+            Patch(facecolor=color_robot, edgecolor=color_robot, label='Robot'),
+            Patch(facecolor=color_uncoverable, edgecolor=color_uncoverable, label='Uncoverable region'),
+            Line2D([0], [0], color=color_traj, lw=1.5, label='Trajectory'),
+            Line2D([0], [0], marker='o', color=color_start, label='Start_pos', markerfacecolor=color_start, linestyle='None'),
         ]
         ax1.legend(handles=legend_elements_1, loc='upper left', bbox_to_anchor=(1.05, 1))
         ax1.set_title(f"Coverage: {self.last_coverage:.2f}")
@@ -1012,9 +1076,12 @@ class CoverageEnv(gym.Env):
         # --------------------------------------------------------------------
         
         # Color 지정: RGB값
-        obs_c = [0, 0, 0]; unc_c = [0, 0, 1]
+        obs_c = [0, 0, 0]; unc_c = [1.0, 0.65, 0.65]
         
-        img2 = ax2.imshow(self.visited, cmap='YlOrRd', origin='lower', vmin=0, vmax=10) # self.visited을 시각화
+        vis_data = self.cleaned.astype(np.float32).copy()
+        vis_data[vis_data == 0] = np.nan
+        
+        img2 = ax2.imshow(vis_data, cmap='viridis', origin='lower', vmin=1, vmax=10) # self.visited을 시각화
         cbar = self.fig.colorbar(img2, ax=ax2, 
                                  orientation='horizontal',
                                  pad=0.1,
@@ -1036,14 +1103,14 @@ class CoverageEnv(gym.Env):
         # 시작 위치와 현재 위치 표시
         if len(self.traj) > 1:
             traj_arr = self.traj.get_pos_traj()
-            ax2.plot(traj_arr[0, 0], traj_arr[0, 1], color='purple', marker='o', zorder=3)
-            ax2.plot(traj_arr[-1, 0], traj_arr[-1, 1], color='green', marker='o', zorder=4)
+            ax2.plot(traj_arr[0, 0], traj_arr[0, 1], color=color_start, marker='o', zorder=3)
+            ax2.plot(traj_arr[-1, 0], traj_arr[-1, 1], color=color_end, marker='o', zorder=4)
 
         legend_elements_2 = [
             Patch(facecolor=obs_c, edgecolor=obs_c, label='Obstacles'),
             Patch(facecolor=unc_c, edgecolor=unc_c, label='Uncoverable region'),
-            Line2D([0], [0], marker='o', color='purple', label='Start_pos', markerfacecolor='purple', linestyle='None'),
-            Line2D([0], [0], marker='o', color='green', label='Final_pos', markerfacecolor='green', linestyle='None'),
+            Line2D([0], [0], marker='o', color=color_start, label='Start_pos', markerfacecolor=color_start, linestyle='None'),
+            Line2D([0], [0], marker='o', color=color_end, label='Final_pos', markerfacecolor=color_end, linestyle='None'),
         ]
         ax2.legend(handles=legend_elements_2, loc='upper left', bbox_to_anchor=(1.05, 1))
         ax2.set_title("Visited map")
@@ -1074,7 +1141,7 @@ class CoverageEnv(gym.Env):
         # collision_map
         img0 = axes[0].imshow(obs['map'][0], cmap='gray_r', origin='lower')
         axes[0].plot(H//2, W//2, 'r.')
-        axes[0].set_title("Collision_map local view")
+        axes[0].set_title("Obstacle_map local view")
         legend_elements0 = [
             Patch(facecolor='black', edgecolor='black', label='Obstacles'),
             Patch(facecolor='white', edgecolor='black', label='Free space'),
