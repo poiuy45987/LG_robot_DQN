@@ -467,7 +467,7 @@ class DQNAgent:
             # 수행한 뒤, action을 수행하기 전의 환경으로 돌아감.
             if mode == 'train':
                 next_obs, reward, terminated, truncated, info = env.step(action_RL)
-                next_processed_obs = self._pre_process_obs(next_obs, target_dim=self.train_cfg.grid_map_size)
+                next_processed_obs = self._pre_process_obs(next_obs, target_dim=self.args.grid_map_size)
                 self.memory.append((processed_obs, action_RL, reward, next_processed_obs, terminated)) # processed_obs의 map data는 np.uint8 형태, Memory 용량을 줄임
                 env.one_step_back()
             
@@ -524,16 +524,9 @@ class DQNAgent:
         visited = {start}       # set 형태. 탐색을 빠르게 수행. BFS를 하면서 지나간 grid를 저장하기 위한 용도
         parent = {start: None}  # 해당 grid로 오기 위해 어떤 grid를 거쳤는지 저장.
         
-        # 갇히는 문제를 해결하기 위해 마지막 action을 얻음
-        last_action = env.dir
-        action_num = env.action_space.n
-        back_action = (last_action + (action_num / 2)) % action_num
-        back_action_tuple = (env.dir_vecs[back_action][0], env.dir_vecs[back_action][1])
-        base_dir_vecs = env.base_dir_vecs.copy().append(back_action_tuple)
-        
         while queue:
             curr_pos = queue.popleft()
-            for dir_vec in base_dir_vecs:
+            for dir_vec in env.base_dir_vecs:
                 next_pos = (curr_pos[0]+dir_vec[0], curr_pos[1]+dir_vec[1])
                 new_cleaned_num, collided, _ = env.mark_trajectory(int(next_pos[0]+0.5), int(next_pos[1]+0.5), virtual=True) # FIXME
                 if not collided and next_pos not in visited:
@@ -544,7 +537,6 @@ class DQNAgent:
                 if new_cleaned_num > 0: # 새로운 grid를 밟을 수 있는 위치를 발견하면 그 위치로 이동하는 경로를 생성
                     self._get_dijkstra_traj_from_parent(parent, next_pos)
                     return env.get_next_action_from_next_pos(self.dijkstra_traj.pop(0))
-            base_dir_vecs = env.base_dir_vecs
         
         
     # State만 받는 것으로 수정    
@@ -792,9 +784,9 @@ class DQNAgent:
                         vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
                         q_values = self.policy_net(map_tensor, vec_tensor).squeeze().cpu().numpy()
                     
-                    action_list = ['E', 'N', 'W', 'S']
-                    action_info = (f"[Selected action]: {action_list[action]}\n"
-                                   f"[Q-values] E: {q_values[0]:.2f}, N: {q_values[1]:.2f}, W: {q_values[2]:.2f}, S: {q_values[3]:.2f}")
+                    # action_list = ['E', 'N', 'W', 'S']
+                    # action_info = (f"[Selected action]: {action_list[action]}\n"
+                    #                f"[Q-values] E: {q_values[0]:.2f}, N: {q_values[1]:.2f}, W: {q_values[2]:.2f}, S: {q_values[3]:.2f}")
                     
                     # [3] 데이터만 가져와서 기존 이미지 객체에 덮어쓰기 (가장 핵심)
                     traj_img = env.get_visualized_img(img_choice='traj')
@@ -802,7 +794,7 @@ class DQNAgent:
                     
                     im_traj.set_data(traj_img)
                     im_obs.set_data(obs_img)
-                    text_traj.set_text(action_info)
+                    # text_traj.set_text(action_info)
                     
                     # [4] 화면 갱신 (도화지 위치는 그대로, 내용물만 부드럽게 변경)
                     display_handle.update(fig)
@@ -1056,6 +1048,8 @@ class DQNAgent:
     def test(self):
         self.policy_net.eval() # eval mode로 전환
         coverage = []
+        overlap = []
+        cleaning_time = []
         max_coverage = 0.0
         min_coverage = 100.0
         coverage_mean = 0.0
@@ -1076,8 +1070,10 @@ class DQNAgent:
                 self.test_env.show_visualized_img(img_choice='traj') # trajectory 시각화
                 
                 # Coverage 값이 유효한 경우에만 저장: Reachable grid의 수가 전체 grid 수의 절반은 넘어야 함.
-                if self.test_env.reachable.sum() >= self.test_env.H * self.test_env.W * 0.5:
+                if self.test_env.coverable.sum() >= self.test_env.H * self.test_env.W * 0.5:
                     coverage.append(cur_coverage) # Coverage 평균을 구하기 위해 cur_coverage를 저장
+                    overlap.append(self.test_env.overlap_rate)
+                    cleaning_time.append(self.test_env.cleaning_time)
                     if cur_coverage > max_coverage:
                         max_coverage = cur_coverage
                     if cur_coverage < min_coverage:
@@ -1091,4 +1087,6 @@ class DQNAgent:
         print(f"[Test result]\n"
               f"Coverage mean: {coverage_mean*100:.2f}%\n"
               f"Max coverage:  {max_coverage*100:.2f}%\n"
-              f"Min coverage:  {min_coverage*100:.2f}%") 
+              f"Min coverage:  {min_coverage*100:.2f}%\n"
+              f"Overlap rate mean: {np.mean(overlap)*100:.2f}%\n"
+              f"Cleaning time mean: {np.mean(cleaning_time):.2f} s") 
