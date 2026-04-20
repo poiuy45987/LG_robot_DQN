@@ -2,7 +2,12 @@ from dataclasses import dataclass, field
 import warnings
 
 DEFAULT_SEED = 42
+
 ACTION_NUM = 16
+CLEANED_MAP_MAX = 10
+TRACE_MAP_MAX = 50
+LOCAL_VIEW_DIM = 51
+    
 
 @dataclass
 class TrainConfig: # Training과 관련된 설정들
@@ -44,7 +49,6 @@ class TrainConfig: # Training과 관련된 설정들
     use_action_masking: bool = False
     
     # --- State pre-processing 및 Q-value ---
-    grid_map_size: int = 51
     do_normalize: bool = False
     gamma: float = 0.99
     
@@ -114,7 +118,7 @@ class EnvConfig:
     
     # ---- house map params ----
     
-    grid_size: float = 4.0 # cm 단위
+    grid_size: float = 2.5 # cm 단위
     map_height: float = 400.0 # cm 단위
     map_width: float = 400.0 # cm 단위
     
@@ -128,22 +132,23 @@ class EnvConfig:
     use_house_map: bool = field(init=False)
 
     # 모든 size는 cm 단위
-    num_tables: int = 10
-    max_table_size: float = 100.0
-    min_table_size: float = 80.0
-    table_leg_size: float = 8.0
+    num_tables: int = 3
+    max_table_size: float = 200.0
+    min_table_size: float = 100.0
+    table_leg_size: float = 10.0
 
-    chair_size: float = 50.0
     chairs_per_table_min: int = 2
     chairs_per_table_max: int = 4
-    chair_leg_size: float = 4.0
-    chair_spread: float = 15.0
+    max_chair_size: float = 65.0
+    min_chair_size: float = 55.0
+    chair_leg_size: float = 5.0
+    chair_spread: float = 20.0
     
     small_obs_size_max: float = 15.0
     small_obs_size_min: float = 10.0
     window_size: float = 100
-    small_obs_num_per_window_max: int = 2
-    small_obs_num_per_window_min: int = 1
+    small_obs_num_per_window_max: int = 0
+    small_obs_num_per_window_min: int = 0
     
     # ---- environment params ----
     
@@ -179,6 +184,8 @@ class EnvConfig:
         # 1. max값과 min값 비교
         if self.max_table_size < self.min_table_size:
             raise ValueError(f"max_table_size({self.max_table_size}) is smaller than min_table_size({self.min_table_size}).")
+        if self.max_chair_size < self.min_chair_size:
+            raise ValueError(f"max_chair_size({self.max_chair_size}) is smaller than min_chair_size({self.min_chair_size}).")
         if self.chairs_per_table_max < self.chairs_per_table_min:
             raise ValueError(f"chairs_per_table_max({self.chairs_per_table_max}) is smaller than chairs_per_table_min({self.chairs_per_table_min}).")
         if self.small_obs_size_max < self.small_obs_size_min:
@@ -199,8 +206,10 @@ class EnvConfig:
         # 3. 의자 및 책상 다리 두께 검사
         if self.table_leg_size*2 >= self.min_table_size:
             raise ValueError(f"table_leg_size({self.table_leg_size}) is too big. It should be smaller than {self.min_table_size/2.0}.")
-        if self.chair_leg_size*2 >= self.chair_size:
-            raise ValueError(f"chair_leg_size({self.chair_leg_size}) is too big. It should be smaller than {self.chair_size/2.0}.")
+        if self.chair_leg_size*2 >= self.max_chair_size:
+            raise ValueError(f"chair_leg_size({self.chair_leg_size}) is too big. It should be smaller than {self.max_chair_size/2.0}.")
+        if self.chair_leg_size*2 >= self.min_chair_size:
+            raise ValueError(f"chair_leg_size({self.chair_leg_size}) is too big. It should be smaller than {self.min_chair_size/2.0}.")
         
         # 4. 맵 크기 대비 grid, window, robot 등의 size가 적절한지 검사
         min_map_dim = min(self.map_height, self.map_width)
@@ -250,7 +259,8 @@ class EnvConfig:
         self.min_table_size = self._to_grid(self.min_table_size)
         self.table_leg_size = self._to_grid(self.table_leg_size)
         
-        self.chair_size = self._to_grid(self.chair_size)
+        self.max_chair_size = self._to_grid(self.max_chair_size)
+        self.min_chair_size = self._to_grid(self.min_chair_size)
         self.chair_leg_size = self._to_grid(self.chair_leg_size)
         self.chair_spread = self._to_grid(self.chair_spread)
         

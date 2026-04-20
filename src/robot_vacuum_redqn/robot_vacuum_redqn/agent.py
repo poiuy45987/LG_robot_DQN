@@ -14,17 +14,18 @@ import pytz
 import random
 import time
 import os
+from dataclasses import asdict
 
 import glob
 from PIL import Image
 from IPython.display import display, clear_output
 
 # 앞서 정의한 클래스들을 임포트한다고 가정 (또는 같은 파일에 위치)
-from .config import EnvConfig, TrainConfig, DEFAULT_SEED, ACTION_NUM
+from .config import EnvConfig, TrainConfig, ACTION_NUM, CLEANED_MAP_MAX, TRACE_MAP_MAX, LOCAL_VIEW_DIM
 from .environment import CoverageEnv
 from .redqn_network import CNN_ReDQN
 
-def get_device_info(device):
+def get_device_info(device: torch.device):
     
     print("-" * 30)
     print(f"  [System Configuration]")
@@ -46,6 +47,7 @@ class DQNAgent:
         self.args = args
         self.seed = args.seed
         self.model_name = os.path.join(args.model_dir, args.model_name)
+        self.map_save_dir = args.map_save_dir
         
         # Device 설정
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -60,44 +62,56 @@ class DQNAgent:
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
         
+        # Environment 조성을 위한 config
+        env_args = {
+            k: v for k, v in vars(args).items() 
+            if k in EnvConfig.__dataclass_fields__ and v is not None
+        }
+        self.env_cfg = EnvConfig(**env_args)
+        
         # Policy network 조성
         network_config = {
             'action_size': ACTION_NUM,
             'use_noisy': args.use_noisy,
-            'grid_map_size': args.grid_map_size,
+            'local_view_dim': LOCAL_VIEW_DIM,
             'do_normalize': args.do_normalize,
+            'stack_steps': self.env_cfg.stack_steps,
         }
         self.policy_net = CNN_ReDQN(**network_config).to(self.device)
         
-        # Environment 조성을 위한 config
-        env_cfg = EnvConfig(**{k: v for k, v in vars(args).items() if k in EnvConfig.__dataclass_fields__})
-        
-        # Action masking 관련
+        # Heuristic trajectory
+        self.dijkstra_traj = []
         
         # Train과 관련된 instance 변수는 mode가 train일 때만 생성
         if args.mode == 'train':
             
-            # Train environment와 validation environement 조성
-            self.env = CoverageEnv(env_cfg, seed=args.seed)
-            if args.reset_only_start_pos:
-                self.valid_env = CoverageEnv(env_cfg, seed=args.seed) # 훈련용 environment와 같은 환경을 구성하기 위해서
-            else:
-                self.valid_env = CoverageEnv(env_cfg, seed=args.seed+1000) # 훈련용 environment와 다른 환경을 구성하기 위해서
-                
             # Train hyperparameter를 받음
-            self.train_cfg = TrainConfig(**{k: v for k, v in vars(args).items() if k in TrainConfig.__dataclass_fields__})         
+            train_args = {
+                k: v for k, v in vars(args).items() 
+                if k in TrainConfig.__dataclass_fields__ and v is not None
+            }
+            self.train_cfg = TrainConfig(**train_args)
             
+            # Train environment와 validation environment 조성
+            self.env = CoverageEnv(self.env_cfg, seed=args.seed)
+            if self.train_cfg.reset_only_start_pos:
+                self.valid_env = CoverageEnv(self.env_cfg, seed=args.seed) # 훈련용 environment와 같은 환경을 구성하기 위해서
+            else:
+                self.valid_env = CoverageEnv(self.env_cfg, seed=args.seed+1000) # 훈련용 environment와 다른 환경을 구성하기 위해서
+                
             # Training에 필요한 변수 설정
-            self.total_steps = 0                # Training을 진행한 steps 수 (Warmup 과정 포함)
-            self.warmup_steps = 0               # Buffer에 data를 채우기 위한 warmup steps 수
-            self.no_warmup_steps = 0            # total_steps에서 warmup 과정 동안 소요된 step 수를 제외한 step 수
-            self.start_episode = 1              # 시작 episode 번호: Checkpoint을 loading할 때 수정될 수 있음
-            self.best_coverage_mean = 0.0       # Validation을 수행했을 때 가장 높았던 coverage
-            self.best_coverage_path_img = None  # Validation을 수행했을 때 가장 coverage를 잘 했던 trajectory를 img로 저장 (RGB image)
+            self.total_steps = 0                        # Training을 진행한 steps 수 (Warmup 과정 포함)
+            self.warmup_steps = 0                       # Buffer에 data를 채우기 위한 warmup steps 수
+            self.no_warmup_steps = 0                    # total_steps에서 warmup 과정 동안 소요된 step 수를 제외한 step 수
+            self.start_episode = 1                      # 시작 episode 번호: Checkpoint을 loading할 때 수정될 수 있음
+            self.max_coverage_mean = 0.0                # Validation을 수행했을 때 가장 높았던 coverage
+            self.min_overlap_rate_mean = float('inf')   # Validation을 수행했을 때 가장 낮았던 overlap rate
+            self.min_cleaning_time_mean = float('inf')  # Validation을 수행했을 때 가장 낮았던 cleaning time    
+            self.best_traj_img = None                   # Validation을 수행했을 때 가장 coverage를 잘 했던 trajectory를 img로 저장 (RGB image)
         
             # Target network, Replay buffer 조성
             self.target_net = CNN_ReDQN(**network_config).to(self.device)   # Target network
-            self.memory = deque(maxlen=args.buffer_size)          # Replay Buffer
+            self.memory = deque(maxlen=self.train_cfg.buffer_size)          # Replay Buffer
             
             # Training을 위한 난수 생성기의 seed 설정
             self.train_rng = np.random.default_rng(seed=args.seed)
@@ -112,7 +126,8 @@ class DQNAgent:
                 'softmax_temp', 'use_noisy', 'target_with_noisy', 'gamma', 'reset_only_start_pos',
                 'uncleaned_reward', 'cleaned_penalty', 'obstacle_penalty', 'turn_penalty', 'step_penalty'      
             ]
-            params_config = {k: v for k, v in vars(args).items() if k in params_list_for_log}
+            train_cfg_dict = asdict(self.train_cfg)
+            params_config = {k: v for k, v in train_cfg_dict.items() if k in params_list_for_log}
             
             # TensorBoard 설정
             self.tb_writer = None
@@ -143,18 +158,18 @@ class DQNAgent:
             # ---------------------------------------------------------
             
             # Optimizer 설정
-            if args.optimizer == 'sgd':
-                self.optimizer = optim.SGD(self.policy_net.parameters(), lr=args.lr, momentum=args.momentum)
-            elif args.optimizer == 'adam':
-                self.optimizer = optim.Adam(self.policy_net.parameters(), lr=args.lr)
+            if self.train_cfg.optimizer == 'sgd':
+                self.optimizer = optim.SGD(self.policy_net.parameters(), lr=self.train_cfg.lr, momentum=self.train_cfg.momentum)
+            elif self.train_cfg.optimizer == 'adam':
+                self.optimizer = optim.Adam(self.policy_net.parameters(), lr=self.train_cfg.lr)
             else:
-                raise ValueError(f"Unsupported optimizer type: {args.optimizer}")
+                raise ValueError(f"Unsupported optimizer type: {self.train_cfg.optimizer}")
         
         elif args.mode == 'test':
             if args.reset_only_start_pos:
-                self.test_env = CoverageEnv(env_cfg, seed=args.seed) # Test environment 구현
+                self.test_env = CoverageEnv(self.env_cfg, seed=args.seed) # Test environment 구현
             else:
-                self.test_env = CoverageEnv(env_cfg, seed=args.seed+2000) # Test environment 구현
+                self.test_env = CoverageEnv(self.env_cfg, seed=args.seed+2000) # Test environment 구현
             
         # Loading model
         self._load_model(args)
@@ -196,17 +211,19 @@ class DQNAgent:
                 pre_trained_model = torch.load(pre_trained_model_path, map_location=self.device, weights_only=False)
                 self.policy_net.load_state_dict(pre_trained_model['model_state_dict'])
                 self.target_net.load_state_dict(pre_trained_model['model_state_dict'])
-                self.best_coverage_mean = pre_trained_model['best_coverage_mean']
+                self.max_coverage_mean = pre_trained_model['max_coverage_mean']
+                self.min_overlap_rate_mean = pre_trained_model['min_overlap_rate_mean']
+                self.min_cleaning_time_mean = pre_trained_model['min_cleaning_time_mean']
                 
-                # 이전 modeld의 checkpoint 폴더에 저장된 best_coverage_path_img를 불러옴
+                # 이전 modeld의 checkpoint 폴더에 저장된 best_traj_img를 불러옴
                 pre_model_name_base, _ = os.path.splitext(args.pre_model_name) # 확장자 '.pth'를 제거한 model_name
                 pre_model_checkpoint_dir = os.path.join(model_dir, pre_model_name_base + "_checkpoints")
                 if os.path.isdir(pre_model_checkpoint_dir): # Checkpoint 저장 폴더가 없으면 폴더를 생성 생성
-                    best_coverage_path_img_path = os.path.join(checkpoint_dir, args.best_path_img_name)
-                    if os.path.isfile(best_coverage_path_img_path):
-                        loaded_img = cv2.imread(best_coverage_path_img_path) # BGR image
+                    best_traj_img_path = os.path.join(checkpoint_dir, args.best_traj_img_name)
+                    if os.path.isfile(best_traj_img_path):
+                        loaded_img = cv2.imread(best_traj_img_path) # BGR image
                         if loaded_img is not None: 
-                            self.best_coverage_path_img = cv2.cvtColor(loaded_img, cv2.COLOR_BGR2RGB) # BGR -> RGB 변환
+                            self.best_traj_img = cv2.cvtColor(loaded_img, cv2.COLOR_BGR2RGB) # BGR -> RGB 변환
                 
                 print(f"Loaded pre-trained model: {pre_trained_model_path}", flush=True)
             
@@ -237,14 +254,16 @@ class DQNAgent:
                     self.total_steps = checkpoint_data['total_steps']
                     self.no_warmup_steps = checkpoint_data['no_warmup_steps']
                     self.start_episode = checkpoint_data['episode'] + 1
-                    self.best_coverage_mean = checkpoint_data['best_coverage_mean']
+                    self.max_coverage_mean = checkpoint_data['max_coverage_mean']
+                    self.min_overlap_rate_mean = checkpoint_data['min_overlap_rate_mean']
+                    self.min_cleaning_time_mean = checkpoint_data['min_cleaning_time_mean']
                     
-                    # checkpoint 폴더에 저장된 best_coverage_path_img를 불러옴
-                    best_coverage_path_img_path = os.path.join(checkpoint_dir, args.best_path_img_name)
-                    if os.path.isfile(best_coverage_path_img_path):
-                        loaded_img = cv2.imread(best_coverage_path_img_path) # BGR image
+                    # checkpoint 폴더에 저장된 best_traj_img를 불러옴
+                    best_traj_img_path = os.path.join(checkpoint_dir, args.best_traj_img_name)
+                    if os.path.isfile(best_traj_img_path):
+                        loaded_img = cv2.imread(best_traj_img_path) # BGR image
                         if loaded_img is not None: 
-                            self.best_coverage_path_img = cv2.cvtColor(loaded_img, cv2.COLOR_BGR2RGB) # BGR -> RGB 변환
+                            self.best_traj_img = cv2.cvtColor(loaded_img, cv2.COLOR_BGR2RGB) # BGR -> RGB 변환
                     
                     print(f"Resumed training from episode {checkpoint_data['episode']} with reward {checkpoint_data['episode_reward']}", flush=True)
 
@@ -319,14 +338,16 @@ class DQNAgent:
             checkpoint = {
                 'model_state_dict': self.policy_net.state_dict(),
                 'optimizer_state_dict': self.optimizer.state_dict(),
-                'best_coverage_mean': self.best_coverage_mean,
+                'max_coverage_mean': self.max_coverage_mean,
+                'min_overlap_rate_mean': self.min_overlap_rate_mean,
+                'min_cleaning_time_mean': self.min_cleaning_time_mean,
             }
             torch.save(checkpoint, model_save_path)
             
             # Checkpoint 파일에 가장 coverage가 잘 수행된 trajectory 그림을 저장
-            if self.best_coverage_path_img is not None:
-                img_file_path = os.path.join(checkpoint_dir, self.args.best_path_img_name)
-                img_bgr = cv2.cvtColor(self.best_coverage_path_img, cv2.COLOR_RGB2BGR) # OpenCV 저장용: (RGB -> BGR)
+            if self.best_traj_img is not None:
+                img_file_path = os.path.join(checkpoint_dir, self.args.best_traj_img_name)
+                img_bgr = cv2.cvtColor(self.best_traj_img, cv2.COLOR_RGB2BGR) # OpenCV 저장용: (RGB -> BGR)
                 cv2.imwrite(img_file_path, img_bgr)
                 
 
@@ -351,7 +372,9 @@ class DQNAgent:
                 'episode_reward': episode_reward,
                 'total_steps': self.total_steps,
                 'no_warmup_steps': self.no_warmup_steps,
-                'best_coverage_mean': self.best_coverage_mean,
+                'max_coverage_mean': self.max_coverage_mean,
+                'min_overlap_rate_mean': self.min_overlap_rate_mean,
+                'min_cleaning_time_mean': self.min_cleaning_time_mean,
             }
                 
             # 저장 실행
@@ -409,7 +432,7 @@ class DQNAgent:
             dist = abs(cx-before_kp_pos_x) + abs(cy-before_kp_pos_y)
             check_kp = (self.coverage_hist[-kp] == env.coverage) and (dist <= 1)
         
-        _, check_collision, _ = env.mark_trajectory(nx, ny, flag=False, virtual=True)
+        _, check_collision, _, _ = env.mark_trajectory(nx, ny, flag=False, virtual=True)
         
         # Coverage와 position의 history 저장
         self.coverage_hist.append(env.coverage)
@@ -467,7 +490,7 @@ class DQNAgent:
             # 수행한 뒤, action을 수행하기 전의 환경으로 돌아감.
             if mode == 'train':
                 next_obs, reward, terminated, truncated, info = env.step(action_RL)
-                next_processed_obs = self._pre_process_obs(next_obs, target_dim=self.args.grid_map_size)
+                next_processed_obs = self._pre_process_obs(next_obs, local_view_dim=LOCAL_VIEW_DIM)
                 self.memory.append((processed_obs, action_RL, reward, next_processed_obs, terminated)) # processed_obs의 map data는 np.uint8 형태, Memory 용량을 줄임
                 env.one_step_back()
             
@@ -475,16 +498,14 @@ class DQNAgent:
         
         else: # RL policy action을 사용
             
-            if not hasattr(self, 'dijkstra_traj'):
-                self.dijkstra_traj = []
-            
             # Heuristic 방법으로 만든 trajectory를 RL policy가 따라가는 경우, self.dijkstra_traj를 유지
             if self.dijkstra_traj:
                 next_pos_x, next_pos_y = env.get_next_pos(action_RL)   # RL_policy를 따랐을 때 다음 위치
                 next_dji_pos_x, next_dji_pos_y = self.dijkstra_traj.pop(0)  # dijkstra_traj에서의 다음 위치
                 
                 # 두 위치가 일치하지 않는 경우 dijkstra_traj를 초기화
-                if next_pos_x != next_dji_pos_x or next_pos_y != next_dji_pos_y:
+                eps = 1e-7
+                if abs(next_pos_x - next_dji_pos_x) > eps or abs(next_pos_y - next_dji_pos_y) > eps:
                     self.dijkstra_traj = []
             
             return action_RL
@@ -511,26 +532,23 @@ class DQNAgent:
     # Heuristic action을 결정
     def _get_heuristic_action(self, env: CoverageEnv):
         
-        if not hasattr(self, 'dijkstra_traj'):
-            self.dijkstra_traj = []
-
         if len(self.dijkstra_traj) > 0: # 이미 생성한 경로가 있으면 다음 action을 출력
             next_pos = self.dijkstra_traj.pop(0)
             return env.get_next_action_from_next_pos(next_pos)
         
-        # BFS 탐색으로 경로 탐색   
+        # BFS 탐색으로 경로 탐색
         queue = deque([env.pos])
-        start = env.pos         # 현재 위치를 시작 지점으로 저장
-        visited = {start}       # set 형태. 탐색을 빠르게 수행. BFS를 하면서 지나간 grid를 저장하기 위한 용도
+        start = env.pos        # 현재 위치를 시작 지점으로 저장
+        visited = {(int(start[0]+0.5), int(start[1]+0.5))} # set 형태. 탐색을 빠르게 수행. BFS를 하면서 지나간 grid를 저장하기 위한 용도
         parent = {start: None}  # 해당 grid로 오기 위해 어떤 grid를 거쳤는지 저장.
         
         while queue:
             curr_pos = queue.popleft()
             for dir_vec in env.base_dir_vecs:
                 next_pos = (curr_pos[0]+dir_vec[0], curr_pos[1]+dir_vec[1])
-                new_cleaned_num, collided, _ = env.mark_trajectory(int(next_pos[0]+0.5), int(next_pos[1]+0.5), virtual=True) # FIXME
-                if not collided and next_pos not in visited:
-                    visited.add(next_pos)
+                new_cleaned_num, collided, _, _ = env.mark_trajectory(next_pos[0], next_pos[1], virtual=True)
+                if not collided and (int(next_pos[0]+0.5), int(next_pos[1]+0.5)) not in visited:
+                    visited.add((int(next_pos[0]+0.5), int(next_pos[1]+0.5)))
                     parent[next_pos] = curr_pos
                     queue.append(next_pos)
                 
@@ -664,12 +682,48 @@ class DQNAgent:
     #     else:
     #         raise ValueError(f"Unsupported mode: {mode}. Expected 'train' or 'test'.")
         
-    def _pre_process_obs(self, obs, target_dim=51) -> dict:
+    def _pre_process_obs(self, obs, local_view_dim=51) -> dict:
         
-        # map data 변환: H와 W를 target_dim으로 변환
+        # --------- map data 변환: H와 W의 local_view 구역을 local_view_dim 크기로 변환 ---------
+        num_layers = obs['map'].shape[0]
         hwc_map = np.transpose(obs['map'], (1, 2, 0)) # obs의 map data가 (C, H, W) 형태이므로 이를 (H, W, C) 형태로 변환
-        resized_hwc_map = cv2.resize(hwc_map, (target_dim, target_dim), interpolation=cv2.INTER_NEAREST)
-        processed_map = np.transpose(resized_hwc_map, (2, 0, 1))
+        
+        resized_hwc_map = np.zeros((local_view_dim+2, local_view_dim+2, num_layers), dtype=np.float32)
+        
+        do_resize = (hwc_map.shape[0] != local_view_dim+2) or (hwc_map.shape[1] != local_view_dim+2)
+        
+        if do_resize:
+            for i in range(num_layers):
+                # 중앙의 local_view를 resize
+                resized_hwc_map[1:-1, 1:-1, i] = cv2.resize(
+                    hwc_map[1:-1, 1:-1, i], 
+                    (local_view_dim, local_view_dim), 
+                    interpolation=cv2.INTER_AREA
+                )
+                
+                # 테두리 resize
+                resized_hwc_map[0, 1:-1, i] = cv2.resize(hwc_map[0:1, 1:-1, i], (local_view_dim, 1), interpolation=cv2.INTER_AREA)[0]
+                resized_hwc_map[-1, 1:-1, i] = cv2.resize(hwc_map[-1:, 1:-1, i], (local_view_dim, 1), interpolation=cv2.INTER_AREA)[0]
+                resized_hwc_map[1:-1, 0, i] = cv2.resize(hwc_map[1:-1, 0:1, i], (1, local_view_dim), interpolation=cv2.INTER_AREA)[:, 0]
+                resized_hwc_map[1:-1, -1, i] = cv2.resize(hwc_map[1:-1, -1:, i], (1, local_view_dim), interpolation=cv2.INTER_AREA)[:, 0]
+
+                if i%3 == 2: # trace layer: resize하면 수치 왜곡이 많이 생기므로 이를 보정
+                    center = local_view_dim//2+1
+                    radius = min(3, local_view_dim//2)
+                    max_value = np.max(resized_hwc_map[center-radius:center+radius+1, center-radius:center+radius+1, i])
+                    if max_value > 0:
+                        resized_hwc_map[:, :, i] /= max_value
+                
+            # 네 모서리 그대로 복사
+            resized_hwc_map[0, 0, :] = hwc_map[0, 0, :]
+            resized_hwc_map[0, -1, :] = hwc_map[0, -1, :]
+            resized_hwc_map[-1, 0, :] = hwc_map[-1, 0, :]
+            resized_hwc_map[-1, -1, :] = hwc_map[-1, -1, :]
+            
+            processed_map = np.transpose(resized_hwc_map, (2, 0, 1))    # (C, H, W) 형태로 다시 변환
+        else:
+            processed_map = obs['map'].copy()
+        # -----------------------------------------------------------------------------------
 
         # vec data 변환
         if obs['vec'].dtype == np.float32:
@@ -689,13 +743,14 @@ class DQNAgent:
         """
         
         self.policy_net.eval() # eval mode로 전환
-        coverage = []
-        max_coverage = 0.0
-        coverage_mean = 0.0
-        max_coverage_traj_img = None # 가장 성능이 좋았던 map에서의 trajectory를 보여줌
+        coverage = []; overlap_rate = []; cleaning_time = []
+        max_coverage = 0.0; min_overlap_rate = float('inf'); min_cleaning_time = float('inf')
+        coverage_threshold = 0.90; overlap_rate_gap = 0.10
+        coverage_mean = 0.0; overlap_rate_mean = 0.0; cleaning_time_mean = 0.0
+        best_traj_img = None # 가장 성능이 좋았던 map에서의 trajectory를 보여줌
         options={"reset_only_start_pos": True} # 시작 지점만 초기화하기 위한 option
         
-        # Coverage 성능을 평가
+        # Model의 성능 평가
         for _ in range(self.train_cfg.valid_map_num):
             
             # Validation 환경을 초기화
@@ -709,59 +764,113 @@ class DQNAgent:
                 # start_num == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
                 if start_num != 0:
                     obs, _ = self.valid_env.reset(options=options) # 시작 지점 초기화
-                cur_coverage = self._test_one_map(self.valid_env, obs) # Coverage 성능을 평가
+                cur_coverage, cur_overlap_rate, cur_cleaning_time = self._test_one_map(self.valid_env, obs) # Coverage 성능을 평가
                 
                 # Coverage 값이 유효한 경우에만 저장: Reachable grid의 수가 전체 grid 수의 절반은 넘어야 함.
                 if self.valid_env.coverable.sum() >= self.valid_env.H * self.valid_env.W * 0.5:
-                    coverage.append(cur_coverage) # Coverage 평균을 구하기 위해 cur_coverage를 저장
-                    if cur_coverage > max_coverage:
+                    coverage.append(cur_coverage)
+                    overlap_rate.append(cur_overlap_rate)
+                    cleaning_time.append(cur_cleaning_time)
+
+                    # Coverage를 어느 정도 달성한 경우, overlap_rate과 cleaning_time을 중심으로 best_traj의 후보로 고려
+                    if cur_coverage >= coverage_threshold:
+                        
+                        # max_coverage 최신화
+                        if max_coverage < cur_coverage:
+                            max_coverage = cur_coverage
+                        
+                        # Overlap 비율이 감소했을 때: best_traj의 후보로 고려
+                        if cur_overlap_rate < min_overlap_rate:
+                            min_overlap_rate = cur_overlap_rate
+                            min_cleaning_time = cur_cleaning_time
+                            best_traj_img = self.valid_env.get_visualized_img()
+                        
+                        # Overlap 비율이 최소 overlap 비율과 크지 않을 경우, cleaning_time이 가장 빠른 trajectory를 선택
+                        elif cur_overlap_rate <= min_overlap_rate + overlap_rate_gap:
+                            if cur_cleaning_time < min_cleaning_time:
+                                min_cleaning_time = cur_cleaning_time
+                                best_traj_img = self.valid_env.get_visualized_img() # best trajectory의 이미지 저장
+
+                    # Coverage 달성도가 미달인 경우, coverage가 높은 경로를 best_traj의 후보로 고려
+                    elif max_coverage < cur_coverage:
                         max_coverage = cur_coverage
-                        max_coverage_traj_img = self.valid_env.get_visualized_img()
+                        best_traj_img = self.valid_env.get_visualized_img()
+                    
+        coverage_mean = np.mean(coverage) if coverage else 0.0
+        overlap_rate_mean = np.mean(overlap_rate) if overlap_rate else 0.0
+        cleaning_time_mean = np.mean(cleaning_time) if cleaning_time else 0.0
         
-        if coverage:
-            coverage_mean = np.mean(coverage)
+        # 이전 model의 종합적 성능(Coverage, Overlap rate, Cleaning time 모두 고려)보다 더 좋으면 model을 저장
+        if coverage_mean >= coverage_threshold: # Coverage가 일정 수준 이상인 경우: Overlap, Cleaning time을 고려
+            
+            # self.max_coverage_mean 최신화
+            if coverage_mean > self.max_coverage_mean:
+                self.max_coverage_mean = coverage_mean
+            
+            # Overlap 비율이 감소했을 때: best_model의 후보로 고려   
+            if overlap_rate_mean < self.min_overlap_rate_mean:
+                self.min_overlap_rate_mean = overlap_rate_mean
+                self.min_cleaning_time_mean = cleaning_time_mean
+                if best_traj_img is not None:
+                    self.best_traj_img = best_traj_img
+                self._save_model(mode='model') # 성능이 가장 좋았던 model을 저장
+            
+            elif overlap_rate_mean <= self.min_overlap_rate_mean + overlap_rate_gap:
+                if cleaning_time_mean < self.min_cleaning_time_mean:
+                    self.min_cleaning_time_mean = cleaning_time_mean
+                    if best_traj_img is not None:
+                        self.best_traj_img = best_traj_img
+                    self._save_model(mode='model') # 성능이 가장 좋았던 model을 저장
         
-        # Coverage 성능 평가 후 이전 model의 coverage 성능보다 더 좋으면 model을 저장
-        if coverage_mean > self.best_coverage_mean:
-            self.best_coverage_mean = coverage_mean
-            self.best_coverage_path_img = max_coverage_traj_img
-            self._save_model(mode='model') # Coverage 성능이 가장 좋았던 model을 저장
+        elif coverage_mean > self.max_coverage_mean:
+            self.max_coverage_mean = coverage_mean
+            if best_traj_img is not None:
+                self.best_traj_img = best_traj_img
+            self._save_model(mode='model') # 성능이 가장 좋았던 model을 저장
         
         # Validation 결과를 tensorboard와 wandb에 기록
         if self.tb_writer:
             self.tb_writer.add_scalar('Validation/Coverage_mean', coverage_mean, episode)
         if self.wandb_run:
             self.wandb_run.log({'Validation/Coverage_mean': coverage_mean,
-                                'Validation/Best_path': wandb.Image(max_coverage_traj_img)}, step=self.total_steps)
+                                'Validation/Best_path': wandb.Image(best_traj_img)}, step=self.total_steps)
         if self.args.use_vessl:
             vessl.log(step=episode, payload={'Validation/Coverage_mean': coverage_mean,
-                                             'Validation/Best_path': vessl.Image(max_coverage_traj_img)})
+                                             'Validation/Best_path': vessl.Image(best_traj_img)})
         
         # Validation 결과 출력
-        print(f"[Validation] Episode {episode}: Coverage Mean = {coverage_mean:.4f}, Best Coverage Mean = {self.best_coverage_mean:.4f}", flush=True)
+        print(f"[Validation] Episode {episode}: \n"
+              f"\tCoverage Mean = {coverage_mean:.4f}\n"
+              f"\tOverlap Rate Mean = {overlap_rate_mean:.4f}\n"
+              f"\tCleaning Time Mean = {cleaning_time_mean:.4f}")
             
         self.policy_net.train() # train mode로 전환
         
-    def _test_one_map(self, env: CoverageEnv, obs: dict, debug: bool = False) -> float:
+    def _test_one_map(self, env: CoverageEnv, obs: dict, debug: bool = False) -> tuple[float, float, float]:
         
         done = False
         reset = True
         last_obs = obs
         last_info = None
         debug_skip_count = 0
+        self.dijkstra_traj = []
         
         # [1] 디버그 모드일 때 사용할 도화지(fig)를 미리 딱 한 번만 만듭니다.
         if debug:
-            fig, axes = plt.subplots(2, 1, figsize=(18, 18))
+            fig, axes = plt.subplots(3, 1, figsize=(18, 30))
             # 초기 이미지
             init_traj_img = env.get_visualized_img(img_choice='traj')
             init_obs_img = env.get_visualized_img(img_choice='obs')
+            init_pro_obs_img = env.get_visualized_img(img_choice='obs', preprocessor=self._pre_process_obs)
+            
             # 초기 빈 이미지 설치
             im_traj = axes[0].imshow(init_traj_img)
             im_obs = axes[1].imshow(init_obs_img)
+            im_pro_obs = axes[2].imshow(init_pro_obs_img)
             text_traj = axes[0].text(0.5, 0, "", transform=axes[0].transAxes, ha="center", fontsize=15, color='black')
             axes[0].set_title("Trajectory", fontsize=20)
             axes[1].set_title("Observation", fontsize=20)
+            axes[2].set_title("Processed Observation", fontsize=20)
             for ax in axes: ax.axis('off')
             plt.tight_layout()
             
@@ -770,10 +879,10 @@ class DQNAgent:
             plt.close(fig) # 별도의 정적 출력이 생기지 않도록 닫기
         
         while not done:
-            processed_obs = self._pre_process_obs(last_obs, target_dim=self.args.grid_map_size)
+            processed_obs = self._pre_process_obs(last_obs, local_view_dim=LOCAL_VIEW_DIM)
             action = self._get_action(env, processed_obs, mode='test', reset=reset)
             
-            if debug: # FIXME: backstep 가는 method 추가
+            if debug:
                 
                 if debug_skip_count > 0:
                     debug_skip_count -= 1
@@ -791,9 +900,11 @@ class DQNAgent:
                     # [3] 데이터만 가져와서 기존 이미지 객체에 덮어쓰기 (가장 핵심)
                     traj_img = env.get_visualized_img(img_choice='traj')
                     obs_img = env.get_visualized_img(img_choice='obs')
+                    pro_obs_img = env.get_visualized_img(img_choice='obs', preprocessor=self._pre_process_obs)
                     
                     im_traj.set_data(traj_img)
                     im_obs.set_data(obs_img)
+                    im_pro_obs.set_data(pro_obs_img)
                     # text_traj.set_text(action_info)
                     
                     # [4] 화면 갱신 (도화지 위치는 그대로, 내용물만 부드럽게 변경)
@@ -824,9 +935,12 @@ class DQNAgent:
             last_info = info
             
             reset = False
+            
+        coverage = last_info['Coverage']
+        overlap_rate = env.overlap_rate
+        cleaning_time = env.cleaning_time
         
-        #print(env.traj)
-        return last_info['Coverage']        
+        return coverage, overlap_rate, cleaning_time
     
     def train(self):
         
@@ -858,7 +972,7 @@ class DQNAgent:
             
             # Environment reset
             obs, info = self.env.reset(seed=seed, options=env_options)
-            processed_obs = self._pre_process_obs(obs, target_dim=self.train_cfg.grid_map_size) # Map data를 resize, Observation data를 얻음
+            processed_obs = self._pre_process_obs(obs, local_view_dim=LOCAL_VIEW_DIM) # Map data를 resize, Observation data를 얻음
             # ----------------------------------------------------------------------------------------
             
             # Environment에서 step을 처음 시작할 때 설정
@@ -867,11 +981,8 @@ class DQNAgent:
             done_ep = False     # Episode 종료 조건: truncated(Episode를 조기 종료) | (terminate & Success) (Collision인 경우는 종료 X)
             warmup = False      # 현재 buffer에 data를 쌓고만 있는지 parameter도 같이 update 중인지 결정
             reset = True        # 첫 번째 action을 선택할 때, action masking을 위한 buffer를 초기화
+            self.dijkstra_traj = [] # Heuristic action을 위한 dijkstra_traj 초기화
             
-            # FIXME: last_action, last_collision 삭제
-            # # Collision 시 다음 step에서는 이전에 수행한 action을 하지 않기 위해 이전에 수행한 action을 저장
-            # last_action = None      # 이전 step에서 수행한 action
-            # last_collision = False  # 이전 step에서 collision이 일어났는지 여부
             last_info = {}          # Episode 마지막에 얻은 info
             
             # Warmup 조건을 매 episode마다 확인
@@ -911,7 +1022,7 @@ class DQNAgent:
                 
                 # ----------------------------- Action 수행 ---------------------------------
                 next_obs, reward, terminated, truncated, info = self.env.step(action)
-                next_processed_obs = self._pre_process_obs(next_obs, target_dim=self.train_cfg.grid_map_size)
+                next_processed_obs = self._pre_process_obs(next_obs, local_view_dim=LOCAL_VIEW_DIM)
                 
                 # Episode를 종료하는 조건: Coverage에 성공한 경우 or Episode가 조기 종료된 경우 (Collision 포함)
                 # Warmup 시에는 truncated일 때 info['Steps'] == args.warmup_ep_steps일 때만 종료
@@ -923,17 +1034,14 @@ class DQNAgent:
                 done = terminated # Buffer에 done이라고 저장하는 조건: Collision & Coverage 성공
                 # ---------------------------------------------------------------------------
                 
-                # FIXME: last_action, last_collision 삭제
-                # last_action, last_collision, last_info 저장
-                # last_action = action
-                # last_collision = info['Collision']
-                last_info = info
-                
                 # 메모리 저장
                 self.memory.append((processed_obs, action, reward, next_processed_obs, done)) # processed_obs의 map data는 np.uint8 형태, Memory 용량을 줄임
                 
                 # State update
                 processed_obs = next_processed_obs
+                
+                # info update
+                last_info = info
                 
                 # Episode reward 계산
                 episode_reward += reward             
@@ -978,8 +1086,9 @@ class DQNAgent:
                     loss.backward()
                     
                     # Gradient clipping: gradient 폭주 방지
-                    # torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
+                    torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
                     
+                    # Weight update
                     self.optimizer.step()
                     
                     # TensorBoard 또는 wandb 기록
@@ -1003,21 +1112,29 @@ class DQNAgent:
             # log로 보낼 info data를 얻음
             coverage = last_info.get("Coverage", 0.0)
             ep_collision = last_info.get("Episode_collision", 0)
+            overlap_rate = self.env.overlap_rate
+            cleaning_time = self.env.cleaning_time
             
             # 매 episode 마다 TensorBoard 또는 wandb 기록
             if self.tb_writer:
                 self.tb_writer.add_scalar("Stats/Episode_reward", episode_reward, episode)
                 self.tb_writer.add_scalar("Stats/Coverage_rate", coverage, episode)
                 self.tb_writer.add_scalar("Stats/Collision_count", ep_collision, episode)
+                self.tb_writer.add_scalar("Stats/Overlap_rate", overlap_rate, episode)
+                self.tb_writer.add_scalar("Stats/Cleaning_time", cleaning_time, episode)
             if self.wandb_run:
                 self.wandb_run.log({"Stats/Episode_reward": episode_reward,
                            "Stats/Coverage_rate": coverage,
-                           "Stats/Collision_count": ep_collision}, step=self.total_steps)
+                           "Stats/Collision_count": ep_collision,
+                           "Stats/Overlap_rate": overlap_rate,
+                           "Stats/Cleaning_time": cleaning_time}, step=self.total_steps)
             if self.args.use_vessl:
                 vessl.log(step=episode, payload={
                     "Stats/Episode_reward": episode_reward,
                     "Stats/Coverage_rate": coverage,
-                    "Stats/Collision_count": ep_collision
+                    "Stats/Collision_count": ep_collision,
+                    "Stats/Overlap_rate": overlap_rate,
+                    "Stats/Cleaning_time": cleaning_time
                 })
             
             # Checkpoint 저장
@@ -1045,48 +1162,101 @@ class DQNAgent:
             if not warmup:
                 print(f"\tLoss: {loss:.2f}", flush=True)
 
-    def test(self):
+    def test(self, use_maps_folder: bool=True):
         self.policy_net.eval() # eval mode로 전환
-        coverage = []
-        overlap = []
-        cleaning_time = []
-        max_coverage = 0.0
-        min_coverage = 100.0
-        coverage_mean = 0.0
+        total_coverage = []; total_overlap_rate = []; total_cleaning_time = []
         options={"reset_only_start_pos": True} # 시작 지점만 초기화하기 위한 option
         reset_seed = self.seed
         
-        # Coverage 성능을 평가
-        for _ in range(self.args.valid_map_num):
+        maps_folder = self.args.map_save_dir # Map을 저장한 폴더
+        maps = None                          # Map file 이름 
+        if use_maps_folder:
+            if os.path.isdir(self.args.map_save_dir):
+                maps = [f for f in os.listdir(self.args.map_save_dir) if f.endswith('.npy')]
+                if len(maps) > 0:
+                    print(f"There is {len(maps)} map files for testing.")
+                    use_maps_folder = True
+                else:
+                    print("There is no map file in the maps folder. Test will be conducted with random maps.")
+                    use_maps_folder = False
+            else:
+                print("There is no maps folder. Test will be conducted with random maps.")
+                use_maps_folder = False
+                
+        if use_maps_folder:
+            for map_name in maps:
+                map_path = os.path.join(maps_folder, map_name)
+                obstacles = np.load(map_path)
+                obs, _ = self.test_env.reset(saved_obstacle_data=obstacles, seed=reset_seed) # Test 환경을 reset하여 초기 state 얻음
+                
+                coverage = []
+                overlap_rate = []
+                cleaning_time = []
+                
+                # 여러 starting point에서 model 성능을 test
+                for start_num in range(self.args.test_start_point_num):
+                
+                    # start_num == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
+                    if start_num != 0:
+                        obs, _ = self.test_env.reset(options=options) # 시작 지점 초기화
+                    cur_coverage, cur_overlap_rate, cur_cleaning_time = self._test_one_map(self.test_env, obs, self.args.debug) # Coverage 성능을 평가
+                    self.test_env.show_visualized_img(img_choice='traj') # trajectory 시각화
+                    
+                    # Coverage 값이 유효한 경우에만 저장: Reachable grid의 수가 전체 grid 수의 절반은 넘어야 함.
+                    if self.test_env.coverable.sum() >= self.test_env.H * self.test_env.W * 0.5:
+                        coverage.append(cur_coverage) # Coverage 평균을 구하기 위해 cur_coverage를 저장
+                        overlap_rate.append(cur_overlap_rate)
+                        cleaning_time.append(cur_cleaning_time)
+                
+                coverage_mean = np.mean(coverage) if coverage else 0.0
+                overlap_rate_mean = np.mean(overlap_rate) if overlap_rate else 0.0
+                cleaning_time_mean = np.mean(cleaning_time) if cleaning_time else 0.0
+                print(f"[Test result for {map_name}]\n"
+                      f"    Coverage mean: {coverage_mean*100:.2f}%\n"
+                      f"    Overlap rate mean: {overlap_rate_mean*100:.2f}%\n"
+                      f"    Cleaning time mean: {cleaning_time_mean:.2f} s")
+
+                total_coverage += coverage
+                total_overlap_rate += overlap_rate
+                total_cleaning_time += cleaning_time
+                
+                reset_seed = None
             
-            obs, _ = self.test_env.reset(seed=reset_seed) # Test 환경을 reset하여 초기 state 얻음
-                
-            for start_num in range(self.args.valid_start_point_num):
-                
-                # start_num == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
-                if start_num != 0:
-                    obs, _ = self.test_env.reset(options=options) # 시작 지점 초기화
-                cur_coverage = self._test_one_map(self.test_env, obs, self.args.debug) # Coverage 성능을 평가
-                self.test_env.show_visualized_img(img_choice='traj') # trajectory 시각화
-                
-                # Coverage 값이 유효한 경우에만 저장: Reachable grid의 수가 전체 grid 수의 절반은 넘어야 함.
-                if self.test_env.coverable.sum() >= self.test_env.H * self.test_env.W * 0.5:
-                    coverage.append(cur_coverage) # Coverage 평균을 구하기 위해 cur_coverage를 저장
-                    overlap.append(self.test_env.overlap_rate)
-                    cleaning_time.append(self.test_env.cleaning_time)
-                    if cur_coverage > max_coverage:
-                        max_coverage = cur_coverage
-                    if cur_coverage < min_coverage:
-                        min_coverage = cur_coverage
+            total_coverage_mean = np.mean(total_coverage) if total_coverage else 0.0
+            total_overlap_rate_mean = np.mean(total_overlap_rate) if total_overlap_rate else 0.0
+            total_cleaning_time_mean = np.mean(total_cleaning_time) if total_cleaning_time else 0.0
             
-            reset_seed = None
+            print(f"[Overall Test result]\n"
+                  f"    Coverage mean: {total_coverage_mean*100:.2f}%\n"
+                  f"    Overlap rate mean: {total_overlap_rate_mean*100:.2f}%\n"
+                  f"    Cleaning time mean: {total_cleaning_time_mean:.2f} s")
         
-        if coverage:
-            coverage_mean = np.mean(coverage)
+        else:
+            for _ in range(self.args.test_map_num):
+                
+                obs, _ = self.test_env.reset(seed=reset_seed) # Test 환경을 reset하여 초기 state 얻음
+                    
+                for start_num in range(self.args.test_start_point_num):
+                    
+                    # start_num == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
+                    if start_num != 0:
+                        obs, _ = self.test_env.reset(options=options) # 시작 지점 초기화
+                    cur_coverage, cur_overlap_rate, cur_cleaning_time = self._test_one_map(self.test_env, obs, self.args.debug) # Coverage 성능을 평가
+                    self.test_env.show_visualized_img(img_choice='traj') # trajectory 시각화
+                    
+                    # Coverage 값이 유효한 경우에만 저장: Reachable grid의 수가 전체 grid 수의 절반은 넘어야 함.
+                    if self.test_env.coverable.sum() >= self.test_env.H * self.test_env.W * 0.5:
+                        total_coverage.append(cur_coverage) # Coverage 평균을 구하기 위해 cur_coverage를 저장
+                        total_overlap_rate.append(cur_overlap_rate)
+                        total_cleaning_time.append(cur_cleaning_time)
             
-        print(f"[Test result]\n"
-              f"Coverage mean: {coverage_mean*100:.2f}%\n"
-              f"Max coverage:  {max_coverage*100:.2f}%\n"
-              f"Min coverage:  {min_coverage*100:.2f}%\n"
-              f"Overlap rate mean: {np.mean(overlap)*100:.2f}%\n"
-              f"Cleaning time mean: {np.mean(cleaning_time):.2f} s") 
+                reset_seed = None
+        
+            total_coverage_mean = np.mean(total_coverage) if total_coverage else 0.0
+            total_overlap_rate_mean = np.mean(total_overlap_rate) if total_overlap_rate else 0.0
+            total_cleaning_time_mean = np.mean(total_cleaning_time) if total_cleaning_time else 0.0
+            
+            print(f"[Overall Test result]\n"
+                  f"    Coverage mean: {total_coverage_mean*100:.2f}%\n"
+                  f"    Overlap rate mean: {total_overlap_rate_mean*100:.2f}%\n"
+                  f"    Cleaning time mean: {total_cleaning_time_mean:.2f} s")
