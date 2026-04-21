@@ -86,15 +86,6 @@ def get_rect_indices_for_small_rect(
     
     return grid_indices
 
-
-def add_boundary_walls(obstacles: np.ndarray, thickness: int=1, value=WALL):
-    H, W = obstacles.shape
-    obstacles[0:thickness, :] = value
-    obstacles[H-thickness:H, :] = value    
-    obstacles[:, 0:thickness] = value          
-    obstacles[:, W-thickness:W] = value        
-
-
 def add_table_legs(
     obstacles: np.ndarray,
     cx: float,
@@ -245,7 +236,9 @@ def add_chairs_around_table(
     rng: np.random.Generator,
     theta: float,
     chair_dist_offset: int = 4,
-    chair_size_offset: int = 2,
+    #chair_size_offset: int = 2,
+    max_chair_size: int = 24,
+    min_chair_size: int = 20,
     chair_leg_size: int = 1,
 ):
     
@@ -260,8 +253,8 @@ def add_chairs_around_table(
 
     for (a, r) in radius_angle_set:
         
-        chair_size_local = chair_size_offset
-        while chair_size_local > chair_leg_size:
+        chair_size_local = max_chair_size
+        while chair_size_local >= min_chair_size:
             # 각도/거리 노이즈
             ang = theta + a + rng.normal(scale=0.1)
             radius = r + rng.integers(-1, 2)
@@ -344,7 +337,6 @@ def add_small_obstacles_in_window(
             ):
                 obs[x:x+obs_width, y:y+obs_height] = MORE_OBS
     
-
 def generate_house_like_obstacles(cfg: EnvConfig, rng: np.random.Generator, visualize: bool = False) -> np.ndarray:
     
     H = cfg.H; W = cfg.W
@@ -353,14 +345,12 @@ def generate_house_like_obstacles(cfg: EnvConfig, rng: np.random.Generator, visu
     min_table_size = cfg.min_table_size
     table_leg_size = cfg.table_leg_size
     
-    chair_size = cfg.chair_size
+    max_chair_size = cfg.max_chair_size
+    min_chair_size = cfg.min_chair_size
     chair_leg_size = cfg.chair_leg_size
     chair_spread = cfg.chair_spread
     
     obs = np.zeros((H, W), dtype=np.uint8)
-    
-    # Map의 벽면을 장애물로 설정: 로봇이 grid map 밖을 나가지 못하도록 하기 위한 용도
-    add_boundary_walls(obs, cfg.boundary_thickness, value=WALL)
     
     # 책상과 의자를 배치
     table_centers = [] # 테이블 중심 좌표와 테이블 radius를 저장
@@ -374,8 +364,8 @@ def generate_house_like_obstacles(cfg: EnvConfig, rng: np.random.Generator, visu
             
             table_radius = int(math.ceil(max(
                 math.sqrt((table_width/2.0)**2 + (table_height/2.0)**2),
-                math.sqrt((table_width/2.0 + chair_size/2.0 + chair_spread)**2 + (chair_size/2.0)**2),
-                math.sqrt((table_height/2.0 + chair_size/2.0 + chair_spread)**2 + (chair_size/2.0)**2),
+                math.sqrt((table_width/2.0 + max_chair_size/2.0 + chair_spread)**2 + (max_chair_size/2.0)**2),
+                math.sqrt((table_height/2.0 + max_chair_size/2.0 + chair_spread)**2 + (max_chair_size/2.0)**2),
             ))) + 2
             
             # 테이블의 중심 좌표 설정: (cx, cy)
@@ -425,7 +415,8 @@ def generate_house_like_obstacles(cfg: EnvConfig, rng: np.random.Generator, visu
                     rng=rng,
                     theta=theta,
                     chair_dist_offset=chair_spread,
-                    chair_size_offset=chair_size,
+                    max_chair_size=max_chair_size,
+                    min_chair_size=min_chair_size,
                     chair_leg_size=chair_leg_size,
                 )
                 break # 의자 배치까지 완료했으면 책상 배치를 그만 시도
@@ -461,17 +452,68 @@ def generate_house_like_obstacles(cfg: EnvConfig, rng: np.random.Generator, visu
 
     return obs
 
+def get_test_maps(map_num: int, start_seed: int):
+    
+    # Map을 저장할 폴더 생성
+    map_folder_name = "maps"
+    
+    import os
+    if not os.path.exists(map_folder_name):
+        os.makedirs(map_folder_name)
+    
+    # Map 생성 및 저장
+    cfg = EnvConfig()
+    for seed in range(start_seed, start_seed+map_num):
+        rng = np.random.default_rng(seed=seed)
+        obstacles = generate_house_like_obstacles(cfg, rng, visualize=False)
+        map_file_name = f"test_map_lch_{seed:03d}.npy"
+        np.save(f"{map_folder_name}/{map_file_name}", obstacles)
+    
+def visualize_saved_map(map_file_name: str):
+    
+    map_folder_name = "maps"
+    seed = map_file_name.split("_")[-1].split(".")[0]
+    obstacles = np.load(f"{map_folder_name}/{map_file_name}")
+    
+    custom_cmap = ListedColormap(['white', 'black'])
+
+    plt.figure(figsize=(6, 6))
+    im = plt.imshow(obstacles, cmap=custom_cmap, origin='lower', vmin=0, vmax=1)
+    
+    # Legend 정의
+    legend_elements = [
+        Patch(facecolor='black', edgecolor='black', label='Obstacle'),
+    ]
+    plt.legend(
+        handles=legend_elements, 
+        loc='upper left', 
+        bbox_to_anchor=(1.05, 1), # 그래프 오른쪽 살짝 바깥에 배치
+        title_fontsize='12',
+        fontsize='10'
+    )
+    
+    H = obstacles.shape[0]; W = obstacles.shape[1]
+    plt.title(f"House-like Obstacles ({H}x{W}): Seed={seed}", fontsize=15)
+    plt.xlabel("Width")
+    plt.ylabel("Height")
+    
+    # 격자 표시 (선택 사항)
+    plt.grid(color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
+    plt.show()
+        
+
 # 시각화를 위한 메인 코드
-def visualize_house_map(seed=DEFAULT_SEED):
+def visualize_seed_map(seed=DEFAULT_SEED):
     
     cfg = EnvConfig()
     rng = np.random.default_rng(seed=seed)  # 재현성을 위해 시드 설정
 
+    # Map 생성
     obstacles = generate_house_like_obstacles(cfg, rng, visualize=True)
     
-    custom_cmap = ListedColormap(['white', 'black', 'red', 'blue', 'purple'])
-
+    # Map 시각화
     plt.figure(figsize=(6, 6))
+    custom_cmap = ListedColormap(['white', 'black', 'red', 'blue', 'purple'])
     im = plt.imshow(obstacles, cmap=custom_cmap, origin='lower', vmin=0, vmax=4)
     
     # Legend 정의
@@ -490,7 +532,8 @@ def visualize_house_map(seed=DEFAULT_SEED):
         fontsize='10'
     )
     
-    plt.title(f"House-like Obstacles ({cfg.H}x{cfg.W})", fontsize=15)
+    H = obstacles.shape[0]; W = obstacles.shape[1]
+    plt.title(f"House-like Obstacles ({H}x{W}): Seed={seed}", fontsize=15)
     plt.xlabel("Width")
     plt.ylabel("Height")
     
@@ -498,6 +541,7 @@ def visualize_house_map(seed=DEFAULT_SEED):
     plt.grid(color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
     plt.show()
 
+
 # 실행
 if __name__ == "__main__":
-    visualize_house_map(seed=DEFAULT_SEED)
+    visualize_seed_map(seed=DEFAULT_SEED)

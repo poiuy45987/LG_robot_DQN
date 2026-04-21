@@ -8,14 +8,13 @@ from matplotlib.gridspec import GridSpec
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from IPython.display import display, clear_output
 import cv2
-import io
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
 from matplotlib.lines import Line2D
 import argparse
 from dataclasses import dataclass
 
-from .config import EnvConfig, DEFAULT_SEED, ACTION_NUM
+from .config import EnvConfig, DEFAULT_SEED, ACTION_NUM, CLEANED_MAP_MAX, TRACE_MAP_MAX, LOCAL_VIEW_DIM
 from .map_generator import generate_house_like_obstacles
 
 def get_args():
@@ -57,155 +56,150 @@ def visualize_mask(robot_size: int):
     plt.colorbar(label='Mask Value')
     plt.show()
 
-# Environment에서 trajectory 정보를 저장하기 위한 class. 이용하기 편하게 하기 위한 method가 포함되어 있음.
-class Trajectory:
-    """
-    Step이 수행된 후의 상태를 저장
-    steps:              Step 수. 로봇 청소기의 최초 위치는 steps=0
-    pos:                해당 step에서 로봇 청소기의 위치
-    covered_cells:      해당 로봇 청소기 위치로 이동하면서 새롭게 cover한 cell들의 indices, Numpy array: (N, 2)
-    covered_cell_num:   해당 step에서 cover한 cell 수
-    dir:                해당 step에서 로봇이 바라보고 있는 방향
+# # Environment에서 trajectory 정보를 저장하기 위한 class. 이용하기 편하게 하기 위한 method가 포함되어 있음.
+# class Trajectory:
+#     """
+#     Step이 수행된 후의 상태를 저장
+#     steps:              Step 수. 로봇 청소기의 최초 위치는 steps=0
+#     pos:                해당 step에서 로봇 청소기의 위치
+#     covered_cells:      해당 로봇 청소기 위치로 이동하면서 새롭게 cover한 cell들의 indices, Numpy array: (N, 2)
+#     covered_cell_num:   해당 step에서 cover한 cell 수
+#     dir:                해당 step에서 로봇이 바라보고 있는 방향
     
-    """
+#     """
+#     # FIXME: 이거 step 별로 묶는 것으로 수정
+#     def __init__(self):
+        
+#         # Data를 저장하는 dictionary    
+#         self._data = []
+        
+#     def __len__(self):
+        
+#         lengths = {len(key_data) for key_data in self._data.values()} # 각 data의 len을 set 형태로 담음
+        
+#         # Data가 아예 없는 경우
+#         if not lengths:
+#             return 0
+        
+#         # Data를 담는 list가 생성된 경우: 모든 data list의 길이는 같아야 함.
+#         assert len(lengths) == 1
+#         return next(iter(lengths))
+    
+#     def append(self, traj_data: dict):
+#         try:
+#             for key in self._data.keys():
+#                 self._data[key].append(traj_data[key])
+#         except KeyError as e:
+#             raise KeyError(f"Error in appending trajectory: Lost key {e}")
+    
+#     def pop(self):
+#         """
+#         마지막에 저장된 data를 제거
+#         """
+#         # 가장 처음 데이터(로봇이 처음 방안에 배치되었을 때의 데이터)는 보호
+#         if len(self) <= 1:
+#             print("Trajectory is at its initial state. Nothing to pop.")
+#             return None
+            
+#         popped_data = {key: self._data[key].pop() for key in self._data}
+#         return popped_data
+    
+#     def get_last_data(self):
+        
+#         if len(self) <= 0:
+#             print("Trajectory is empty. Cannot get last data.")
+#             return None
+        
+#         last_data = {key: self._data[key][-1] for key in self._data}
+#         return last_data
+    
+#     def clear(self):
+#         for key in self._data.keys():
+#                 self._data[key] = []
+    
+#     def get_pos_traj(self):
+        
+#         assert 'pos' in self._data
+        
+#         return np.array(self._data['pos'])  
+    
+#     def get_cleaning_time(self):
+        
+#         action_seq = self._data['dir']
+        
+#         total_time = 0.0
+#         v_max = 0.4  # m/s
+#         w_max = 90   # deg/s
+#         lin_accel = 0.1 # m/s^2
+#         ang_accel = 30  # deg/s^2
+#         step_length = 0.04  # 4cm -> 0.04m
+#         angle_interval = 360 / ACTION_NUM   # 각도 간격(deg)
+#         angle_threshold = 30    # 정지 회전 임계값(deg)
+        
+#         straight_distance = 0.0 # 직진으로 이동한 총 거리
+        
+#         for i in range(len(action_seq)):
+#             curr_dir = action_seq[i]
+#             # prev_dir = action_seq[i-1] if i > 0 else curr_dir
+            
+#             straight_distance += step_length
+            
+#             is_last = (i == len(action_seq) - 1)
+#             rotate_needed = False
+#             angle_diff = 0.0
+            
+#             if not is_last:
+#                 next_dir = action_seq[i+1]
+#                 # 방향 차이 계산 (Index 차이를 각도로 변환)
+#                 dir_diff = abs(next_dir - curr_dir)
+#                 if dir_diff > ACTION_NUM/2: dir_diff = ACTION_NUM - dir_diff # 최단 회전 경로
+                
+#                 angle_diff = dir_diff * angle_interval
+#                 if angle_diff > angle_threshold: # 22.5도 초과 시 정지 회전
+#                     rotate_needed = True
 
-    def __init__(self, keys=None):
-        
-        # Trajectory에 저장할 key들을 정의
-        if keys is None:
-            keys = ['steps', 'pos', 'covered_cells', 'covered_cell_num', 'add_visited',
-                    'collision_count', 'dir', 'no_progress_cnt', 'last_coverage']
-        
-        # Data를 저장하는 dictionary    
-        self._data = {key: [] for key in keys}
-        
-    def __len__(self):
-        
-        lengths = {len(key_data) for key_data in self._data.values()} # 각 data의 len을 set 형태로 담음
-        
-        # Data가 아예 없는 경우
-        if not lengths:
-            return 0
-        
-        # Data를 담는 list가 생성된 경우: 모든 data list의 길이는 같아야 함.
-        assert len(lengths) == 1
-        return next(iter(lengths))
-    
-    def append(self, traj_data: dict):
-        try:
-            for key in self._data.keys():
-                self._data[key].append(traj_data[key])
-        except KeyError as e:
-            raise KeyError(f"Error in appending trajectory: Lost key {e}")
-    
-    def pop(self):
-        """
-        마지막에 저장된 data를 제거
-        """
-        # 가장 처음 데이터(로봇이 처음 방안에 배치되었을 때의 데이터)는 보호
-        if len(self) <= 1:
-            print("Trajectory is at its initial state. Nothing to pop.")
-            return None
-            
-        popped_data = {key: self._data[key].pop() for key in self._data}
-        return popped_data
-    
-    def get_last_data(self):
-        
-        if len(self) <= 0:
-            print("Trajectory is empty. Cannot get last data.")
-            return None
-        
-        last_data = {key: self._data[key][-1] for key in self._data}
-        return last_data
-    
-    def clear(self):
-        for key in self._data.keys():
-                self._data[key] = []
-    
-    def get_pos_traj(self):
-        
-        assert 'pos' in self._data
-        
-        return np.array(self._data['pos'])  
-    
-    def get_cleaning_time(self):
-        
-        action_seq = self._data['dir']
-        
-        total_time = 0.0
-        v_max = 0.4  # m/s
-        w_max = 90   # deg/s
-        lin_accel = 0.1 # m/s^2
-        ang_accel = 30  # deg/s^2
-        step_length = 0.04  # 4cm -> 0.04m
-        angle_interval = 360 / ACTION_NUM   # 각도 간격(deg)
-        angle_threshold = 30    # 정지 회전 임계값(deg)
-        
-        straight_distance = 0.0 # 직진으로 이동한 총 거리
-        
-        for i in range(len(action_seq)):
-            curr_dir = action_seq[i]
-            # prev_dir = action_seq[i-1] if i > 0 else curr_dir
-            
-            straight_distance += step_length
-            
-            is_last = (i == len(action_seq) - 1)
-            rotate_needed = False
-            angle_diff = 0.0
-            
-            if not is_last:
-                next_dir = action_seq[i+1]
-                # 방향 차이 계산 (Index 차이를 각도로 변환)
-                dir_diff = abs(next_dir - curr_dir)
-                if dir_diff > ACTION_NUM/2: dir_diff = ACTION_NUM - dir_diff # 최단 회전 경로
+#             # 3. 정지 회전이 필요하거나 마지막이면 누적된 직진 구간 시간 계산
+#             if rotate_needed or is_last:
+#                 # --- 직진 구간 시간 계산 (v^2 = 2as 활용) ---
+#                 # 최대 속도 도달 가능 거리 (가속 + 감속)
+#                 d_crit = (v_max**2) / lin_accel 
                 
-                angle_diff = dir_diff * angle_interval
-                if angle_diff > angle_threshold: # 22.5도 초과 시 정지 회전
-                    rotate_needed = True
-
-            # 3. 정지 회전이 필요하거나 마지막이면 누적된 직진 구간 시간 계산
-            if rotate_needed or is_last:
-                # --- 직진 구간 시간 계산 (v^2 = 2as 활용) ---
-                # 최대 속도 도달 가능 거리 (가속 + 감속)
-                d_crit = (v_max**2) / lin_accel 
+#                 if straight_distance >= d_crit:
+#                     # 최대 속도 도달 가능: 가속시간 + 정속시간 + 감속시간
+#                     t_accel = v_max / lin_accel
+#                     d_accel = 0.5 * lin_accel * (t_accel**2)
+#                     d_const = straight_distance - (2 * d_accel)
+#                     t_const = d_const / v_max
+#                     total_time += (2 * t_accel) + t_const
+#                 else:
+#                     # 최대 속도 미도달: 삼각형 가감속
+#                     # s = 2 * (0.5 * a * t^2) => t = sqrt(s/a)
+#                     t_tri = np.sqrt(straight_distance / lin_accel)
+#                     total_time += 2 * t_tri
                 
-                if straight_distance >= d_crit:
-                    # 최대 속도 도달 가능: 가속시간 + 정속시간 + 감속시간
-                    t_accel = v_max / lin_accel
-                    d_accel = 0.5 * lin_accel * (t_accel**2)
-                    d_const = straight_distance - (2 * d_accel)
-                    t_const = d_const / v_max
-                    total_time += (2 * t_accel) + t_const
-                else:
-                    # 최대 속도 미도달: 삼각형 가감속
-                    # s = 2 * (0.5 * a * t^2) => t = sqrt(s/a)
-                    t_tri = np.sqrt(straight_distance / lin_accel)
-                    total_time += 2 * t_tri
+#                 # 직진 거리 리셋
+#                 straight_distance = 0.0
                 
-                # 직진 거리 리셋
-                straight_distance = 0.0
-                
-                # 4. 회전 시간 계산 (정지 상태에서 회전)
-                if rotate_needed:
-                    # 최대 각속도에 도달하기 위한 최소 필요 각도 (가속 + 감속 거리)
-                    # theta = w^2 / alpha
-                    angle_crit = (w_max**2) / ang_accel
+#                 # 4. 회전 시간 계산 (정지 상태에서 회전)
+#                 if rotate_needed:
+#                     # 최대 각속도에 도달하기 위한 최소 필요 각도 (가속 + 감속 거리)
+#                     # theta = w^2 / alpha
+#                     angle_crit = (w_max**2) / ang_accel
                     
-                    if angle_diff >= angle_crit:
-                        # 사다리꼴: 최대 각속도 도달 가능
-                        t_ang_accel = w_max / ang_accel
-                        angle_accel_dec = angle_crit # 가속+감속에 쓰인 총 각도
-                        angle_const = angle_diff - angle_accel_dec
-                        t_ang_const = angle_const / w_max
-                        total_time += (2 * t_ang_accel) + t_ang_const
-                    else:
-                        # 삼각형: 최대 각속도 도달 전 감속 시작
-                        # theta = 2 * (0.5 * alpha * t^2) => t = sqrt(theta / alpha)
-                        t_ang_tri = np.sqrt(angle_diff / ang_accel)
-                        total_time += 2 * t_ang_tri
+#                     if angle_diff >= angle_crit:
+#                         # 사다리꼴: 최대 각속도 도달 가능
+#                         t_ang_accel = w_max / ang_accel
+#                         angle_accel_dec = angle_crit # 가속+감속에 쓰인 총 각도
+#                         angle_const = angle_diff - angle_accel_dec
+#                         t_ang_const = angle_const / w_max
+#                         total_time += (2 * t_ang_accel) + t_ang_const
+#                     else:
+#                         # 삼각형: 최대 각속도 도달 전 감속 시작
+#                         # theta = 2 * (0.5 * alpha * t^2) => t = sqrt(theta / alpha)
+#                         t_ang_tri = np.sqrt(angle_diff / ang_accel)
+#                         total_time += 2 * t_ang_tri
 
-        return total_time
+#         return total_time
             
 
 class CoverageEnv(gym.Env):
@@ -232,7 +226,7 @@ class CoverageEnv(gym.Env):
             y_idx - self.robot_half_size
         ]).astype(np.int32)
         
-        self.robot_area = int(self.robot_mask.sum())
+        self.robot_area = int(self.robot_mask.sum(dtype=np.int64))
         # -------------------------
         
         # ---- 3. Observation_space, Action_space ----
@@ -271,13 +265,13 @@ class CoverageEnv(gym.Env):
         self.dir = None        # 로봇이 바라보는 방향(이전에 진행한 방향) (0: E, 1: N, 2: W, 3: S)
         
         # 방향 전환 선택지
-        step_len = 1
+        self.step_len = 1
         angles_rad = np.linspace(0, 2*np.pi, ACTION_NUM, endpoint=False)
-        self.dir_vecs = np.column_stack([np.cos(angles_rad), np.sin(angles_rad)]) * step_len
+        self.dir_vecs = np.column_stack([np.cos(angles_rad), np.sin(angles_rad)]) * self.step_len
         self.base_dir_vecs = [(1, 0), (-1, 0), (0, 1), (0, -1)] # Reachable grid 계산용
         
         # 로봇의 trajectory 저장
-        self.traj = Trajectory()         # 로봇 중심이 한 episode에서 이동한 경로
+        self.traj = []
         # --------------------------------
         
         # ---- 7. 기타 사용하기 좋은 지표들 ----
@@ -458,10 +452,8 @@ class CoverageEnv(gym.Env):
         # never count obstacle cells
         coverable &= (self.obstacles == 0).astype(np.uint8)
         return coverable
-    
-    # FIXME: revisit_degree 삭제할지 결정. 주석에서도 삭제
-    # FIXME: 이 함수를 env 밖에서도 사용하고 있음.
-    def mark_trajectory(self, cx: float, cy: float, flag: bool=True, virtual: bool=False) -> tuple[int, bool, np.ndarray]:
+   
+    def mark_trajectory(self, cx: float, cy: float, flag: bool=True, virtual: bool=False) -> tuple[int, bool, np.ndarray, float]:
         """
         로봇 중심이 (cx, cy)일 때 cleaned_map에 발자국을 찍는 method
 
@@ -474,24 +466,22 @@ class CoverageEnv(gym.Env):
                 - new_cleaned_num (int): 새롭게 cover한 grid 수
                 - collided (bool): 충돌 여부
                 - new_cleaned_grid_indices (np.ndarray): 새롭게 cover한 grid의 좌표. (N, 2)의 형태. Cover한 grid의 (x좌표, y좌표)가 N개 나열되어 있음
-            
-            삭제한 return:
                 - revisit_degree (float): 로봇 청소기가 현재 위치한 영역을 이전에 얼마나 청소했는지 표시하는 인자. 
                     1.0 이상이면 영역의 grid 모두가 이전에 청소한 적이 있음. 숫자가 클수록 더 자주 청소했다는 의미
         """
         new_cleaned_num = 0
-        # revisit_degree = 0.0
+        revisit_degree = 0.0
         
         new_cleaned_grid_indices = None
         
         # 1. 중심 좌표가 맵을 벗어나는 경우
         if not self._in_bounds_center(cx, cy):
-            return new_cleaned_num, True, new_cleaned_grid_indices
+            return new_cleaned_num, True, new_cleaned_grid_indices, revisit_degree
         
         # 2. 로봇이 장애물과 충돌하는 경우
         xs, ys = self._get_footprint_coords(cx, cy)
         if self._collides(xs, ys):
-            return new_cleaned_num, True, new_cleaned_grid_indices
+            return new_cleaned_num, True, new_cleaned_grid_indices, revisit_degree
         
         # 3. 일반적인 경우
         if flag:
@@ -499,10 +489,8 @@ class CoverageEnv(gym.Env):
             new_cleaned_x = xs[new_cleaned_mark]; new_cleaned_y = ys[new_cleaned_mark]
             
             if len(new_cleaned_x) > 0:
-                new_cleaned_grid_indices = np.column_stack((new_cleaned_x, new_cleaned_y)) # Shape: (N, 2)
+                # new_cleaned_grid_indices = np.column_stack((new_cleaned_x, new_cleaned_y)) # Shape: (N, 2)
                 new_cleaned_num = len(new_cleaned_x)
-                
-            # revisit_degree = float(self.cleaned[ys, xs].sum() / self.robot_area)
             
         # self.cleaned[ys, xs] = np.where(self.cleaned[ys, xs] < 255, self.cleaned[ys, xs]+1, 255) # cleaned_map update: Overflow 고려
         
@@ -518,14 +506,29 @@ class CoverageEnv(gym.Env):
                 new_xs, new_ys = xs[new_mask], ys[new_mask]
             else:
                 new_xs, new_ys = xs, ys
-            self.cleaned[new_ys, new_xs] = np.where(self.cleaned[new_ys, new_xs] < 255, self.cleaned[new_ys, new_xs]+1, 255) # cleaned_map update: Overflow 고려
             
+            # revisit_degree 계산
+            new_cover_area = len(new_xs)
+            if new_cover_area == 0:
+                revisit_degree = (self.cleaned[ys, xs].sum(dtype=np.int64) - self.robot_area) / self.robot_area
+            else:
+                revisit_degree = (self.cleaned[new_ys, new_xs].sum(dtype=np.int64) - new_cover_area) / new_cover_area
+            
+            # cleaned_map 업데이트
+            under_cleaned_max_mask = self.cleaned[new_ys, new_xs] < 255 # cleaned_map의 grid가 CLEANED_MAP_MAX 미만인 indices만 선별
+            new_xs = new_xs[under_cleaned_max_mask]; new_ys = new_ys[under_cleaned_max_mask]
+            self.cleaned[new_ys, new_xs] += 1
+            new_cleaned_grid_indices = np.column_stack((new_xs, new_ys)) # Shape: (N, 2)
+            
+            # visited_map 업데이트
             cx = int(cx+0.5); cy = int(cy+0.5) # 실수 좌표를 반올림
             self.visited[cy, cx] = self.visited[cy, cx]+1 if self.visited[cy, cx] < 255 else 255 # visited_map은 다시 방문할 때마다 1을 추가 (Overflow 고려)
             
+            # self.visited[cy, cx] = self.visited[cy, cx]+1 if self.visited[cy, cx] < 255 else 255 # visited_map은 다시 방문할 때마다 1을 추가 (Overflow 고려)
+            
             self._prev_xs = xs.copy(); self._prev_ys = ys.copy()
             
-        return new_cleaned_num, False, new_cleaned_grid_indices
+        return new_cleaned_num, False, new_cleaned_grid_indices, revisit_degree
 
 
     @property
@@ -533,11 +536,11 @@ class CoverageEnv(gym.Env):
         
         if self.coverable is None:
             free = (self.obstacles == 0)
-            total = int(free.sum())
+            total = int(free.sum(dtype=np.int64))
             if total == 0:
                 return 0.0
             cleaned_mask = (self.cleaned > 0)
-            cleaned_free = int((cleaned_mask & free).sum())
+            cleaned_free = int((cleaned_mask & free).sum(dtype=np.int64))
             return cleaned_free / total
 
         if self.total_coverable_area == 0:
@@ -551,12 +554,87 @@ class CoverageEnv(gym.Env):
         if self.coveraged_area == 0:
             return 0.0
         
-        coverage_with_overlap = self.cleaned.sum()
+        coverage_with_overlap = self.cleaned.sum(dtype=np.int64)
         return float((coverage_with_overlap - self.coveraged_area) / self.coveraged_area)
     
     @property
     def cleaning_time(self):
-        return self.traj.get_cleaning_time()
+        
+        action_seq = [traj_data['dir'] for traj_data in self.traj]
+        
+        total_time = 0.0
+        v_max = 0.4  # m/s
+        w_max = 3.0   # rad/s
+        lin_accel = 0.1 # m/s^2
+        ang_accel = 10  # rad/s^2
+        step_length = self.cfg.grid_size*0.01*self.step_len  # 4cm -> 0.04m
+        angle_interval = np.pi / ACTION_NUM   # 각도 간격(rad)
+        angle_threshold = 30 * np.pi / 180  # 정지 회전 임계값(rad)
+        
+        straight_distance = 0.0 # 직진으로 이동한 총 거리
+        
+        for i in range(len(action_seq)):
+            curr_dir = action_seq[i]
+            # prev_dir = action_seq[i-1] if i > 0 else curr_dir
+            
+            straight_distance += step_length
+            
+            is_last = (i == len(action_seq) - 1)
+            rotate_needed = False
+            angle_diff = 0.0
+            
+            if not is_last:
+                next_dir = action_seq[i+1]
+                # 방향 차이 계산 (Index 차이를 각도로 변환)
+                dir_diff = abs(next_dir - curr_dir)
+                if dir_diff > ACTION_NUM/2: dir_diff = ACTION_NUM - dir_diff # 최단 회전 경로
+                
+                angle_diff = dir_diff * angle_interval
+                if angle_diff > angle_threshold: # 22.5도 초과 시 정지 회전
+                    rotate_needed = True
+
+            # 3. 정지 회전이 필요하거나 마지막이면 누적된 직진 구간 시간 계산
+            if rotate_needed or is_last:
+                # --- 직진 구간 시간 계산 (v^2 = 2as 활용) ---
+                # 최대 속도 도달 가능 거리 (가속 + 감속)
+                d_crit = (v_max**2) / lin_accel 
+                
+                if straight_distance >= d_crit:
+                    # 최대 속도 도달 가능: 가속시간 + 정속시간 + 감속시간
+                    t_accel = v_max / lin_accel
+                    d_accel = 0.5 * lin_accel * (t_accel**2)
+                    d_const = straight_distance - (2 * d_accel)
+                    t_const = d_const / v_max
+                    total_time += (2 * t_accel) + t_const
+                else:
+                    # 최대 속도 미도달: 삼각형 가감속
+                    # s = 2 * (0.5 * a * t^2) => t = sqrt(s/a)
+                    t_tri = np.sqrt(straight_distance / lin_accel)
+                    total_time += 2 * t_tri
+                
+                # 직진 거리 리셋
+                straight_distance = 0.0
+                
+                # 4. 회전 시간 계산 (정지 상태에서 회전)
+                if rotate_needed:
+                    # 최대 각속도에 도달하기 위한 최소 필요 각도 (가속 + 감속 거리)
+                    # theta = w^2 / alpha
+                    angle_crit = (w_max**2) / ang_accel
+                    
+                    if angle_diff >= angle_crit:
+                        # 사다리꼴: 최대 각속도 도달 가능
+                        t_ang_accel = w_max / ang_accel
+                        angle_accel_dec = angle_crit # 가속+감속에 쓰인 총 각도
+                        angle_const = angle_diff - angle_accel_dec
+                        t_ang_const = angle_const / w_max
+                        total_time += (2 * t_ang_accel) + t_ang_const
+                    else:
+                        # 삼각형: 최대 각속도 도달 전 감속 시작
+                        # theta = 2 * (0.5 * alpha * t^2) => t = sqrt(theta / alpha)
+                        t_ang_tri = np.sqrt(angle_diff / ang_accel)
+                        total_time += 2 * t_ang_tri
+
+        return total_time
 
     # def _ray_distance_forward(self, cx: float, cy: float, d: int) -> int:
     #     dx, dy = self.dir_vecs[d]
@@ -601,7 +679,7 @@ class CoverageEnv(gym.Env):
         valid = (line_x >= -0.5) & (line_x < self.W - 0.5) & \
                 (line_y >= -0.5) & (line_y < self.H - 0.5)
         
-        if not np.any(valid): # 모든 방향으로의 이동이 map을 벗어나는 경우
+        if not np.any(valid): # 해당 방향으로 한칸만 이동해도 로봇의 중심이 map을 벗어나는 경우
             return 0.0
         
         # 4. 실수 좌표를 가장 가까운 정수 격자 인덱스로 변환 (반올림)
@@ -617,11 +695,11 @@ class CoverageEnv(gym.Env):
         
         if len(hit_indices) > 0:
             # 첫 번째 충돌 지점까지의 거리 (steps 배열에서의 인덱스 활용)
-            return float(steps[valid][hit_indices[0]])
+            return float(hit_indices[0])
         else:
-            # 장애물이 없으면 레이가 맵 끝까지 간 거리 반 len(line_x_idx)이 아님에 주의
+            # 장애물이 없으면 맵 끝까지 간 거리를 반환
             return float(len(line_x_idx))
-
+    
     def _crop_patch(self, arr: np.ndarray, cx: float, cy: float, value: int | list | tuple = 0) -> np.ndarray:
         """
         전체 map data에서 local map data를 뽑는 method
@@ -684,16 +762,33 @@ class CoverageEnv(gym.Env):
             agent_layer[ys, xs] = 1
         
         return agent_layer
-        
-    # FIXME: Map data state를 수정
-    def _get_obs(self):
+    
+    def _update_patch_stack(self):
         
         cx, cy = self.pos
         
-        # local_map 정보가 담긴 patch를 얻음
-        full_layer = np.stack([self.collision_map, self.cleaned > 0, self.visited], axis=0)
-        patch = self._crop_patch(full_layer, cx, cy, value=[1, 0, 0])
+        # 1. 현재 step에서 local_map 정보가 담긴 patch를 얻음
+        full_layer = np.stack([self.collision_map, self.cleaned, self.visited], axis=0)
+        current_patch = self._crop_patch(full_layer, cx, cy, value=[1, 0, 0])
         
+        # 2. 현재 step의 local_map 정보를 self.patch_stack에 저장.
+        if len(self.patch_stack) == 0:
+            self.patch_stack.extend([current_patch] * self.cfg.stack_steps)
+        else:
+            self.patch_stack.append(current_patch)
+    
+    # FIXME: Map data state를 수정
+    def _get_obs(self, append_patch_stack: bool=True):
+        
+        cx, cy = self.pos
+        
+        # -------------- Map data 생성 --------------
+        # self.patch_stack에 저장된 patch들을 합쳐서 observation으로 사용
+        total_patch = np.concatenate(list(self.patch_stack), axis=0).astype(np.float32)
+        # ------------------------------------------
+        
+        
+        # ---------------- Additional state vector ----------------
         # 학습에 도움이 될 만한 수치적인 정보를 생성
         # 로봇의 위치 정보: [-1, 1]의 범위로 정규화
         x_norm = (cx/(self.W-1))*2-1
@@ -722,11 +817,12 @@ class CoverageEnv(gym.Env):
             ray_norm,
             np.array([cov_norm], dtype=np.float32),
         ], axis=0).astype(np.float32)
+        # ----------------------------------------------------
         
-        return {"map": patch, "vec": obs_vec, 'action_mask': action_mask}
+        return {"map": total_patch, "vec": obs_vec, 'action_mask': action_mask}
     
     
-    def _get_traj_data(self, new_cleaned_num: int, new_covered_cell_indices: np.array, add_visted: bool = True) -> dict:
+    def _get_traj_data(self, new_cleaned_num: int, new_covered_cell_indices: np.array, add_visited: bool = True) -> dict:
         """
         Trajectory class에 저장할 단일 data를 생성하는 method
         Action이 수행된 후의 data를 저장
@@ -738,13 +834,12 @@ class CoverageEnv(gym.Env):
         Returns:
             dict: Trajectory class에 맞는 dict 형태
         """
-        
         traj_data = {
             'steps': self.steps,
             'pos': self.pos,
             'covered_cells': new_covered_cell_indices,
             'covered_cell_num': new_cleaned_num,
-            'add_visited': add_visted,
+            'add_visited': add_visited,
             'collision_count': self.collision_count,
             'dir': self.dir,
             'no_progress_cnt': self.no_progress_cnt,
@@ -754,121 +849,164 @@ class CoverageEnv(gym.Env):
         return traj_data
     
     # FIXME: 삭제?
-    def _back_step_by_traj_data(self, traj_data: dict):
+    # def _back_step_by_traj_data(self, traj_data: dict):
         
-        # self.steps = traj_data['steps']
-        # self.pos = traj_data['steps']
-        # self.dir = traj_data['dir']
+    #     # self.steps = traj_data['steps']
+    #     # self.pos = traj_data['steps']
+    #     # self.dir = traj_data['dir']
         
-        px, py = traj_data['pos']
-        px = int(px+0.5); py = int(py+0.5) # 실수 좌표를 반올림: self.visited를 수정한 grid 좌표
+    #     px, py = traj_data['pos']
+    #     px = int(px+0.5); py = int(py+0.5) # 실수 좌표를 반올림: self.visited를 수정한 grid 좌표
         
-        covered_x = traj_data['covered_cells'][:, 0]; covered_y = traj_data['covered_cells'][:, 1]
+    #     covered_x = traj_data['covered_cells'][:, 0]; covered_y = traj_data['covered_cells'][:, 1]
         
-        if not self.visited[py, px] > 0:
-            self.visited[py, px] -= 1
+    #     if not self.visited[py, px] > 0:
+    #         self.visited[py, px] -= 1
         
-        if len(covered_x) > 0:
-            self.cleaned[covered_y, covered_x] = np.where(self.cleaned[covered_y, covered_x] > 0, self.cleaned[covered_y, covered_x]-1, 0)
+    #     if len(covered_x) > 0:
+    #         self.cleaned[covered_y, covered_x] = np.where(self.cleaned[covered_y, covered_x] > 0, self.cleaned[covered_y, covered_x]-1, 0)
 
-    def reset(self, *, seed=None, options=None):
+
+    def _get_collision_map(self):
+        extend_obstacles = np.pad(self.obstacles, pad_width=1, mode='constant', constant_values=1) # 맵 바깥에 가상의 벽을 설치
+        extend_collision_map = cv2.dilate(
+            extend_obstacles, 
+            self.robot_mask, 
+            borderType=cv2.BORDER_CONSTANT, 
+            borderValue=1
+        )
+        return extend_collision_map[1:-1, 1:-1] # dilation된 맵에서 맵 바깥에 설치한 벽 부분을 제거하여 collision_map 생성
+    
+    
+    def _get_start_pos(self) -> tuple[int, int]:
+
+        # 가장자리 좌표를 얻음
+        min_x, max_x = self.robot_half_size, self.W-self.robot_half_size-1
+        min_y, max_y = self.robot_half_size, self.H-self.robot_half_size-1
+        
+        x_range = np.arange(min_x, max_x+1); y_range = np.arange(min_y+1, max_y)
+        top = np.stack([np.full_like(x_range, max_y), x_range], axis=1)
+        bottom = np.stack([np.full_like(x_range, min_y), x_range], axis=1)
+        left = np.stack([y_range, np.full_like(y_range, min_x)], axis=1)
+        right = np.stack([y_range, np.full_like(y_range, max_x)], axis=1)
+        
+        edge_pos = np.concatenate([top, bottom, left, right], axis=0)
+        
+        # 가장자리 좌표 중에 collision이 일어나지 않는 좌표를 선별
+        if self.collision_map is None:
+            self.collision_map = self._get_collision_map()
+        
+        edge_collision_value = self.collision_map[edge_pos[:, 0], edge_pos[:, 1]]
+        valid_indices = np.where(edge_collision_value == 0)[0]
+        
+        # coverable_area_rate이 50% 이상인 위치만 선택
+        coverable_area_rate = 0.0
+        start_x = None; start_y = None # 시작 위치
+        
+        for _ in range(100):
+        
+            if len(valid_indices) > 0:
+                chosen_idx = self.env_rng.choice(valid_indices)
+                start_x = edge_pos[chosen_idx, 1]; start_y = edge_pos[chosen_idx, 0]
+                
+            else:
+                # 가장자리 변 중에 collision이 일어나지 않는 좌표가 없는 경우, 랜덤하게 한 위치를 선택하고 그 주변 장애물을 강제로 제거
+                print("No valid start position on the edge. Randomly removing obstacles around a random edge position.")
+                chosen_idx = self.env_rng.choice(len(edge_pos))
+                start_x = edge_pos[chosen_idx, 1]; start_y = edge_pos[chosen_idx, 0]
+                # 장애물을 강제로 제거
+                xs, ys = self._get_footprint_coords(start_x, start_y)
+                self.obstacles[ys, xs] = 0
+                self.collision_map = self._get_collision_map()
+                edge_collision_value = self.collision_map[edge_pos[:, 0], edge_pos[:, 1]]
+                valid_indices = np.where(edge_collision_value == 0)[0]
+
+            self.reachable = self._compute_reachable_centers(start_x, start_y)
+            self.coverable = self._compute_coverable_cells_from_reachable(self.reachable)
+            self.total_coverable_area = int(self.coverable.sum(dtype=np.int64)) # Cover할 수 있는 영역의 넓이
+            coverable_area_rate = self.total_coverable_area / (self.H * self.W) # coverable_area_rate이 너무 낮으면 맵을 재생성해야 함.
+            
+            if coverable_area_rate >= 0.5:
+                return (float(start_x), float(start_y))
+            
+        else:
+            return None
+        
+        
+    
+    def reset(self, *, seed=None, saved_obstacle_data: np.ndarray=None, options=None):
         super().reset(seed=seed) # 난수 생성기 self.np_random가 생성됨. 첫 episode에는 seed 초기화가 일어남. 다음 episode부터는 seed 초기화를 수행하지 않음.(seed=None)
 
-        coverable_area_rate = 0
-        
-        while coverable_area_rate < 0.5:
-            
-            # Map 생성
+        for _ in range(100):
+            # 1. Obstacle map 생성
+            # saved_obstacle_data: 사전에 생성한 map. 이 map이 주어지는 경우 map을 random하게 생성하지 않고 이 map을 곧바로 사용
+            # 사전에 생성한 map이 주어지지 않은 경우, map을 random하게 생성.
             # 시작 지점만 reset하고 map은 그대로 사용하는 경우에는 map을 다시 생성하지 않음
-            if self.obstacles is None or options is None or not options['reset_only_start_pos']: # 아직 장애물이 아예 생성되지 않은 경우 or start_pos만 reset하는 경우
+            new_obstacle = False
+            if saved_obstacle_data is not None:
+                self.obstacles = saved_obstacle_data    # 사전에 생성된 map
+                new_obstacle = True
+            elif self.obstacles is None or options is None or not options['reset_only_start_pos']: # 아직 장애물이 아예 생성되지 않은 경우 or start_pos만 reset하는 경우
                 self.obstacles = generate_house_like_obstacles(self.cfg, self.map_rng) # 장애물의 위치를 표시하는 layer
-                # 장애물을 dilation해서 collision_map 생성
-                self.collision_map = cv2.dilate(
-                    self.obstacles, 
-                    self.robot_mask, 
-                    borderType=cv2.BORDER_CONSTANT, 
-                    borderValue=1
-                )
+                new_obstacle = True
+            
+            # 2. Collision map 생성: Map 바깥에 가상의 벽이 있다고 가정하고 장애물을 dilation하여 생성
+            if new_obstacle:
+                self.collision_map = self._get_collision_map()
 
             # 청소된 grid를 표시하는 layer
             self.cleaned = np.zeros((self.H, self.W), dtype=np.uint8)
             self.visited = np.zeros((self.H, self.W), dtype=np.uint8)
 
-            # 출발 위치와 방향 선정: 동시에 self.cleaned에서 로봇이 차지하는 영역을 변환
-            for _ in range(20000):
-                cx = float(self.env_rng.integers(self.robot_half_size, self.W - self.robot_half_size))
-                cy = float(self.env_rng.integers(self.robot_half_size, self.H - self.robot_half_size))
-                collided = self._collides(cx, cy) # 현재 로봇 청소기가 있는 영역을 cleaned_layer에 추가
-                if not collided:
-                    self.pos = (cx, cy)
-                    break
-            else:
-                print("Force the robot position to the center.")
-                cx = float(self.W//2); cy = float(self.H//2)
-                self.pos = (cx, cy)
-                xs, ys = self._get_footprint_coords(cx, cy)
-                self.obstacles[ys, xs] = 0
-                collided = self._collides(cx, cy)
-                if collided:
-                    raise ValueError("Obstacles were not removed before forced robot placement.")
+            # 3. 출발 위치와 방향 선정: 시작 지점은 map의 가장 자리로 한정
+            # 가장자리 위치 중 collision이 일어나지 않는 위치를 start_pos의 후보로 선정
+            # 해당 위치를 시작점으로 했을 때 coverable한 영역이 50% 이상인 시작점만 선정
+            self.pos = self._get_start_pos()
+            if self.pos is None:
+                print("FAILED to set start position: Coverable area is too low. Map regenerating...")
+                saved_obstacle_data = None # 저장된 map을 쓰는 경우, 다른 map을 생성하도록 함.
+                continue
+                
             self.dir = int(self.env_rng.integers(0, self.action_space.n))
             
-            # Coverable grid를 계산
-            self.reachable = self._compute_reachable_centers(*self.pos)
-            self.coverable = self._compute_coverable_cells_from_reachable(self.reachable)
-            self.total_coverable_area = int(self.coverable.sum()) # Cover할 수 있는 영역의 넓이
-            
-            # 변수 초기화
+            # 4. 변수 초기화
             self.steps = 0
             self.no_progress_cnt = 0
             self.collision_count = 0
             
             # 로봇이 (cx, cy)로 이동했을 때 로봇의 궤적, coverage 정도 등을 update
-            new_cleaned_num, collided, new_cleaned_grid_indices = self.mark_trajectory(cx, cy) # cleaned_layer에 robot이 cover한 영역을 표시
+            new_cleaned_num, _, new_cleaned_grid_indices, _ = self.mark_trajectory(*self.pos) # cleaned_layer에 robot이 cover한 영역을 표시
             self.coveraged_area = new_cleaned_num # Cover된 영역의 넓이
             self.last_coverage = self.coverage
             
             # Trajectory에 저장
-            self.traj.clear()
-            self.traj.append(self._get_traj_data(new_cleaned_num, new_cleaned_grid_indices))     
+            self.traj = [self._get_traj_data(new_cleaned_num, new_cleaned_grid_indices)]
             
-            coverable_area_rate = self.total_coverable_area / (self.H * self.W) # coverable_area_rate이 너무 낮으면 맵을 재생성해야 함.
-            
-        return self._get_obs(), {"Start_pos": self.pos}
+            self.patch_stack = deque(maxlen=self.cfg.stack_steps) # Observation 정보를 얻는 local map step 수
+            self._update_patch_stack()
+                
+            return self._get_obs(), {"Start_pos": self.pos}
+        
+        else:
+            raise RuntimeError("Failed to reset environment after 100 attempts.")
 
     def get_next_pos(self, action: int) -> tuple[float, float]:
         dx = self.dir_vecs[action][0]; dy = self.dir_vecs[action][1]
         cx, cy = self.pos
         return float(cx + dx), float(cy + dy)
     
-    def get_next_action_from_next_pos(self, next_pos: tuple[float, float]) -> int:
+    def get_next_action_from_next_pos(self, next_pos: tuple[float, float], curr_pos: tuple[float, float] = None) -> int:
         eps = 1e-7
-        cx, cy = self.pos; nx, ny = next_pos
+        if curr_pos is None:
+            curr_pos = self.pos
+        cx, cy = curr_pos; nx, ny = next_pos
+            
         for action, dir_vec in enumerate(self.dir_vecs):
             dx = dir_vec[0]; dy = dir_vec[1]
             if abs(nx - (cx+dx)) < eps and abs(ny - (cy+dy)) < eps:
                 return action
         else:
             raise ValueError(f"We can't arrived at next_pos {next_pos} from start_pos {self.pos} by one action!")
-    
-    # FIXME: 삭제?        
-    def _get_env_state(self):
-        
-        prev_state = {
-            'steps': self.steps,
-            'pos': self.pos,
-            'coveraged_area': self.coveraged_area,            
-        }
-        
-        return prev_state
-    
-    # FIXME: 삭제?
-    def _set_env_state(self, prev_state):
-        
-        self.steps = prev_state['steps']
-        self.pos = prev_state['pos']
-        self.coveraged_area = prev_state['coveraged_area']
-        
     
     def step(self, action):
             
@@ -894,8 +1032,8 @@ class CoverageEnv(gym.Env):
         add_visited = True
         if self.visited[int(ny+0.5), int(nx+0.5)] >= 255:
             add_visited = False
-        
-        new_cleaned_num, collided, new_cleaned_grid_indices = self.mark_trajectory(nx, ny)
+
+        new_cleaned_num, collided, new_cleaned_grid_indices, revisit_degree = self.mark_trajectory(nx, ny)
         self.coveraged_area += new_cleaned_num
         if collided:
             add_visited = False
@@ -912,6 +1050,7 @@ class CoverageEnv(gym.Env):
             reward -= self.cfg.obstacle_penalty            
         else:
             revisit_count = self.visited[int(ny+0.5), int(nx+0.5)]-1 # 처음 방문은 제외
+            
             if new_cleaned_num > 0:
                 # 3. Cover reward
                 reward += self.cfg.uncleaned_reward * new_cleaned_num
@@ -919,15 +1058,12 @@ class CoverageEnv(gym.Env):
             else:
                 # 4. Cleaned grid penalty
                 reward -= max(revisit_count, 1) * self.cfg.cleaned_penalty
-                
-            # 5. Intrinsic reward
-            reward += self.cfg.intrinsic_reward * np.exp(-revisit_count)
             
-        # 6. Turn penalty
+        # 5. Turn penalty
         if self.dir != action: 
             reward -= self.cfg.turn_penalty
         
-        # 7. Complete reward
+        # 6. Complete reward
         if self.coverage >= self.cfg.target_coverage:
             reward += self.cfg.complete_reward
         # ------------------------------------------------------------
@@ -984,6 +1120,9 @@ class CoverageEnv(gym.Env):
         
         # Trajectory data를 저장
         self.traj.append(self._get_traj_data(new_cleaned_num, new_cleaned_grid_indices, add_visited))
+        
+        # self.patch_stack update
+        self._update_patch_stack()
 
         return self._get_obs(), reward, terminated, truncated, info
     
@@ -992,10 +1131,9 @@ class CoverageEnv(gym.Env):
 
         Args:
             remain_collision_count (bool, optional): 가상의 step을 수행한 뒤 다시 back step을 하는 경우, collision count를 유지해야 함. Defaults to False.
-        """
-        
+        """        
         last_map_vary_data = self.traj.pop() # Map을 변화한 방식에 관한 데이터
-        last_instance_data = self.traj.get_last_data() # 가장 마지막 position, direction, step 수 등에 관한 데이터
+        last_instance_data = self.traj[-1] # 가장 마지막 position, direction, step 수 등에 관한 데이터
         
         # Instance variable 변경
         self.steps = last_instance_data['steps']
@@ -1004,22 +1142,52 @@ class CoverageEnv(gym.Env):
         self.no_progress_cnt = last_instance_data['no_progress_cnt']
         self.last_coverage = last_instance_data['last_coverage']
         
+        self._prev_xs, self._prev_ys = self._get_footprint_coords(*self.pos)
+        
         if remain_collision_count:
             self.collision_count = last_instance_data['collision_count']
         
         # Map layer 변경
-        px, py = last_instance_data['pos']
-        
         if last_map_vary_data['covered_cell_num'] > 0:
             self.coveraged_area -= last_map_vary_data['covered_cell_num']
-            cx = last_map_vary_data['covered_cells'][:, 0]; cy = last_map_vary_data['covered_cells'][:, 1]
-            self.cleaned[cy, cx] = 0
             
+        if len(last_map_vary_data['covered_cells'][:, 0]) > 0:
+            cx = last_map_vary_data['covered_cells'][:, 0]; cy = last_map_vary_data['covered_cells'][:, 1]
+            self.cleaned[cy, cx] -= 1
+        
         if last_map_vary_data['add_visited']:
+            px, py = last_map_vary_data['pos']
             px = int(px+0.5); py = int(py+0.5)
             self.visited[py, px] = self.visited[py, px]-1 if self.visited[py, px] > 0 else 0
         
+        # ----------------- self.patch_stack 변경 -----------------
         
+        # self.cfg.stack_steps 전의 cleaned layer, visited layer를 얻음
+        past_cleaned = self.cleaned.copy()
+        past_visited = self.visited.copy()
+        for i in range(self.cfg.stack_steps-1):
+            if len(self.traj) - i >= 2:
+                map_vary_data = self.traj[-1-i]
+                if len(map_vary_data['covered_cells'][:, 0]) > 0:
+                    cx = map_vary_data['covered_cells'][:, 0]; cy = map_vary_data['covered_cells'][:, 1]
+                    past_cleaned[cy, cx] -= 1
+                
+                if map_vary_data['add_visited']:
+                    px, py = map_vary_data['pos']
+                    px = int(px+0.5); py = int(py+0.5)
+                    past_visited[py, px] = past_visited[py, px]-1 if past_visited[py, px] > 0 else 0
+                    
+        # crop을 얻고 self.patch_stack에 추가
+        idx = -self.cfg.stack_steps
+        if len(self.traj) < self.cfg.stack_steps:
+            idx = 0
+        cx, cy = self.traj[idx]['pos']
+        full_layer = np.stack([self.collision_map, past_cleaned, past_visited], axis=0)
+        current_patch = self._crop_patch(full_layer, cx, cy, value=[1, 0, 0])
+        
+        self.patch_stack.append(current_patch)
+        # -------------------------------------------------------
+            
     def backstep(self, step_num: int = 1):
         """
         step_num만큼 뒤로 돌아감.
@@ -1029,19 +1197,19 @@ class CoverageEnv(gym.Env):
         """
         
         if len(self.traj) <= step_num + 1:
-            print(f"Cannnot backstep {step_num} steps. Only {len(self)-1} steps are available.")
-            return
+            print(f"Cannnot backstep {step_num} steps. Only {len(self.traj)-1} steps are available.")
+            return self._get_obs()
         
         while step_num > 0:
-            
             self.one_step_back(remain_collision_count=True)
             step_num -= 1
+        
+        return self._get_obs()
     
     def _draw_layer(self):
         
         self.fig.clear() # 이전 그림 지우기
         self.fig.set_size_inches(8, 8)
-        agent_layer = self._get_agent_layer(*self.pos)
 
         axes = self.fig.subplots(2, 3)
 
@@ -1111,7 +1279,7 @@ class CoverageEnv(gym.Env):
         ax1.imshow(traj_map, cmap=custom_cmap, origin='lower', vmin=0, vmax=4)
         # 로봇이 움직인 궤적 표시
         if len(self.traj) > 1:
-            traj_arr = self.traj.get_pos_traj()
+            traj_arr = np.array([traj_data['pos'] for traj_data in self.traj])
             ax1.plot(traj_arr[:, 0], traj_arr[:, 1], color=color_traj, linewidth=1.5, alpha=0.8, zorder=5)
             ax1.plot(traj_arr[0, 0], traj_arr[0, 1], color=color_start, marker='o', zorder=6)
         legend_elements_1 = [
@@ -1124,41 +1292,41 @@ class CoverageEnv(gym.Env):
         ]
         ax1.legend(handles=legend_elements_1, loc='upper left', bbox_to_anchor=(1.05, 1))
         ax1.set_title(f"Coverage: {self.coverage*100:.2f}%, Overlap rate: {self.overlap_rate*100:.2f}%")
-        ax1.text(0, -0.1, f"Path length: {len(self.traj)}\nCleaning time: {self.cleaning_time:.2f} s", transform=ax1.transAxes, ha="left", va="top", fontsize=11, color='black')
+        ax1.text(0, -0.1, f"Path length: {len(self.traj)}\nCleaning time: {self.cleaning_time/60:.2f} min", transform=ax1.transAxes, ha="left", va="top", fontsize=11, color='black')
         # --------------------------------------------------------------------
         
         # --------------------------------------------------------------------
-        # [Visited map 시각화]
+        # [Cleaned map 시각화]
         # --------------------------------------------------------------------
         
         # Color 지정: RGB값
         obs_c = [0, 0, 0]; unc_c = [1.0, 0.65, 0.65]
         
-        vis_data = self.cleaned.astype(np.float32).copy()
-        vis_data[vis_data == 0] = np.nan
+        cleaned_data = self.cleaned.astype(np.float32).copy()
+        cleaned_data[cleaned_data == 0] = np.nan
         
-        img2 = ax2.imshow(vis_data, cmap='viridis', origin='lower', vmin=0, vmax=10) # self.visited을 시각화
+        img2 = ax2.imshow(cleaned_data, cmap='viridis', origin='lower', vmin=0, vmax=CLEANED_MAP_MAX) # self.trace을 시각화
         cbar = self.fig.colorbar(img2, ax=ax2, 
                                  orientation='horizontal',
                                  pad=0.1,
                                  shrink=0.8,
                                  aspect=30,
                                  fraction=0.05) # colorbar 추가
-        cbar.set_label('Visit Count (Penalty Intensity)', fontsize=10)
+        cbar.set_label('Cover Count (Penalty Intensity)', fontsize=10)
         
         # Obstacle을 표시
-        obs_map = np.zeros((*self.visited.shape, 4)) # RGBA 형식
+        obs_map = np.zeros((*self.cleaned.shape, 4)) # RGBA 형식
         obs_map[self.obstacles == 1] = [*obs_c, 1]
         ax2.imshow(obs_map, origin='lower')
         
         # Uncoverable 영역을 표시
-        unc_map = np.zeros((*self.visited.shape, 4)) # RGBA 형식
+        unc_map = np.zeros((*self.cleaned.shape, 4)) # RGBA 형식
         unc_map[self.coverable == 0] = [*unc_c, 1]
         ax2.imshow(unc_map, origin='lower')
         
         # 시작 위치와 현재 위치 표시
         if len(self.traj) > 1:
-            traj_arr = self.traj.get_pos_traj()
+            traj_arr = np.array([traj_data['pos'] for traj_data in self.traj])
             ax2.plot(traj_arr[0, 0], traj_arr[0, 1], color=color_start, marker='o', zorder=3)
             ax2.plot(traj_arr[-1, 0], traj_arr[-1, 1], color=color_end, marker='o', zorder=4)
 
@@ -1169,97 +1337,108 @@ class CoverageEnv(gym.Env):
             Line2D([0], [0], marker='o', color=color_end, label='Final_pos', markerfacecolor=color_end, linestyle='None'),
         ]
         ax2.legend(handles=legend_elements_2, loc='upper left', bbox_to_anchor=(1.05, 1))
-        ax2.set_title("Visited map")
+        ax2.set_title(f"Cleaned map, Overlap rate: {self.overlap_rate*100:.2f}%")
         # --------------------------------------------------------------------
         
         self.fig.tight_layout()
         
-    def _draw_obs(self):
+    def _draw_obs(self, preprocessor=None):
         
         self.fig.clear() # 이전 그림 지우기
-        self.fig.set_size_inches(10, 8)
+        self.fig.set_size_inches(15, 12)
         
-        # 그림을 그릴 창을 2행 3열로 나눔. 첫 번째 행의 높이는 두 번째 행보다 2배 높게 설정.
-        gs = GridSpec(2, 3, figure=self.fig, height_ratios=[4, 1])
+        # 그림을 그릴 창을 4행 3열로 나눔. 첫 번째 행의 높이는 두 번째 행보다 2배 높게 설정.
+        height_ratios = [4]*self.cfg.stack_steps + [1]
+        gs = GridSpec(self.cfg.stack_steps+1, 3, figure=self.fig, height_ratios=height_ratios)
         
         # obs data를 얻음
         obs = self._get_obs()
-        H, W = obs['map'][2].shape
+        if preprocessor is not None:
+            obs = preprocessor(obs, LOCAL_VIEW_DIM)
+        H, W = obs['map'][0].shape
         
         # ---- obs의 map data 그리기 ----
         
-        # gs의 첫 번째 행을 그래프를 그리는 데 사용
-        ax1 = self.fig.add_subplot(gs[0, 0])
-        ax2 = self.fig.add_subplot(gs[0, 1])
-        ax3 = self.fig.add_subplot(gs[0, 2])
-        axes = [ax1, ax2, ax3]
-            
-        # collision_map
-        img0 = axes[0].imshow(obs['map'][0], cmap='gray_r', origin='lower')
-        axes[0].plot(H//2, W//2, 'r.')
-        axes[0].set_title("Collision_map local view")
-        legend_elements0 = [
-            Patch(facecolor='black', edgecolor='black', label='Obstacles'),
-            Patch(facecolor='white', edgecolor='black', label='Free space'),
-        ]
-        axes[0].legend(handles=legend_elements0, loc='upper left', bbox_to_anchor=(0, -0.1))
-        # 그래프 위치를 맞추기 위한 가상의 colorbar
-        cbar_fake0 = self.fig.colorbar(img0, ax=axes[0], orientation='horizontal', 
-                                      pad=0.1, shrink=0.8, aspect=30, fraction=0.05)
-        cbar_fake0.ax.set_visible(False)
+        for i in range(self.cfg.stack_steps):
+            # gs의 첫 번째 행을 그래프를 그리는 데 사용
+            ax1 = self.fig.add_subplot(gs[i, 0])
+            ax2 = self.fig.add_subplot(gs[i, 1])
+            ax3 = self.fig.add_subplot(gs[i, 2])
+            axes = [ax1, ax2, ax3]
+                
+            # collision_map
+            img0 = axes[0].imshow(obs['map'][3*i], cmap='gray_r', origin='lower')
+            axes[0].plot(H//2, W//2, 'r.')
+            axes[0].set_title(f"Collision_map local view(Last {self.cfg.stack_steps-i-1} steps ago)")
+            legend_elements0 = [
+                Patch(facecolor='black', edgecolor='black', label='Obstacles'),
+                Patch(facecolor='white', edgecolor='black', label='Free space'),
+            ]
+            axes[0].legend(handles=legend_elements0, loc='upper left', bbox_to_anchor=(0, -0.1))
+            # 그래프 위치를 맞추기 위한 가상의 colorbar
+            cbar_fake0 = self.fig.colorbar(img0, ax=axes[0], orientation='horizontal', 
+                                        pad=0.1, shrink=0.8, aspect=30, fraction=0.05)
+            cbar_fake0.ax.set_visible(False)
 
-        # cleaned
-        # 현재 로봇 위치를 점으로 찍음
-        img1 = axes[1].imshow(obs['map'][1], cmap='gray_r', origin='lower')
-        axes[1].plot(H//2, W//2, 'r.') # 로봇 위치를 빨간 점으로 표시
-        axes[1].set_title("Cleaned map local view")
-        legend_elements1 = [
-            Patch(facecolor='black', edgecolor='black', label='Covered space'),
-            Patch(facecolor='white', edgecolor='black', label='Uncovered space'),
-        ]
-        axes[1].legend(handles=legend_elements1, loc='upper left', bbox_to_anchor=(0, -0.1))
-        # 그래프 위치를 맞추기 위한 가상의 colorbar
-        cbar_fake1 = self.fig.colorbar(img1, ax=axes[1], orientation='horizontal', 
-                                      pad=0.1, shrink=0.8, aspect=30, fraction=0.05)
-        cbar_fake1.ax.set_visible(False)
-        
-        # visited
-        # 현재 로봇 위치를 점으로 찍음
-        img2 = axes[2].imshow(obs['map'][2], cmap='YlOrRd', origin='lower', vmin=0, vmax=10)
-        cbar = self.fig.colorbar(img2, ax=axes[2], 
-                                 orientation='horizontal',
-                                 pad=0.1,
-                                 shrink=0.8,
-                                 aspect=30,
-                                 fraction=0.05) # colorbar 추가
-        cbar.set_label('Visit Count (Penalty Intensity)', fontsize=10)
-        axes[2].plot(H//2, W//2, 'r.') # 로봇 위치를 빨간 점으로 표시
-        axes[2].set_title(f"Visited layer local view")
-        # legend_elements2 = [ # 그래프 높이를 맞추기 위한 가상의 범례
-        #     Patch(facecolor='none', edgecolor='none', label=' '),
-        #     Patch(facecolor='none', edgecolor='none', label=' '),
-        # ]
-        # axes[2].legend(handles=legend_elements2, loc='upper left', bbox_to_anchor=(0, -0.1), frameon=False)
+            # cleaned
+            # 현재 로봇 위치를 점으로 찍음
+            cleaned_map = obs['map'][3*i+1].copy()
+            cleaned_map[cleaned_map == 0] = np.nan
+            img1 = axes[1].imshow(cleaned_map, cmap='viridis', origin='lower', vmin=0, vmax=CLEANED_MAP_MAX)
+            axes[1].plot(H//2, W//2, 'r.') # 로봇 위치를 빨간 점으로 표시
+            axes[1].set_title(f"Cleaned map local view(Last {self.cfg.stack_steps-i-1} steps ago)")
+            cbar = self.fig.colorbar(img1, ax=axes[1], 
+                                    orientation='horizontal',
+                                    pad=0.1,
+                                    shrink=0.8,
+                                    aspect=30,
+                                    fraction=0.05) # colorbar 추가
+            cbar.set_label('Cover Count (Penalty Intensity)', fontsize=10)
+            # 그래프 위치를 맞추기 위한 가상의 colorbar
+            cbar_fake1 = self.fig.colorbar(img1, ax=axes[1], orientation='horizontal', 
+                                        pad=0.1, shrink=0.8, aspect=30, fraction=0.05)
+            cbar_fake1.ax.set_visible(False)
+            
+            # visited
+            # 현재 로봇 위치를 점으로 찍음
+            img2 = axes[2].imshow(obs['map'][3*i+2], cmap='gray_r', origin='lower') # self.visited을 시각화
+            cbar = self.fig.colorbar(img2, ax=axes[2], 
+                                    orientation='horizontal',
+                                    pad=0.1,
+                                    shrink=0.8,
+                                    aspect=30,
+                                    fraction=0.05) # colorbar 추가
+            cbar.set_label('Visited value', fontsize=10)
+            axes[2].plot(H//2, W//2, 'r.') # 로봇 위치를 빨간 점으로 표시
+            axes[2].set_title(f"Visited layer local view(Last {self.cfg.stack_steps-i-1} steps ago)")
+            # legend_elements2 = [ # 그래프 높이를 맞추기 위한 가상의 범례
+            #     Patch(facecolor='none', edgecolor='none', label=' '),
+            #     Patch(facecolor='none', edgecolor='none', label=' '),
+            # ]
+            # axes[2].legend(handles=legend_elements2, loc='upper left', bbox_to_anchor=(0, -0.1), frameon=False)
         # -----------------------------
         
         # ---- obs의 vec data를 text 형식으로 출력하기 ----
         
         # gs의 두 번째 행을 text 출력에 사용
-        ax_txt = self.fig.add_subplot(gs[1, :])
+        ax_txt = self.fig.add_subplot(gs[-1, :])
         ax_txt.axis('off')
         
         # text 출력
+        ray_data = obs['vec'][2+self.action_space.n : 2+self.action_space.n*2]
+        ray_str = np.array2string(ray_data, separator=', ', formatter={'float_kind': lambda x: f"{x:.2f}"})
+        
         vec_info_text = (f"[Observation Status]\n"
         f"- Normlized position: ({obs['vec'][0]:.2f}, {obs['vec'][1]:.2f})\n"
-        f"- Normalized ray: East: {obs['vec'][6]:.2f}, North: {obs['vec'][7]:.2f}, West: {obs['vec'][8]:.2f}, South: {obs['vec'][9]:.2f}\n"
-        f"- Normalized coverage: {obs['vec'][10]:.2f}\n")
+        f"- Normalized ray: {ray_str}\n"
+        f"- Normalized coverage: {obs['vec'][2+self.action_space.n*2]:.2f}\n")
         ax_txt.text(0, 0.5, vec_info_text, transform=ax_txt.transAxes, fontsize=14,
                     va='top', ha='left', family='monospace')
         # ---------------------------------------------
         
         self.fig.tight_layout()
     
-    def get_visualized_img(self, img_choice: str = 'traj') -> np.ndarray:
+    def get_visualized_img(self, img_choice: str = 'traj', preprocessor = None) -> np.ndarray:
 
         if img_choice not in ['layer', 'traj', 'obs']:
             raise ValueError(f"Invalid img_choice: {img_choice}. Must be one of ['layer', 'traj', 'obs']")
@@ -1269,7 +1448,7 @@ class CoverageEnv(gym.Env):
         elif img_choice == 'traj':
             self._draw_traj()
         else:
-            self._draw_obs()
+            self._draw_obs(preprocessor=preprocessor)
             
         self.canvas.draw()
         return np.array(self.canvas.buffer_rgba(), dtype=np.uint8)[:, :, :3] # [H, W, C]

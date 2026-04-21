@@ -3,6 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 
+def get_next_layer_dim(input_dim: int, kernel_size: int, stride: int, padding: int) -> int:
+    """2D convolution layer의 output dimension 계산"""
+    return (input_dim + 2*padding - kernel_size) // stride + 1
+
 class NoisyLinear(nn.Module):
     
     def __init__(self, in_features, out_features, sigma_init=0.5):
@@ -58,8 +62,9 @@ class CNN_ReDQN(nn.Module):
         # kwargs 처리
         self.action_size = kwargs.get('action_size', 4)
         use_noisy = kwargs.get('use_noisy', False)
-        self.grid_map_size = kwargs.get('grid_map_size', 51)
+        self.local_view_dim = kwargs.get('local_view_dim', 51)
         self.do_normalize = kwargs.get('do_normalize', False)
+        self.stack_steps = kwargs.get('stack_steps', 1)
         self.momentum = 0.1
         
         # Normalization을 할 경우, map data의 평균과 표준편차를 저장
@@ -71,16 +76,21 @@ class CNN_ReDQN(nn.Module):
             # 첫 번째 배치가 들어왔는지 확인하는 플래그 (0: 미수신, 1: 수신완료)
             self.register_buffer('initialized', torch.tensor(0, dtype=torch.uint8))
         
+        # 마지막 layer에서 2D convolution layer의 input dimension 계산    
+        next_dim = get_next_layer_dim(self.local_view_dim, kernel_size=3, stride=1, padding=1) # 51 -> 51
+        next_dim = get_next_layer_dim(next_dim, kernel_size=3, stride=2, padding=0) # 51 -> 25
+        final_dim = get_next_layer_dim(next_dim, kernel_size=3, stride=2, padding=0) # 25 -> 12
+        
         # Image encoder
         self.map_encoder = nn.Sequential(
-            nn.Conv2d(3, 32, kernel_size=3, stride=1, padding=1), # 51 -> 51
+            nn.Conv2d(3*self.stack_steps, 32, kernel_size=3, stride=1, padding=1), # 51 -> 51
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=0), # 51 -> 25
             nn.ReLU(),
             nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=0), # 25 -> 12
             nn.ReLU(),
             nn.Flatten(),
-            nn.Linear(64 * 12 * 12, 512),
+            nn.Linear(64 * final_dim * final_dim, 512),
             nn.ReLU(),
         )
         
