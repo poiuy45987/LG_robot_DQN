@@ -34,7 +34,7 @@ def parse_args():
     parser.add_argument('--map_save_dir', type=str, default='src/robot_vacuum_redqn/robot_vacuum_redqn/maps', help='Directory for saving generated maps')
     parser.add_argument('--test_map_num', type=int, default=5, help='Test 시 사용할 map 수 (Default: 5)')
     parser.add_argument('--test_start_point_num', type=int, default=3, help='Test 시 한 map당 테스트해볼 start_poit 수 (Default: 3)')
-    
+    parser.add_argument('--not_use_maps_folder', action='store_true', help='Test 시, maps 폴더에 저장된 map이 아닌 random하게 생성한 map을 사용')
     
     # ---- Training hyperparameter 설정 ----
     
@@ -185,7 +185,7 @@ def main():
     if args.mode == 'train':
         dqn_agent.train()
     elif args.mode == 'test':
-        dqn_agent.test()
+        dqn_agent.test(use_maps_folder=not args.not_use_maps_folder)
     elif args.mode == 'see_map':
         visualize_test_map(seed=args.seed)
 

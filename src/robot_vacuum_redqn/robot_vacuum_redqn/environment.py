@@ -595,7 +595,7 @@ class CoverageEnv(gym.Env):
         total_time = 0.0
         v_max = 0.4  # m/s
         w_max = 3.0   # rad/s
-        lin_accel = 0.1 # m/s^2
+        lin_accel = 4.0 # m/s^2
         ang_accel = 10  # rad/s^2
         step_length = self.cfg.grid_size*0.01*self.step_len  # 4cm -> 0.04m
         angle_interval = np.pi / ACTION_NUM   # 각도 간격(rad)
@@ -1228,6 +1228,8 @@ class CoverageEnv(gym.Env):
         # Map layer 변경        
         if last_map_vary_data['covered_cell_num'] > 0:
             self.coveraged_area -= last_map_vary_data['covered_cell_num']
+        
+        if len(last_map_vary_data['covered_cells'][:, 0]) > 0:
             cx = last_map_vary_data['covered_cells'][:, 0]; cy = last_map_vary_data['covered_cells'][:, 1]
             self.cleaned[cy, cx] -= 1
             
@@ -1243,7 +1245,7 @@ class CoverageEnv(gym.Env):
         for i in range(self.cfg.stack_steps-1):
             if len(self.traj) - i >= 2:
                 map_vary_data = self.traj[-1-i]
-                if map_vary_data['covered_cell_num'] > 0:
+                if len(map_vary_data['covered_cells'][:, 0]) > 0:
                     cx = map_vary_data['covered_cells'][:, 0]; cy = map_vary_data['covered_cells'][:, 1]
                     past_cleaned[cy, cx] -= 1
         
@@ -1273,13 +1275,14 @@ class CoverageEnv(gym.Env):
         """
         
         if len(self.traj) <= step_num + 1:
-            print(f"Cannnot backstep {step_num} steps. Only {len(self)-1} steps are available.")
-            return
+            print(f"Cannnot backstep {step_num} steps. Only {len(self.traj)-1} steps are available.")
+            return self._get_obs()
         
         while step_num > 0:
-            
             self.one_step_back(remain_collision_count=True)
             step_num -= 1
+        
+        return self._get_obs()
     
     def _draw_layer(self):
         
@@ -1367,7 +1370,7 @@ class CoverageEnv(gym.Env):
         ]
         ax1.legend(handles=legend_elements_1, loc='upper left', bbox_to_anchor=(1.05, 1))
         ax1.set_title(f"Coverage: {self.coverage*100:.2f}%, Overlap rate: {self.overlap_rate*100:.2f}%")
-        ax1.text(0, -0.1, f"Path length: {len(self.traj)}\nCleaning time: {self.cleaning_time:.2f} s", transform=ax1.transAxes, ha="left", va="top", fontsize=11, color='black')
+        ax1.text(0, -0.1, f"Path length: {len(self.traj)}\nCleaning time: {self.cleaning_time/60:.2f} min", transform=ax1.transAxes, ha="left", va="top", fontsize=11, color='black')
         # --------------------------------------------------------------------
         
         # --------------------------------------------------------------------
