@@ -1201,8 +1201,8 @@ class DQNAgent:
                 cleaning_time_mean = np.mean(cleaning_time) if cleaning_time else 0.0
                 print(f"[Test result for {map_name}]\n"
                       f"    Coverage mean: {coverage_mean*100:.2f}%\n"
-                      f"    Overlap rate mean: {overlap_rate_mean*100:.2f}%\n"
-                      f"    Cleaning time mean: {cleaning_time_mean/60:.2f} min")
+                      f"    Cleaning time mean: {cleaning_time_mean/60:.2f} min\n"
+                      f"    Overlap rate mean: {overlap_rate_mean*100:.2f}%")
 
                 total_coverage += coverage
                 total_overlap_rate += overlap_rate
@@ -1216,13 +1216,17 @@ class DQNAgent:
             
             print(f"[Overall Test result]\n"
                   f"    Coverage mean: {total_coverage_mean*100:.2f}%\n"
-                  f"    Overlap rate mean: {total_overlap_rate_mean*100:.2f}%\n"
-                  f"    Cleaning time mean: {total_cleaning_time_mean/60:.2f} min")
+                  f"    Cleaning time mean: {total_cleaning_time_mean/60:.2f} min\n"
+                  f"    Overlap rate mean: {total_overlap_rate_mean*100:.2f}%")
         
         else:
-            for _ in range(self.args.test_map_num):
+            for map_num in range(self.args.test_map_num):
                 
                 obs, _ = self.test_env.reset(seed=reset_seed) # Test 환경을 reset하여 초기 state 얻음
+                
+                coverage = []
+                overlap_rate = []
+                cleaning_time = []
                     
                 for start_num in range(self.args.test_start_point_num):
                     
@@ -1234,9 +1238,21 @@ class DQNAgent:
                     
                     # Coverage 값이 유효한 경우에만 저장: Reachable grid의 수가 전체 grid 수의 절반은 넘어야 함.
                     if self.test_env.coverable.sum() >= self.test_env.H * self.test_env.W * 0.5:
-                        total_coverage.append(cur_coverage) # Coverage 평균을 구하기 위해 cur_coverage를 저장
-                        total_overlap_rate.append(cur_overlap_rate)
-                        total_cleaning_time.append(cur_cleaning_time)
+                        coverage.append(cur_coverage) # Coverage 평균을 구하기 위해 cur_coverage를 저장
+                        overlap_rate.append(cur_overlap_rate)
+                        cleaning_time.append(cur_cleaning_time)
+                
+                coverage_mean = np.mean(coverage) if coverage else 0.0
+                overlap_rate_mean = np.mean(overlap_rate) if overlap_rate else 0.0
+                cleaning_time_mean = np.mean(cleaning_time) if cleaning_time else 0.0
+                print(f"[Test result for Map {map_num+1}]\n"
+                      f"    Coverage mean: {coverage_mean*100:.2f}%\n"
+                      f"    Cleaning time mean: {cleaning_time_mean/60:.2f} min\n"
+                      f"    Overlap rate mean: {overlap_rate_mean*100:.2f}%")
+
+                total_coverage += coverage
+                total_overlap_rate += overlap_rate
+                total_cleaning_time += cleaning_time
             
                 reset_seed = None
         
@@ -1246,5 +1262,5 @@ class DQNAgent:
             
             print(f"[Overall Test result]\n"
                   f"    Coverage mean: {total_coverage_mean*100:.2f}%\n"
-                  f"    Overlap rate mean: {total_overlap_rate_mean*100:.2f}%\n"
-                  f"    Cleaning time mean: {total_cleaning_time_mean/60:.2f} min")
+                  f"    Cleaning time mean: {total_cleaning_time_mean/60:.2f} min\n"
+                  f"    Overlap rate mean: {total_overlap_rate_mean*100:.2f}%")
