@@ -15,6 +15,7 @@ import random
 import time
 import os
 from dataclasses import asdict
+import time
 
 import glob
 from PIL import Image
@@ -1153,6 +1154,7 @@ class DQNAgent:
     def test(self, use_maps_folder: bool=True):
         self.policy_net.eval() # eval mode로 전환
         total_coverage = []; total_overlap_rate = []; total_cleaning_time = []
+        computation_time = []
         options={"reset_only_start_pos": True} # 시작 지점만 초기화하기 위한 option
         reset_seed = self.seed
         
@@ -1187,7 +1189,10 @@ class DQNAgent:
                     # start_num == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
                     if start_num != 0:
                         obs, _ = self.test_env.reset(options=options) # 시작 지점 초기화
+                    start_time = time.time()
                     cur_coverage, cur_overlap_rate, cur_cleaning_time = self._test_one_map(self.test_env, obs, self.args.debug) # Coverage 성능을 평가
+                    end_time = time.time()
+                    computation_time.append(end_time-start_time)
                     self.test_env.show_visualized_img(img_choice='traj') # trajectory 시각화
                     
                     # Coverage 값이 유효한 경우에만 저장: Reachable grid의 수가 전체 grid 수의 절반은 넘어야 함.
@@ -1217,7 +1222,8 @@ class DQNAgent:
             print(f"[Overall Test result]\n"
                   f"    Coverage mean: {total_coverage_mean*100:.2f}%\n"
                   f"    Cleaning time mean: {total_cleaning_time_mean/60:.2f} min\n"
-                  f"    Overlap rate mean: {total_overlap_rate_mean*100:.2f}%")
+                  f"    Overlap rate mean: {total_overlap_rate_mean*100:.2f}%\n"
+                  f"    Average computation time per map: {np.mean(computation_time):.2f} s")
         
         else:
             for map_num in range(self.args.test_map_num):
@@ -1233,22 +1239,26 @@ class DQNAgent:
                     # start_num == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
                     if start_num != 0:
                         obs, _ = self.test_env.reset(options=options) # 시작 지점 초기화
+                    start_time = time.time()
                     cur_coverage, cur_overlap_rate, cur_cleaning_time = self._test_one_map(self.test_env, obs, self.args.debug) # Coverage 성능을 평가
+                    end_time = time.time()
+                    computation_time.append(end_time-start_time)
                     self.test_env.show_visualized_img(img_choice='traj') # trajectory 시각화
                     
                     # Coverage 값이 유효한 경우에만 저장: Reachable grid의 수가 전체 grid 수의 절반은 넘어야 함.
                     if self.test_env.coverable.sum() >= self.test_env.H * self.test_env.W * 0.5:
+                        
                         coverage.append(cur_coverage) # Coverage 평균을 구하기 위해 cur_coverage를 저장
                         overlap_rate.append(cur_overlap_rate)
                         cleaning_time.append(cur_cleaning_time)
-                
+                        
                 coverage_mean = np.mean(coverage) if coverage else 0.0
                 overlap_rate_mean = np.mean(overlap_rate) if overlap_rate else 0.0
                 cleaning_time_mean = np.mean(cleaning_time) if cleaning_time else 0.0
                 print(f"[Test result for Map {map_num+1}]\n"
-                      f"    Coverage mean: {coverage_mean*100:.2f}%\n"
-                      f"    Cleaning time mean: {cleaning_time_mean/60:.2f} min\n"
-                      f"    Overlap rate mean: {overlap_rate_mean*100:.2f}%")
+                    f"    Coverage mean: {coverage_mean*100:.2f}%\n"
+                    f"    Cleaning time mean: {cleaning_time_mean/60:.2f} min\n"
+                    f"    Overlap rate mean: {overlap_rate_mean*100:.2f}%")
 
                 total_coverage += coverage
                 total_overlap_rate += overlap_rate
@@ -1263,4 +1273,5 @@ class DQNAgent:
             print(f"[Overall Test result]\n"
                   f"    Coverage mean: {total_coverage_mean*100:.2f}%\n"
                   f"    Cleaning time mean: {total_cleaning_time_mean/60:.2f} min\n"
-                  f"    Overlap rate mean: {total_overlap_rate_mean*100:.2f}%")
+                  f"    Overlap rate mean: {total_overlap_rate_mean*100:.2f}%\n"
+                  f"    Average computation time per map: {np.mean(computation_time):.2f} s")
