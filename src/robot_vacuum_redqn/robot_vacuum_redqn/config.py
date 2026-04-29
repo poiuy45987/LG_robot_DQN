@@ -7,7 +7,8 @@ ACTION_NUM = 16
 CLEANED_MAP_MAX = 10
 TRACE_MAP_MAX = 50
 LOCAL_VIEW_DIM = 51
-    
+
+MAP_SAVE_DIR = 'src/robot_vacuum_redqn/robot_vacuum_redqn/maps'
 
 @dataclass
 class TrainConfig: # Training과 관련된 설정들
@@ -65,8 +66,6 @@ class TrainConfig: # Training과 관련된 설정들
             raise ValueError(f"buffer_size({self.buffer_size}) should be bigger than batch_size({self.batch_size}).")
         if self.buffer_size <= self.warmup_tot_steps:
             raise ValueError(f"buffer_size({self.buffer_size}) should be bigger than warmup_tot_steps({self.warmup_tot_steps}).")
-        # if self.max_episodes <= self.warmup_episodes:
-        #     raise ValueError(f"max_episodes({self.max_episodes}) should be bigger than warmup_episodes({self.warmup_episodes}).")
         
         # Optimizer 관련 설정
         if self.lr <= 0:
@@ -118,15 +117,13 @@ class EnvConfig:
     
     # ---- house map params ----
     
-    grid_size: float = 2.5 # cm 단위
+    grid_size: float = 2.0 # cm 단위
     map_height: float = 400.0 # cm 단위
     map_width: float = 400.0 # cm 단위
     
     # Map 크기를 grid 단위로 변환
     H: int = field(init=False)
     W: int = field(init=False)
-
-    boundary_thickness: int = 1 # Map 전체를 둘러싼 벽의 두께, Grid 단위
     
     not_use_house_map: bool = False
     use_house_map: bool = field(init=False)
@@ -139,8 +136,8 @@ class EnvConfig:
 
     chairs_per_table_min: int = 2
     chairs_per_table_max: int = 4
-    max_chair_size: float = 65.0
-    min_chair_size: float = 55.0
+    max_chair_size: float = 45.0
+    min_chair_size: float = 40.0
     chair_leg_size: float = 5.0
     chair_spread: float = 20.0
     
@@ -159,7 +156,7 @@ class EnvConfig:
     final_coverage_thres: float = 0.90
     local_view: int = 200  # 단위: cm
     max_forward: int = 50 # 단위: cm
-    robot_size: float = 36.0 # cm 단위
+    robot_size: float = 30.0 # cm 단위
     stack_steps: int = 3 # Map의 observation data의 step 수
     
     # Reward function parameter (footprint-based)

@@ -9,13 +9,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 from collections import deque
 import cv2
-import datetime
-import pytz
-import random
 import time
 import os
 from dataclasses import asdict
-import time
 
 import glob
 from PIL import Image
@@ -25,22 +21,7 @@ from IPython.display import display, clear_output
 from .config import EnvConfig, TrainConfig, ACTION_NUM, CLEANED_MAP_MAX, TRACE_MAP_MAX, LOCAL_VIEW_DIM
 from .environment import CoverageEnv
 from .redqn_network import CNN_ReDQN
-
-def get_device_info(device: torch.device):
-    
-    print("-" * 30)
-    print(f"  [System Configuration]")
-    print(f"  > Device: {str(device).upper()}")
-    
-    if device.type == 'cuda':
-        # 0 대신 현재 사용 중인 장치의 인덱스를 가져옵니다.
-        current_idx = torch.cuda.current_device() 
-        print(f"  > GPU Name: {torch.cuda.get_device_name(current_idx)}")
-        # VRAM 정보까지 한 줄 추가하면 완벽!
-        total_mem = torch.cuda.get_device_properties(current_idx).total_memory / 1e9
-        print(f"  > VRAM: {total_mem:.2f} GB")
-        
-    print("-" * 30, flush=True)
+from .utils import get_device_info, set_torch_seed
 
 class DQNAgent:
     
@@ -54,14 +35,8 @@ class DQNAgent:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         get_device_info(self.device) # Device 정보 출력
         
-        # Pytorch 난수 생성기의 seed 설정
-        torch.manual_seed(args.seed) # PyTorch CPU 난수 고정
-        if torch.cuda.is_available(): # PyTorch GPU 난수 고정
-            torch.cuda.manual_seed(args.seed)
-            torch.cuda.manual_seed_all(args.seed) # 멀티 GPU 사용 시
-        # 결정론적 연산 설정 (속도는 조금 느려질 수 있지만 결과는 항상 동일)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        # torch의 seed 설정
+        set_torch_seed(args.seed)
         
         # Environment 조성을 위한 config
         env_args = {
@@ -117,46 +92,8 @@ class DQNAgent:
             # Training을 위한 난수 생성기의 seed 설정
             self.train_rng = np.random.default_rng(seed=args.seed)
             
-            # ---- Training process를 지켜 볼 tool 설정: wandb 또는 tb ----
-            kst = pytz.timezone('Asia/Seoul')
-            current_time = datetime.datetime.now(kst).strftime("%y%m%d_%H%M")
-            
-            # Training 조건을 구별하기 위해 표시할 hyperparmeter 설정
-            params_list_for_log = [
-                'batch_size', 'lr', 'optimizer', 'momentum', 'epsilon_decay', 'use_softmax',
-                'softmax_temp', 'use_noisy', 'target_with_noisy', 'gamma', 'reset_only_start_pos',
-                'uncleaned_reward', 'cleaned_penalty', 'obstacle_penalty', 'turn_penalty', 'step_penalty'      
-            ]
-            train_cfg_dict = asdict(self.train_cfg)
-            params_config = {k: v for k, v in train_cfg_dict.items() if k in params_list_for_log}
-            
-            # TensorBoard 설정
-            self.tb_writer = None
-            if args.use_tb:
-                tb_save_dir = os.path.join(args.tb_save_dir, current_time)
-                if not os.path.exists(tb_save_dir):
-                    os.makedirs(tb_save_dir)
-                self.tb_writer = SummaryWriter(tb_save_dir)
-                
-            # wandb 설정
-            self.wandb_run = None
-            if args.use_wandb:
-                self.wandb_run = wandb.init(
-                    entity="lg-robot-cleaner",
-                    project="Robot_vacuum_ReDQN",
-                    config=params_config,
-                    name=f"{current_time}_{args.model_name}_training"
-                )
-                
-            # vessl 설정
-            if args.use_vessl:
-                vessl.init(
-                    organization="snu-eng-gtx1080", 
-                    project="lg-robot-ReDQN", 
-                    hp=params_config,
-                    # name=f"{current_time}_{args.model_name}_training"                  
-                )
-            # ---------------------------------------------------------
+            # Training process를 볼 logger 설정: tb, wandb, vessl
+            self._setup_logging()
             
             # Optimizer 설정
             if self.train_cfg.optimizer == 'sgd':
@@ -174,6 +111,57 @@ class DQNAgent:
             
         # Loading model
         self._load_model(args)
+        
+    
+    def _setup_logging(self):
+        """
+        Training process를 지켜 볼 tool 설정: tb, wandb, vessl
+        """
+        
+        import pytz
+        import datetime
+        
+        # 현재 시간 얻기
+        kst = pytz.timezone('Asia/Seoul')
+        current_time = datetime.datetime.now(kst).strftime("%y%m%d_%H%M")
+        
+        # Training 조건을 구별하기 위해 표시할 hyperparmeter 설정
+        params_list_for_log = [
+            'batch_size', 'lr', 'optimizer', 'momentum', 'epsilon_decay', 'use_softmax',
+            'softmax_temp', 'use_noisy', 'target_with_noisy', 'gamma', 'reset_only_start_pos',
+            'uncleaned_reward', 'cleaned_penalty', 'obstacle_penalty', 'turn_penalty', 'step_penalty'      
+        ]
+        train_cfg_dict = asdict(self.train_cfg)
+        params_config = {k: v for k, v in train_cfg_dict.items() if k in params_list_for_log}
+        
+        # TensorBoard 설정
+        self.tb_writer = None
+        if self.args.use_tb:
+            tb_save_dir = os.path.join(self.args.tb_save_dir, current_time)
+            if not os.path.exists(tb_save_dir):
+                os.makedirs(tb_save_dir)
+            self.tb_writer = SummaryWriter(tb_save_dir)
+            
+        # wandb 설정
+        self.wandb_run = None
+        if self.args.use_wandb:
+            self.wandb_run = wandb.init(
+                entity="lg-robot-cleaner",
+                project="Robot_vacuum_ReDQN",
+                config=params_config,
+                name=f"{current_time}_{self.args.model_name}_training"
+            )
+            
+        # vessl 설정
+        if self.args.use_vessl:
+            vessl.init(
+                organization="snu-eng-gtx1080", 
+                project="lg-robot-ReDQN", 
+                hp=params_config,
+                # name=f"{current_time}_{args.model_name}_training"                  
+            )
+        # ---------------------------------------------------------
+        
 
     def _load_model(self, args):
         """
@@ -188,162 +176,130 @@ class DQNAgent:
         Test:
         - model_name: Test할 모델 이름
         """
-        # Model이 담긴 폴더: .../models
-        model_dir = args.model_dir
-        if not os.path.isdir(model_dir):
-            os.makedirs(model_dir)
-            
-        # Checkpoint가 담긴 폴더: .../models/(model_name)_checkpoint
+        model_dir = args.model_dir # Model이 담긴 폴더: .../models
         model_name_base, _ = os.path.splitext(args.model_name) # 확장자 '.pth'를 제거한 model_name
-        checkpoint_dir = os.path.join(model_dir, model_name_base + "_checkpoints")
-        if not os.path.isdir(checkpoint_dir): # Checkpoint 저장 폴더가 없으면 폴더를 생성 생성
-            os.makedirs(checkpoint_dir)
+        checkpoint_dir = os.path.join(model_dir, model_name_base + "_checkpoints") # Checkpoint 저장 폴더
+        
+        # 폴더 생성
+        os.makedirs(model_dir, exist_ok=True)
+        os.makedirs(checkpoint_dir, exist_ok=True)
         
         if args.mode == 'train':
             
-            # 사전 학습된 모델을 사용하는 경우 loading 수행.
-            if args.pre_model_name is not None:
-                pre_trained_model_path = os.path.join(model_dir, args.pre_model_name)
-                
-                if not os.path.isfile(pre_trained_model_path): # Model이 없는 경우: Error
-                    raise FileNotFoundError(f"Pre-trained model file not found: {pre_trained_model_path}")
-                
-                # /models 폴더에 저장된 model 정보를 불러옴
-                pre_trained_model = torch.load(pre_trained_model_path, map_location=self.device, weights_only=False)
-                self.policy_net.load_state_dict(pre_trained_model['model_state_dict'])
-                self.target_net.load_state_dict(pre_trained_model['model_state_dict'])
-                self.max_coverage_mean = pre_trained_model['max_coverage_mean']
-                self.min_overlap_rate_mean = pre_trained_model['min_overlap_rate_mean']
-                self.min_cleaning_time_mean = pre_trained_model['min_cleaning_time_mean']
-                
-                # 이전 modeld의 checkpoint 폴더에 저장된 best_traj_img를 불러옴
-                pre_model_name_base, _ = os.path.splitext(args.pre_model_name) # 확장자 '.pth'를 제거한 model_name
-                pre_model_checkpoint_dir = os.path.join(model_dir, pre_model_name_base + "_checkpoints")
-                if os.path.isdir(pre_model_checkpoint_dir): # Checkpoint 저장 폴더가 없으면 폴더를 생성 생성
-                    best_traj_img_path = os.path.join(checkpoint_dir, args.best_traj_img_name)
-                    if os.path.isfile(best_traj_img_path):
-                        loaded_img = cv2.imread(best_traj_img_path) # BGR image
-                        if loaded_img is not None: 
-                            self.best_traj_img = cv2.cvtColor(loaded_img, cv2.COLOR_BGR2RGB) # BGR -> RGB 변환
-                
-                print(f"Loaded pre-trained model: {pre_trained_model_path}", flush=True)
+            model_path = None
+            is_checkpoint = False
             
-            else: # 사전에 학습된 모델을 사용하지 않는 경우 checkpoint를 확인
-                checkpoints = glob.glob(os.path.join(checkpoint_dir, "*.pth")) # 전체 checkpoint file 목록
-
-                if checkpoints: # Checkpoint가 존재하면 이어서 학습을 진행
-                    print("Checkpoint directory already exists. Continue training...", flush=True) # Checkpoint가 있으면 이어서 학습
-                    
-                    latest_checkpoint = max(checkpoints, key=os.path.getctime) # 가장 최근 파일 선택
-                    print(f"Loading latest checkpoint: {latest_checkpoint}", flush=True)
-                    checkpoint_data = torch.load(latest_checkpoint, map_location=self.device, weights_only=False)
-                    self.policy_net.load_state_dict(checkpoint_data['model_state_dict'])
-                    self.target_net.load_state_dict(checkpoint_data['model_state_dict'])
-                    
-                    try:
-                        self.optimizer.load_state_dict(checkpoint_data['optimizer_state_dict']) # Optimizer도 checkpoint와 똑같이 유지
-                    except (KeyError, ValueError):
-                        print("Optimizer state mismatch. Initializing optimizer.")
-                        # Optimizer를 다시 설정
-                        if args.optimizer == 'sgd':
-                            self.optimizer = optim.SGD(self.policy_net.parameters(), lr=args.lr, momentum=args.momentum)
-                        elif args.optimizer == 'adam':
-                            self.optimizer = optim.Adam(self.policy_net.parameters(), lr=args.lr)
-                        else:
-                            raise ValueError(f"Unsupported optimizer type: {args.optimizer}")
-
-                    self.total_steps = checkpoint_data['total_steps']
-                    self.no_warmup_steps = checkpoint_data['no_warmup_steps']
-                    self.start_episode = checkpoint_data['episode'] + 1
-                    self.max_coverage_mean = checkpoint_data['max_coverage_mean']
-                    self.min_overlap_rate_mean = checkpoint_data['min_overlap_rate_mean']
-                    self.min_cleaning_time_mean = checkpoint_data['min_cleaning_time_mean']
-                    
-                    # checkpoint 폴더에 저장된 best_traj_img를 불러옴
-                    best_traj_img_path = os.path.join(checkpoint_dir, args.best_traj_img_name)
-                    if os.path.isfile(best_traj_img_path):
-                        loaded_img = cv2.imread(best_traj_img_path) # BGR image
-                        if loaded_img is not None: 
-                            self.best_traj_img = cv2.cvtColor(loaded_img, cv2.COLOR_BGR2RGB) # BGR -> RGB 변환
-                    
-                    print(f"Resumed training from episode {checkpoint_data['episode']} with reward {checkpoint_data['episode_reward']}", flush=True)
-
-                    # Replay buffer loading
-                    # replay_buffer_file_path = os.path.join(checkpoint_dir, self.args.buffer_file_name)
-                    # self._load_memory(replay_buffer_file_path)
-                    
+            # 1. Loading할 model 선택
+            if args.pre_model_name: # 사전 학습 완료된 모델부터 이어서 훈련하는 경우
+                print("Use pre-trained model...")
+                model_path = os.path.join(model_dir, args.pre_model_name)
+                print(f"Loading pre-trained model: {model_path}")
+            else: # 사전 학습 완료된 모델이 없는 경우(처음부터 훈련하는 경우 + checkpoint에서 이어서 훈련하는 경우)
+                checkpoints = glob.glob(os.path.join(checkpoint_dir, "*.pth"))
+                if checkpoints:
+                    print("Checkpoint directory already exists. Continue training...")
+                    model_path = max(checkpoints, key=os.path.getctime) # 가장 최근 checkpoint 파일부터 훈련 재개
+                    is_checkpoint = True
+                    print(f"Loading latest checkpoint: {model_path}")
                 else:
-                    print("No checkpoint files found!", flush=True)
+                    print("No checkpoint files found!")
+                    return
+                
+            # 2. Model loading
+            if not os.path.isfile(model_path):
+                raise FileNotFoundError(f"Model file not found: {model_path}")
+            data = torch.load(model_path, map_location=self.device, weights_only=False)
+            self.policy_net.load_state_dict(data['model_state_dict'])
+            self.target_net.load_state_dict(data['model_state_dict'])
+            self.max_coverage_mean = data.get('max_coverage_mean', 0)
+            self.min_overlap_rate_mean = data.get('min_overlap_rate_mean', float('inf'))
+            self.min_cleaning_time_mean = data.get('min_cleaning_time_mean', float('inf'))
+            
+            if is_checkpoint: # Checkpoint를 사용하는 경우 optimizer와 step 수도 추가로 load
+                # Optimizer loading
+                try:
+                    self.optimizer.load_state_dict(data['optimizer_state_dict']) # Optimizer도 checkpoint와 똑같이 유지
+                except KeyError as e:
+                    print(f"Optimizer state mismatch. Skipping: {e}")
+                
+                # 추가적인 변수 loading
+                self.total_steps = data['total_steps']
+                self.no_warmup_steps = data['no_warmup_steps']
+                self.start_episode = data['episode'] + 1
+                print(f"Resumed training from episode {data['episode']} with reward {data['episode_reward']}")
+                
+            # best_traj_img loading
+            traj_img_dir = checkpoint_dir
+            if args.pre_model_name:
+                pre_model_name_base, _ = os.path.splitext(args.pre_model_name) # 확장자 '.pth'를 제거한 model_name
+                traj_img_dir = os.path.join(model_dir, pre_model_name_base + "_checkpoints")
+            
+            best_traj_img_path = os.path.join(traj_img_dir, args.best_traj_img_name)
+            if os.path.isfile(best_traj_img_path):
+                img = cv2.imread(best_traj_img_path) # BGR image
+                self.best_traj_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) # BGR -> RGB 변환
                 
         elif args.mode == 'test':
             
             test_model = os.path.join(model_dir, args.model_name)
             if not os.path.exists(test_model):
-                raise FileNotFoundError(f"Test model file not found: {test_model}", flush=True)
+                raise FileNotFoundError(f"Test model file not found: {test_model}")
             checkpoint = torch.load(test_model, map_location=self.device, weights_only=False)
             self.policy_net.load_state_dict(checkpoint['model_state_dict'])
+            print(f"Test model loaded: {test_model}")
     
-    def _load_memory(self, file_path: str):
+    # def _load_memory(self, file_path: str):
         
-        # 파일 존재 여부 확인
-        if not os.path.exists(file_path):
-            print(f"No memory file found at: {file_path}")
-            return
+    #     # 파일 존재 여부 확인
+    #     if not os.path.exists(file_path):
+    #         print(f"No memory file found at: {file_path}")
+    #         return
         
-        # 저장한 메모리 불러오기
-        data = np.load(file_path)
-        obs_keys = [k[4:] for k in data.files if k.startswith('obs_')]
+    #     # 저장한 메모리 불러오기
+    #     data = np.load(file_path)
+    #     obs_keys = [k[4:] for k in data.files if k.startswith('obs_')]
         
-        # Dictionary 재조립 (Reconstruct dict lists)
-        num_samples = len(data['action'])
-        reconstructed_obs = []
-        reconstructed_next_obs = []
+    #     # Dictionary 재조립 (Reconstruct dict lists)
+    #     num_samples = len(data['action'])
+    #     reconstructed_obs = []
+    #     reconstructed_next_obs = []
 
-        for i in range(num_samples):
-            # 각 스텝마다 딕셔너리 생성
-            obs_dict = {k: data[f'obs_{k}'][i] for k in obs_keys}
-            next_obs_dict = {k: data[f'next_obs_{k}'][i] for k in obs_keys}
+    #     for i in range(num_samples):
+    #         # 각 스텝마다 딕셔너리 생성
+    #         obs_dict = {k: data[f'obs_{k}'][i] for k in obs_keys}
+    #         next_obs_dict = {k: data[f'next_obs_{k}'][i] for k in obs_keys}
             
-            reconstructed_obs.append(obs_dict)
-            reconstructed_next_obs.append(next_obs_dict)
+    #         reconstructed_obs.append(obs_dict)
+    #         reconstructed_next_obs.append(next_obs_dict)
 
-        # 4. 기존 self.memory 구조인 [(s, a, r, ns, d), ...] 형태로 zip
-        self.memory = list(zip(
-            reconstructed_obs,
-            data['action'],
-            data['reward'],
-            reconstructed_next_obs,
-            data['done']
-        ))
+    #     # 4. 기존 self.memory 구조인 [(s, a, r, ns, d), ...] 형태로 zip
+    #     self.memory = list(zip(
+    #         reconstructed_obs,
+    #         data['action'],
+    #         data['reward'],
+    #         reconstructed_next_obs,
+    #         data['done']
+    #     ))
 
     def _save_model(self, mode='model', info=None):
         
-        # Model이 담긴 폴더명: .../models
-        model_dir = self.args.model_dir
-        if not os.path.isdir(model_dir):
-            os.makedirs(model_dir) # 모델을 담는 폴더가 없는 경우 폴더를 생성
-        
-        # Model을 저장하는 경로
-        model_save_path = os.path.join(self.args.model_dir, self.args.model_name)
-        
-        # Checkpoint를 저장하는 폴더
-        model_name_base, _ = os.path.splitext(self.args.model_name) # 확장자 '.pth'를 제거한 model_name
+        model_dir = self.args.model_dir # Model이 담긴 폴더명: .../models
+        model_name_base, _ = os.path.splitext(self.args.model_name)
         checkpoint_dir = os.path.join(self.args.model_dir, model_name_base + "_checkpoints") # Checkpoint 저장 폴더
-        if not os.path.isdir(checkpoint_dir):
-            os.makedirs(checkpoint_dir)
+        
+        os.makedirs(model_dir, exist_ok=True)
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        
+        save_path = None
+        save_data = {
+            'model_state_dict': self.policy_net.state_dict(),
+            'max_coverage_mean': self.max_coverage_mean,
+            'min_overlap_rate_mean': self.min_overlap_rate_mean,
+            'min_cleaning_time_mean': self.min_cleaning_time_mean,
+        }
 
-        if mode == 'model':
-            # model을 /models에 저장
-            
-            # Model 저장
-            checkpoint = {
-                'model_state_dict': self.policy_net.state_dict(),
-                'optimizer_state_dict': self.optimizer.state_dict(),
-                'max_coverage_mean': self.max_coverage_mean,
-                'min_overlap_rate_mean': self.min_overlap_rate_mean,
-                'min_cleaning_time_mean': self.min_cleaning_time_mean,
-            }
-            torch.save(checkpoint, model_save_path)
+        if mode == 'model': # model을 /models에 저장
+            save_path = os.path.join(self.args.model_dir, self.args.model_name) # model 저장 경로
             
             # Checkpoint 파일에 가장 coverage가 잘 수행된 trajectory 그림을 저장
             if self.best_traj_img is not None:
@@ -351,59 +307,40 @@ class DQNAgent:
                 img_bgr = cv2.cvtColor(self.best_traj_img, cv2.COLOR_RGB2BGR) # OpenCV 저장용: (RGB -> BGR)
                 cv2.imwrite(img_file_path, img_bgr)
                 
-
-        elif mode == 'checkpoint':
+        elif mode == 'checkpoint': # checkpoint 폴더에 저장
             
             assert info is not None
-            episode = info['episode']; episode_reward = info['episode_reward'] # info에서 저장할 model의 episode 번호와 episode_reward 얻기
-            
-            # Checkpoint 저장 경로 설정
-            model_name_base, _ = os.path.splitext(self.args.model_name) # 확장자 '.pth'를 제거한 model_name
-            save_dir = os.path.join(self.args.model_dir, model_name_base + "_checkpoints") # Checkpoint 저장 폴더
-            if not os.path.exists(save_dir): # Checkpoint 저장 폴더가 없으면 폴더를 생성 생성
-                os.makedirs(save_dir)
-            file_name = model_name_base + f"_{episode}_{episode_reward:.2f}.pth" # 파일 이름 형색 설정
-            save_path = os.path.join(save_dir, file_name)
-            
-            # 체크포인트 데이터 구성
-            checkpoint = {
+            episode = info['episode']; episode_reward = info['episode_reward']
+            save_path = os.path.join(checkpoint_dir, model_name_base + f"_{episode}_{episode_reward:.2f}.pth")
+            save_data.update({
                 'episode': episode,
-                'model_state_dict': self.policy_net.state_dict(),
-                'optimizer_state_dict': self.optimizer.state_dict(),
                 'episode_reward': episode_reward,
+                'optimizer_state_dict': self.optimizer.state_dict(),
                 'total_steps': self.total_steps,
                 'no_warmup_steps': self.no_warmup_steps,
-                'max_coverage_mean': self.max_coverage_mean,
-                'min_overlap_rate_mean': self.min_overlap_rate_mean,
-                'min_cleaning_time_mean': self.min_cleaning_time_mean,
-            }
-                
-            # 저장 실행
-            torch.save(checkpoint, save_path)
-            
-            # Replay buffer 저장
-            # replay_buffer_file_path = os.path.join(checkpoint_dir, self.args.buffer_file_name)
-            # self._save_memory(replay_buffer_file_path)
+            })
             
         else:
             raise ValueError(f"Unsupported mode: {mode}. Expected 'model' or 'checkpoint'.")
+
+        torch.save(save_data, save_path)
     
-    def _save_memory(self, file_path: str):
-        # self.memory: [(s,a,r...), (s,a,r...)]
-        # zip(*self.memory): (s,s...), (a,a...), (r,r...)
-        obs_list, actions, rewards, next_obs_list, dones = zip(*self.memory)
+    # def _save_memory(self, file_path: str):
+    #     # self.memory: [(s,a,r...), (s,a,r...)]
+    #     # zip(*self.memory): (s,s...), (a,a...), (r,r...)
+    #     obs_list, actions, rewards, next_obs_list, dones = zip(*self.memory)
         
-        save_dict = {
-            'action': np.array(actions, dtype=np.uint8),
-            'reward': np.array(rewards, dtype=np.float32),
-            'done': np.array(dones, dtype=np.bool_)
-        }
+    #     save_dict = {
+    #         'action': np.array(actions, dtype=np.uint8),
+    #         'reward': np.array(rewards, dtype=np.float32),
+    #         'done': np.array(dones, dtype=np.bool_)
+    #     }
         
-        for key in obs_list[0].keys():
-            save_dict[f'obs_{key}'] = np.array([o[key] for o in obs_list])
-            save_dict[f'next_obs_{key}'] = np.array([no[key] for no in next_obs_list])
+    #     for key in obs_list[0].keys():
+    #         save_dict[f'obs_{key}'] = np.array([o[key] for o in obs_list])
+    #         save_dict[f'next_obs_{key}'] = np.array([no[key] for no in next_obs_list])
         
-        np.savez_compressed(file_path, **save_dict)
+    #     np.savez_compressed(file_path, **save_dict)
      
     def _decide_action_masking(self, env: CoverageEnv, action: int, mode: str = 'test', reset: bool = False) -> bool:
         
@@ -444,19 +381,8 @@ class DQNAgent:
         # except Exception as e:
         #     raise Exception(f"Unexpected error in action masking: {e}") from e
     
-    # # RL policy와 heuristic action mode를 전환
-    # def _switch_to_heuristic(self):
-    #     self.get_heu_act = True
-    
-    # def _switch_to_RL_policy(self):
-    #     self.get_heu_act = False
     
     def _get_action(self, env: CoverageEnv, processed_obs, mode: str='test', reset: bool = False) -> int:
-        
-        # # options 인자 받기
-        # warmup = kwargs.get('warmup', False)
-        # last_action = kwargs.get('last_action', None)
-        # last_collision = kwargs.get('last_collision', False)
         
         # mode 입력값 검사
         if mode not in ['train', 'test']:
@@ -561,21 +487,14 @@ class DQNAgent:
     # State만 받는 것으로 수정    
     def _get_RL_action(self, state, mode: str = 'test') -> int:
         """
-        환경과 state가 주어졌을 때 action을 얻는 method
+        현재 state에서 RL action을 얻는 method
 
         Args:
-            env (CoverageEnv): action을 얻고자 하는 environment
             state: Q-network에 통과시키기 위한 state
-            action_mask: 장애물에 충돌하는 action을 masking하기 위한 array
-            use_masking (bool, optional): Action masking을 진행할지 결정. Defaults to True.
             mode (str, optional): 'train' 또는 'test' 중 선택할 mode를 결정. Defaults to 'test'.
-            **kwargs: 추가적인 설정
-                - warmup (bool): 현재가 buffer에 data를 쌓기 위한 warmup 과정인지 여부
-                - last_action (int): 이전 step에서 수행한 action. 이전 step에서 충돌이 일어났을 때 다음 action으로 이 action을 제외하기 위해 받음
-                - last_collision (bool): 이전 step에서 충돌했는지 여부.
 
         Returns:
-            int: 선택한 action (0: E, 1: N, 2: W, 3: S)
+            int: 선택한 action
         """
         # action_mask는 test 시에는 반드시 사용. training 시에는 masking 유무를 선택
         # greedy action을 선택할 때만 사용. Warmup, epsilon 탐험, collision 이후 랜덤 탐험 시에는 action_mask 적용 X
@@ -595,93 +514,6 @@ class DQNAgent:
             action = q_values.argmax().item()
         
         return action
-            
-            
-    
-    # # State만 받는 것으로 수정    
-    # def _get_RL_action(self, env: CoverageEnv, state, action_mask, use_masking: bool=True, mode: str='test', **kwargs) -> int:
-    #     """
-    #     환경과 state가 주어졌을 때 action을 얻는 method
-
-    #     Args:
-    #         env (CoverageEnv): action을 얻고자 하는 environment
-    #         state: Q-network에 통과시키기 위한 state
-    #         action_mask: 장애물에 충돌하는 action을 masking하기 위한 array
-    #         use_masking (bool, optional): Action masking을 진행할지 결정. Defaults to True.
-    #         mode (str, optional): 'train' 또는 'test' 중 선택할 mode를 결정. Defaults to 'test'.
-    #         **kwargs: 추가적인 설정
-    #             - warmup (bool): 현재가 buffer에 data를 쌓기 위한 warmup 과정인지 여부
-    #             - last_action (int): 이전 step에서 수행한 action. 이전 step에서 충돌이 일어났을 때 다음 action으로 이 action을 제외하기 위해 받음
-    #             - last_collision (bool): 이전 step에서 충돌했는지 여부.
-
-    #     Returns:
-    #         int: 선택한 action (0: E, 1: N, 2: W, 3: S)
-    #     """
-    #     # action_mask는 test 시에는 반드시 사용. training 시에는 masking 유무를 선택
-    #     # greedy action을 선택할 때만 사용. Warmup, epsilon 탐험, collision 이후 랜덤 탐험 시에는 action_mask 적용 X
-        
-    #     def _get_greedy_action(use_softmax=False) -> int:
-    #         # Action을 Q-value로 뽑지 않더라도 일단 Q-value를 얻어서 관찰
-    #         with torch.no_grad(): 
-    #             if mode == 'train' and self.train_cfg.use_noisy:
-    #                 self.policy_net.reset_noise() # 논문 기법: 결정 전 노이즈 리셋
-    #             map_tensor = state['map']; vec_tensor = state['vec']
-    #             q_values = self.policy_net(map_tensor, vec_tensor) # Shape: (1, action_space)
-            
-    #         # 사방이 막힌 경우
-    #         if not torch.any(action_mask > 0):
-    #             return q_values.argmax().item()
-            
-    #         # Action masking 여부에 따라 action_mask를 수정
-    #         masked_q_values = q_values.clone()
-    #         if use_masking:
-    #             masked_q_values[action_mask == 0] = -1e9
-                
-    #         if use_softmax:
-    #             probs = F.softmax(masked_q_values / self.train_cfg.softmax_temp, dim=1).cpu().numpy().flatten() # 확률값 계산
-    #             if use_masking:
-    #                 probs[action_mask.cpu().numpy().flatten() == 0] = 0  # action_mask가 0인 곳은 확률을 0으로 만듦
-    #             probs = probs / (probs.sum() + 1e-8) # 확률 합이 1이 안 될 경우를 대비해 normalize (안전장치)
-    #             action = self.train_rng.choice(len(probs), p=probs)
-    #         else:
-    #             action = masked_q_values.argmax().item()
-            
-    #         return action
-        
-    #     if mode == 'train':
-            
-    #         # options 인자 받기
-    #         warmup = kwargs.get('warmup', False)
-    #         last_action = kwargs.get('last_action', None)
-    #         last_collision = kwargs.get('last_collision', False)
-            
-    #         # 1. 이전 step에서 collision이 일어났으면 이전 step에서 수행한 action을 제외하고 action을 랜덤 선택: Warmup인 경우에도 똑같이 수행
-    #         if last_collision and last_action is not None: 
-    #             all_actions = list(range(env.action_space.n))
-    #             if last_action in all_actions:
-    #                 all_actions.remove(last_action)
-    #             return self.train_rng.choice(all_actions)
-            
-    #         # 2. Warmup 상황인 경우 action을 random하게 뽑음
-    #         if warmup: 
-    #             return env.action_space.sample()
-                
-    #         # 3. Epsilon 기법을 사용하는 경우
-    #         if self.train_cfg.use_epsilon: 
-                
-    #             # Epsilon 결정: Step 수가 늘어날수록 epsilon을 점점 줄임. Warmup 과정에서는 유지
-    #             epsilon = max(self.train_cfg.epsilon_end, self.train_cfg.epsilon_start-self.no_warmup_steps/self.train_cfg.epsilon_decay)
-    #             if self.train_rng.random() < epsilon:
-    #                 return env.action_space.sample()
-            
-    #         # 4. 그 외에는 전부 greedy action을 사용
-    #         return _get_greedy_action(use_softmax=self.train_cfg.use_softmax)
-        
-    #     elif mode == 'test':
-    #         return _get_greedy_action(use_softmax=False)
-        
-    #     else:
-    #         raise ValueError(f"Unsupported mode: {mode}. Expected 'train' or 'test'.")
         
     def _pre_process_obs(self, obs, local_view_dim=51) -> dict:
         
@@ -738,7 +570,6 @@ class DQNAgent:
         return {'map': processed_map, 'vec': processed_vec, 'action_mask': action_mask}
     
     def _validation(self, episode: int):
-        
         """
         reset_only_start_pos가 참이면 train한 map과 같은 map을 이용
         """
@@ -894,9 +725,9 @@ class DQNAgent:
                         vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
                         q_values = self.policy_net(map_tensor, vec_tensor).squeeze().cpu().numpy()
                     
-                    # action_list = ['E', 'N', 'W', 'S']
-                    # action_info = (f"[Selected action]: {action_list[action]}\n"
-                    #                f"[Q-values] E: {q_values[0]:.2f}, N: {q_values[1]:.2f}, W: {q_values[2]:.2f}, S: {q_values[3]:.2f}")
+                    q_str = ", ".join([f"{q:.2f}" for q in q_values])
+                    action_info = (f"[Selected action]: {action}\n"
+                                   f"[Q-values] [{q_str}]")
                     
                     # [3] 데이터만 가져와서 기존 이미지 객체에 덮어쓰기 (가장 핵심)
                     traj_img = env.get_visualized_img(img_choice='traj')
@@ -906,7 +737,7 @@ class DQNAgent:
                     im_traj.set_data(traj_img)
                     im_obs.set_data(obs_img)
                     im_pro_obs.set_data(pro_obs_img)
-                    # text_traj.set_text(action_info)
+                    text_traj.set_text(action_info)
                     
                     # [4] 화면 갱신 (도화지 위치는 그대로, 내용물만 부드럽게 변경)
                     display_handle.update(fig)
@@ -1014,12 +845,6 @@ class DQNAgent:
                 # Action 선택: Warmup 중에는 100% random, 그 이후에는 epsilon 기법 사용
                 action = self._get_action(self.env, processed_obs, mode='train', reset=reset)
                 reset = False
-                
-                # if self.get_heu_act:
-                #     action = self._get_heuristic_action(self.env)
-                # else:
-                #     action = self._get_RL_action(self.env, state, action_mask, use_masking=self.train_cfg.use_action_masking, mode='train', 
-                #                                  warmup=warmup, last_action=last_action, last_collision=last_collision)
                 
                 # ----------------------------- Action 수행 ---------------------------------
                 next_obs, reward, terminated, truncated, info = self.env.step(action)
@@ -1171,12 +996,14 @@ class DQNAgent:
         reset_seed = self.seed
         
         maps_folder = self.args.map_save_dir # Map을 저장한 폴더
-        maps = None                          # Map file 이름 
+        maps = None                          # Map file 이름
+        map_num = self.args.test_map_num
         if use_maps_folder:
             if os.path.isdir(self.args.map_save_dir):
                 maps = sorted([f for f in os.listdir(self.args.map_save_dir) if f.endswith('.npy')])
                 if len(maps) > 0:
                     print(f"There is {len(maps)} map files for testing.")
+                    map_num = len(maps)
                     use_maps_folder = True
                 else:
                     print("There is no map file in the maps folder. Test will be conducted with random maps.")
@@ -1184,106 +1011,56 @@ class DQNAgent:
             else:
                 print("There is no maps folder. Test will be conducted with random maps.")
                 use_maps_folder = False
-                
-        if use_maps_folder:
-            for map_name in maps:
-                map_path = os.path.join(maps_folder, map_name)
-                obstacles = np.load(map_path)
-                obs, _ = self.test_env.reset(saved_obstacle_data=obstacles, seed=reset_seed) # Test 환경을 reset하여 초기 state 얻음
-                
-                coverage = []
-                overlap_rate = []
-                cleaning_time = []
-                
-                # 여러 starting point에서 model 성능을 test
-                for start_num in range(self.args.test_start_point_num):
-                
-                    # start_num == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
-                    if start_num != 0:
-                        obs, _ = self.test_env.reset(options=options) # 시작 지점 초기화
-                    start_time = time.time()
-                    cur_coverage, cur_overlap_rate, cur_cleaning_time = self._test_one_map(self.test_env, obs, self.args.debug) # Coverage 성능을 평가
-                    end_time = time.time()
-                    computation_time.append(end_time-start_time)
-                    self.test_env.show_visualized_img(img_choice='traj') # trajectory 시각화
-                    
-                    # Coverage 값이 유효한 경우에만 저장: Reachable grid의 수가 전체 grid 수의 절반은 넘어야 함.
-                    if self.test_env.coverable.sum() >= self.test_env.H * self.test_env.W * 0.5:
-                        coverage.append(cur_coverage) # Coverage 평균을 구하기 위해 cur_coverage를 저장
-                        overlap_rate.append(cur_overlap_rate)
-                        cleaning_time.append(cur_cleaning_time)
-                
-                coverage_mean = np.mean(coverage) if coverage else 0.0
-                overlap_rate_mean = np.mean(overlap_rate) if overlap_rate else 0.0
-                cleaning_time_mean = np.mean(cleaning_time) if cleaning_time else 0.0
-                print(f"[Test result for {map_name}]\n"
-                      f"    Coverage mean: {coverage_mean*100:.2f}%\n"
-                      f"    Cleaning time mean: {cleaning_time_mean/60:.2f} min\n"
-                      f"    Overlap rate mean: {overlap_rate_mean*100:.2f}%")
-
-                total_coverage += coverage
-                total_overlap_rate += overlap_rate
-                total_cleaning_time += cleaning_time
-                
-                reset_seed = None
-            
-            total_coverage_mean = np.mean(total_coverage) if total_coverage else 0.0
-            total_overlap_rate_mean = np.mean(total_overlap_rate) if total_overlap_rate else 0.0
-            total_cleaning_time_mean = np.mean(total_cleaning_time) if total_cleaning_time else 0.0
-            
-            print(f"[Overall Test result]\n"
-                  f"    Coverage mean: {total_coverage_mean*100:.2f}%\n"
-                  f"    Cleaning time mean: {total_cleaning_time_mean/60:.2f} min\n"
-                  f"    Overlap rate mean: {total_overlap_rate_mean*100:.2f}%\n"
-                  f"    Average computation time per map: {np.mean(computation_time):.2f} s")
         
-        else:
-            for map_num in range(self.args.test_map_num):
+        # 각 map에 대해서 test
+        for map_idx in range(map_num):
+            
+            obstacles = np.load(os.path.join(maps_folder, maps[map_idx])) if use_maps_folder else None  # map의 장애물 배치
+            map_name = maps[map_idx] if use_maps_folder else f"Map {map_idx+1}"
+            
+            obs, _ = self.test_env.reset(saved_obstacle_data=obstacles, seed=reset_seed)
+            coverage = []; overlap_rate = []; cleaning_time = []
+            
+            # 여러 starting point에서 model 성능을 test
+            for start_idx in range(self.args.test_start_point_num):
+            
+                # start_idx == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
+                if start_idx != 0:
+                    obs, _ = self.test_env.reset(options=options) # 시작 지점 초기화
+                start_time = time.time()
+                cur_coverage, cur_overlap_rate, cur_cleaning_time = self._test_one_map(self.test_env, obs, self.args.debug) # Coverage 성능을 평가
+                end_time = time.time()
+                computation_time.append(end_time-start_time)
+                self.test_env.show_visualized_img(img_choice='traj') # trajectory 시각화
                 
-                obs, _ = self.test_env.reset(seed=reset_seed) # Test 환경을 reset하여 초기 state 얻음
-                
-                coverage = []
-                overlap_rate = []
-                cleaning_time = []
-                    
-                for start_num in range(self.args.test_start_point_num):
-                    
-                    # start_num == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
-                    if start_num != 0:
-                        obs, _ = self.test_env.reset(options=options) # 시작 지점 초기화
-                    start_time = time.time()
-                    cur_coverage, cur_overlap_rate, cur_cleaning_time = self._test_one_map(self.test_env, obs, self.args.debug) # Coverage 성능을 평가
-                    end_time = time.time()
-                    computation_time.append(end_time-start_time)
-                    self.test_env.show_visualized_img(img_choice='traj') # trajectory 시각화
-                    
-                    # Coverage 값이 유효한 경우에만 저장: Reachable grid의 수가 전체 grid 수의 절반은 넘어야 함.
-                    if self.test_env.coverable.sum() >= self.test_env.H * self.test_env.W * 0.5:
-                        
-                        coverage.append(cur_coverage) # Coverage 평균을 구하기 위해 cur_coverage를 저장
-                        overlap_rate.append(cur_overlap_rate)
-                        cleaning_time.append(cur_cleaning_time)
-                        
-                coverage_mean = np.mean(coverage) if coverage else 0.0
-                overlap_rate_mean = np.mean(overlap_rate) if overlap_rate else 0.0
-                cleaning_time_mean = np.mean(cleaning_time) if cleaning_time else 0.0
-                print(f"[Test result for Map {map_num+1}]\n"
-                    f"    Coverage mean: {coverage_mean*100:.2f}%\n"
-                    f"    Cleaning time mean: {cleaning_time_mean/60:.2f} min\n"
-                    f"    Overlap rate mean: {overlap_rate_mean*100:.2f}%")
+                # Reachable grid의 수가 전체 grid 수의 절반을 넘는 경우에만 저장
+                if self.test_env.coverable.sum() >= self.test_env.H * self.test_env.W * 0.5:
+                    # 각 지표의 평균을 구하기 위해 현재 test에서의 지표값을 저장
+                    coverage.append(cur_coverage)
+                    overlap_rate.append(cur_overlap_rate)
+                    cleaning_time.append(cur_cleaning_time)
+            
+            coverage_mean = np.mean(coverage) if coverage else 0.0
+            overlap_rate_mean = np.mean(overlap_rate) if overlap_rate else 0.0
+            cleaning_time_mean = np.mean(cleaning_time) if cleaning_time else 0.0
+            
+            print(f"[Test result for {map_name}]\n"
+                f"    Coverage mean: {coverage_mean*100:.2f}%\n"
+                f"    Cleaning time mean: {cleaning_time_mean/60:.2f} min\n"
+                f"    Overlap rate mean: {overlap_rate_mean*100:.2f}%")
 
-                total_coverage += coverage
-                total_overlap_rate += overlap_rate
-                total_cleaning_time += cleaning_time
+            total_coverage.extend(coverage)
+            total_overlap_rate.extend(overlap_rate)
+            total_cleaning_time.extend(cleaning_time)
             
-                reset_seed = None
+            reset_seed = None
         
-            total_coverage_mean = np.mean(total_coverage) if total_coverage else 0.0
-            total_overlap_rate_mean = np.mean(total_overlap_rate) if total_overlap_rate else 0.0
-            total_cleaning_time_mean = np.mean(total_cleaning_time) if total_cleaning_time else 0.0
-            
-            print(f"[Overall Test result]\n"
-                  f"    Coverage mean: {total_coverage_mean*100:.2f}%\n"
-                  f"    Cleaning time mean: {total_cleaning_time_mean/60:.2f} min\n"
-                  f"    Overlap rate mean: {total_overlap_rate_mean*100:.2f}%\n"
-                  f"    Average computation time per map: {np.mean(computation_time):.2f} s")
+        total_coverage_mean = np.mean(total_coverage) if total_coverage else 0.0
+        total_overlap_rate_mean = np.mean(total_overlap_rate) if total_overlap_rate else 0.0
+        total_cleaning_time_mean = np.mean(total_cleaning_time) if total_cleaning_time else 0.0
+        
+        print(f"[Overall Test result]\n"
+            f"    Coverage mean: {total_coverage_mean*100:.2f}%\n"
+            f"    Cleaning time mean: {total_cleaning_time_mean/60:.2f} min\n"
+            f"    Overlap rate mean: {total_overlap_rate_mean*100:.2f}%\n"
+            f"    Average computation time per map: {np.mean(computation_time):.2f} s")

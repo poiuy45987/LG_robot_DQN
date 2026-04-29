@@ -2,7 +2,7 @@ import argparse
 import os
 
 from .agent import DQNAgent
-from .config import DEFAULT_SEED
+from .config import DEFAULT_SEED, MAP_SAVE_DIR
 
 def parse_args():
     
@@ -31,7 +31,7 @@ def parse_args():
     parser.add_argument('--model_name', type=str, default='model.pth', help='Model file name for saving or loading')
     parser.add_argument('--best_traj_img_name', type=str, default='best_coverage_path.png', help='Best path image file name')
     # parser.add_argument('--buffer_file_name', type=str, default='replay_buffer_latest.npz', help='Replay buffer file name')
-    parser.add_argument('--map_save_dir', type=str, default='src/robot_vacuum_redqn/robot_vacuum_redqn/maps', help='Directory for saving generated maps')
+    parser.add_argument('--map_save_dir', type=str, default=MAP_SAVE_DIR, help='Directory for saving generated maps')
     parser.add_argument('--test_map_num', type=int, default=5, help='Test 시 사용할 map 수 (Default: 5)')
     parser.add_argument('--test_start_point_num', type=int, default=3, help='Test 시 한 map당 테스트해볼 start_poit 수 (Default: 3)')
     parser.add_argument('--not_use_maps_folder', action='store_true', help='Test 시, maps 폴더에 저장된 map이 아닌 random하게 생성한 map을 사용')

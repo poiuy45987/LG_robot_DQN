@@ -3,8 +3,13 @@ import math
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+import os
+import zipfile
 
-from .config import EnvConfig, DEFAULT_SEED
+from .config import EnvConfig, DEFAULT_SEED, MAP_SAVE_DIR
+from .utils import display_image
 
 # Map을 시각화할 때 table, chair을 구별하기 위해 설정한 값
 # 실제로 훈련 또는 validation 과정에서 map을 생성할 때는 장애물을 전부 1로 바꿈
@@ -59,7 +64,6 @@ def get_rect_indices_for_big_rect(
                 grid_indices.append((ix, iy))
     
     return grid_indices
-
 
 def get_rect_indices_for_small_rect(
     H: int, W: int, 
@@ -136,7 +140,7 @@ def add_table_legs(
         
         # Table 다리가 차지하는 grid의 indices를 얻음
         H, W = obstacles.shape
-        if table_leg_size <= 5:
+        if table_leg_size < 10:
             indices = get_rect_indices_for_small_rect(H, W, x, y, table_leg_size, table_leg_size, theta)
         else:
             indices = get_rect_indices_for_big_rect(H, W, x, y, table_leg_size, table_leg_size, theta)
@@ -154,7 +158,6 @@ def add_table_legs(
     # 장애물이 겹치지 않으면 table을 배치
     obstacles[leg_grid_indices_np[:, 1], leg_grid_indices_np[:, 0]] = TABLE
     return True
-
 
 def add_chair_legs(
     obstacles: np.ndarray,
@@ -206,7 +209,7 @@ def add_chair_legs(
         
         # Table 다리가 차지하는 grid의 indices를 얻음
         H, W = obstacles.shape
-        if chair_leg_size < 5:
+        if chair_leg_size < 10:
             indices = get_rect_indices_for_small_rect(H, W, x, y, chair_leg_size, chair_leg_size, theta)
         else:
             indices = get_rect_indices_for_big_rect(H, W, x, y, chair_leg_size, chair_leg_size, theta)
@@ -224,7 +227,6 @@ def add_chair_legs(
     # 장애물이 겹치지 않으면 table을 배치
     obstacles[leg_grid_indices_np[:, 1], leg_grid_indices_np[:, 0]] = CHAIR
     return True
-
 
 def add_chairs_around_table(
     obstacles: np.ndarray,
@@ -276,30 +278,6 @@ def add_chairs_around_table(
             else:
                 chair_size_local -= 1
 
-def add_wall_furniture(
-    obstacles: np.ndarray,
-    side: str,
-    thickness: int,
-    span_start: int,
-    span_len: int,
-):
-    # large wall-attached obstacle (sofa/bed/cabinet-like)
-    H, W = obstacles.shape
-    if side in ("left", "right"):
-        y0 = max(0, span_start)
-        y1 = min(H, span_start + span_len)
-        if side == "left":
-            obstacles[y0:y1, :thickness] = 1
-        else:
-            obstacles[y0:y1, W - thickness:] = 1
-    else:
-        x0 = max(0, span_start)
-        x1 = min(W, span_start + span_len)
-        if side == "top":
-            obstacles[:thickness, x0:x1] = 1
-        else:
-            obstacles[H - thickness:, x0:x1] = 1
-
 def _is_placeable(
     obs: np.ndarray,
     x_min: int, x_max: int,
@@ -313,7 +291,6 @@ def _is_placeable(
         return True
     return False
     
-
 def add_small_obstacles_in_window(
     obs: np.ndarray, 
     rng: np.random.Generator,
@@ -336,9 +313,56 @@ def add_small_obstacles_in_window(
                 y_min=y, y_max=y+obs_height,
             ):
                 obs[x:x+obs_width, y:y+obs_height] = MORE_OBS
+
+def set_map_boundary(obs: np.ndarray, eff_size: tuple[float, float], map_info: dict) -> tuple[int, int]:
+    """
+    더 크기가 작은 map을 생성하기 위해 벽을 세우는 method
+
+    Args:
+        obs (np.ndarray): 장애물을 배치할 map 정보가 담긴 numpy 배열
+        eff_size (tuple[float, float]): Map에서 사용할 영역의 (가로 길이, 세로 길이)를 cm 단위로 받음.
+        map_info (dict): Map의 정보(전체 map의 크기, grid 크기 등)
+
+    Returns:
+        tuple[int, int]: Map에서 사용할 영역의 (가로 길이, 세로 길이)를 grid 단위로 반환
+    """
     
-def generate_house_like_obstacles(cfg: EnvConfig, rng: np.random.Generator, visualize: bool = False) -> np.ndarray:
+    H, W = obs.shape
     
+    # 유효성 검증
+    is_valid = True
+    if eff_size[0] > map_info['map_width']:
+        print(f"Warning: Active area width ({eff_size[0]:.2f} cm) is larger than the map width ({map_info['map_width']:.2f} cm)")
+        is_valid = False
+    if eff_size[1] > map_info['map_height']:
+        print(f"Warning: Active area height ({eff_size[1]:.2f} cm) is larger than the map height ({map_info['map_height']:.2f} cm)")
+        is_valid = False
+        
+    if is_valid:
+        eff_W = min(int(eff_size[0] // map_info['grid_size']), W)
+        eff_H = min(int(eff_size[1] // map_info['grid_size']), H)
+        
+        obs[:, :] = WALL
+        obs[:eff_H, :eff_W] = BLANK
+        
+        return eff_W, eff_H
+    
+    return None, None
+
+def generate_house_like_obstacles(cfg: EnvConfig, rng: np.random.Generator, 
+                                  visualize: bool = False, eff_size: tuple[float, float] = None) -> np.ndarray:
+    """
+    책상, 의자, 작은 장애물 등 집과 비슷한 형태의 map을 형성하는 method
+
+    Args:
+        cfg (EnvConfig): Map 환경의 정보
+        rng (np.random.Generator): Random generator
+        visualize (bool, optional): Map 시각화 시 책상, 의자, 작은 장애물을 구별해서 보여줄지 여부. Defaults to False.
+        eff_size (tuple[float, float], optional): Map의 공간을 제한적으로 사용하고 싶을 때, 사용할 영역의 (가로 길이, 세로 길이)를 cm 단위로 입력. Defaults to None.
+
+    Returns:
+        np.ndarray: Obstacle이 배치된 grid map의 numpy 배열.
+    """
     H = cfg.H; W = cfg.W
     
     max_table_size = cfg.max_table_size
@@ -351,6 +375,15 @@ def generate_house_like_obstacles(cfg: EnvConfig, rng: np.random.Generator, visu
     chair_spread = cfg.chair_spread
     
     obs = np.zeros((H, W), dtype=np.uint8)
+    if eff_size is not None:
+        map_info = {
+            "map_width": cfg.map_width,
+            "map_height": cfg.map_height,
+            "grid_size": cfg.grid_size,
+        }
+        eff_W, eff_H = set_map_boundary(obs, eff_size, map_info)
+        if eff_W is not None and eff_H is not None:
+            W, H = eff_W, eff_H
     
     # 책상과 의자를 배치
     table_centers = [] # 테이블 중심 좌표와 테이블 radius를 저장
@@ -369,8 +402,12 @@ def generate_house_like_obstacles(cfg: EnvConfig, rng: np.random.Generator, visu
             ))) + 2
             
             # 테이블의 중심 좌표 설정: (cx, cy)
-            cx = int(rng.integers(cfg.boundary_thickness+table_radius, W-cfg.boundary_thickness-table_radius))
-            cy = int(rng.integers(cfg.boundary_thickness+table_radius, H-cfg.boundary_thickness-table_radius))
+            if table_width >= W - table_radius:
+                continue
+            if table_height >= H - table_radius:
+                continue
+            cx = int(rng.integers(table_radius, W-table_radius))
+            cy = int(rng.integers(table_radius, H-table_radius))
             cx += (table_width % 2) / 2.0
             cy += (table_height % 2) / 2.0
             
@@ -430,12 +467,12 @@ def generate_house_like_obstacles(cfg: EnvConfig, rng: np.random.Generator, visu
     small_obs_size_max = cfg.small_obs_size_max
     small_obs_size_min = cfg.small_obs_size_min
     
-    for x in range(cfg.boundary_thickness, W-cfg.boundary_thickness, gap):
-        for y in range(cfg.boundary_thickness, H-cfg.boundary_thickness, gap):
+    for x in range(0, W, gap):
+        for y in range(0, H, gap):
             
             obs_num = rng.integers(cfg.small_obs_num_per_window_min, cfg.small_obs_num_per_window_max+1)
-            x_last = min(W-cfg.boundary_thickness, x+window_size)
-            y_last = min(H-cfg.boundary_thickness, y+window_size)
+            x_last = min(W, x+window_size)
+            y_last = min(H, y+window_size)
             obs_num = int(obs_num * (x_last-x)*(y_last-y) / (window_size**2))
             add_small_obstacles_in_window(
                 obs,
@@ -452,78 +489,69 @@ def generate_house_like_obstacles(cfg: EnvConfig, rng: np.random.Generator, visu
 
     return obs
 
-def get_test_maps(map_num: int, start_seed: int):
+def get_test_maps(map_num: int, start_seed: int, visualize: bool = False, map_size_list: list[tuple[float, float]] = None):
     
     # Map을 저장할 폴더 생성
-    map_folder_name = "maps"
+    map_folder_name = MAP_SAVE_DIR
     
-    import os
     if not os.path.exists(map_folder_name):
         os.makedirs(map_folder_name)
     
+    # 시각화를 하는 경우, fig와 canvas 생성
+    fig = None; canvas = None
+    if visualize:
+        fig = Figure()
+        canvas = FigureCanvasAgg(fig)
+    
     # Map 생성 및 저장
     cfg = EnvConfig()
-    for seed in range(start_seed, start_seed+map_num):
-        rng = np.random.default_rng(seed=seed)
-        obstacles = generate_house_like_obstacles(cfg, rng, visualize=False)
-        map_file_name = f"test_map_lch_{seed:03d}.npy"
-        np.save(f"{map_folder_name}/{map_file_name}", obstacles)
-    
-def visualize_saved_map(map_file_name: str):
-    
-    map_folder_name = "maps"
-    seed = map_file_name.split("_")[-1].split(".")[0]
-    obstacles = np.load(f"{map_folder_name}/{map_file_name}")
-    
-    custom_cmap = ListedColormap(['white', 'black'])
-
-    plt.figure(figsize=(6, 6))
-    im = plt.imshow(obstacles, cmap=custom_cmap, origin='lower', vmin=0, vmax=1)
-    
-    # Legend 정의
-    legend_elements = [
-        Patch(facecolor='black', edgecolor='black', label='Obstacle'),
-    ]
-    plt.legend(
-        handles=legend_elements, 
-        loc='upper left', 
-        bbox_to_anchor=(1.05, 1), # 그래프 오른쪽 살짝 바깥에 배치
-        title_fontsize='12',
-        fontsize='10'
-    )
-    
-    H = obstacles.shape[0]; W = obstacles.shape[1]
-    plt.title(f"House-like Obstacles ({H}x{W}): Seed={seed}", fontsize=15)
-    plt.xlabel("Width")
-    plt.ylabel("Height")
-    
-    # 격자 표시 (선택 사항)
-    plt.grid(color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
-    plt.show()
+    for map_id, seed in enumerate(range(start_seed, start_seed+map_num)):
         
+        map_file_name = f"test_map_lch_{seed:02d}.npy"
+        
+        # Random generator 생성
+        rng = np.random.default_rng(seed=seed)
+        
+        # Map에서 실제 청소기가 움직이고 장애물이 배치될 영역 정의. None이면 map 전체 영역 사용
+        eff_size = map_size_list[map_id] if map_size_list and map_id < len(map_size_list) else None
+        
+        # Map에 장애물 배치
+        obstacles = generate_house_like_obstacles(cfg, rng, visualize=visualize, eff_size=eff_size)
+        
+        # Map을 시각화
+        if visualize:
+            map_img = get_map_img(obstacles, fig=fig, canvas=canvas, map_name=map_file_name, visualized=visualize)
+            display_image(map_img)
+            obstacles = (obstacles != 0).astype(np.uint8)
+        
+        np.save(os.path.join(map_folder_name, map_file_name), obstacles)
 
-# 시각화를 위한 메인 코드
-def visualize_seed_map(seed=DEFAULT_SEED):
+def get_map_img(obstacles: np.ndarray, fig: Figure, canvas: FigureCanvasAgg, 
+                map_name: str, visualized: bool = True) -> np.ndarray:
     
-    cfg = EnvConfig()
-    rng = np.random.default_rng(seed=seed)  # 재현성을 위해 시드 설정
-
-    # Map 생성
-    obstacles = generate_house_like_obstacles(cfg, rng, visualize=True)
+    # Figure 설정
+    fig.clear()
+    fig.set_size_inches(6, 6)
+    ax = fig.add_subplot(1, 1, 1)
     
-    # Map 시각화
-    plt.figure(figsize=(6, 6))
-    custom_cmap = ListedColormap(['white', 'black', 'red', 'blue', 'purple'])
-    im = plt.imshow(obstacles, cmap=custom_cmap, origin='lower', vmin=0, vmax=4)
+    # Legend 설정 및 map 시각화
+    if visualized:
+        custom_cmap = ListedColormap(['white', 'black', 'red', 'blue', 'purple'])
+        im = ax.imshow(obstacles, cmap=custom_cmap, origin='lower', vmin=0, vmax=4)
+        legend_elements = [
+            Patch(facecolor='black', edgecolor='black', label='Wall'),
+            Patch(facecolor='red', edgecolor='red', label='Table Leg'),
+            Patch(facecolor='blue', edgecolor='blue', label='Chair Leg'),
+            Patch(facecolor='purple', edgecolor='purple', label='More obstacle')
+        ]
+    else:
+        custom_cmap = ListedColormap(['white', 'black'])
+        im = ax.imshow(obstacles, cmap=custom_cmap, origin='lower', vmin=0, vmax=1)
+        legend_elements = [
+            Patch(facecolor='black', edgecolor='black', label='Obstacle'),
+        ]
     
-    # Legend 정의
-    legend_elements = [
-        Patch(facecolor='black', edgecolor='black', label='Wall'),
-        Patch(facecolor='red', edgecolor='red', label='Table Leg'),
-        Patch(facecolor='blue', edgecolor='blue', label='Chair Leg'),
-        Patch(facecolor='purple', edgecolor='purple', label='More obstacle')
-    ]
-    plt.legend(
+    ax.legend(
         handles=legend_elements, 
         loc='upper left', 
         bbox_to_anchor=(1.05, 1), # 그래프 오른쪽 살짝 바깥에 배치
@@ -532,16 +560,100 @@ def visualize_seed_map(seed=DEFAULT_SEED):
         fontsize='10'
     )
     
-    H = obstacles.shape[0]; W = obstacles.shape[1]
-    plt.title(f"House-like Obstacles ({H}x{W}): Seed={seed}", fontsize=15)
-    plt.xlabel("Width")
-    plt.ylabel("Height")
+    ax.set_title(f"{map_name}", fontsize=15)
+    ax.set_xlabel("Width")
+    ax.set_ylabel("Height")
+    ax.grid(color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
     
-    # 격자 표시 (선택 사항)
-    plt.grid(color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
-    plt.show()
+    fig.tight_layout()
+    
+    canvas.draw()
+    
+    return np.array(canvas.buffer_rgba(), dtype=np.uint8)[:, :, :3] # [H, W, C]
 
+def generate_map_by_seed_and_visualize(seed: int = DEFAULT_SEED, eff_size: tuple[float, float] = None):
+    
+    cfg = EnvConfig()
+    rng = np.random.default_rng(seed=seed)  # 재현성을 위해 시드 설정
+
+    # Map 생성
+    obstacles = generate_house_like_obstacles(cfg, rng, visualize=True, eff_size=eff_size)
+    H, W = obstacles.shape
+    
+    # Map 시각화
+    fig = Figure()
+    canvas = FigureCanvasAgg(fig)
+    map_img = get_map_img(obstacles, fig=fig, canvas=canvas, map_name=f"Map size: {H}x{W} / Map seed: {seed}", visualized=True)
+    display_image(map_img)
+    
+def visualize_saved_map(map_file_name: str):
+    
+    map_folder_name = MAP_SAVE_DIR
+    seed = map_file_name.split("_")[-1].split(".")[0]
+    obstacles = np.load(f"{map_folder_name}/{map_file_name}")
+    
+    # Map 시각화
+    fig = Figure()
+    canvas = FigureCanvasAgg(fig)
+    map_img = get_map_img(obstacles, fig=fig, canvas=canvas, map_name=map_file_name, visualized=False)
+    display_image(map_img)
+
+def zip_map_files(zip_file_name: str = 'maps.zip'):
+    
+    map_folder_name = MAP_SAVE_DIR
+    if not os.path.exists(map_folder_name):
+        print(f"Error: {map_folder_name} 폴더가 존재하지 않습니다.")
+        return
+    
+    zip_file_name = os.path.join(map_folder_name, zip_file_name)
+    with zipfile.ZipFile(zip_file_name, 'w') as zip_file:
+        for file_name in os.listdir(map_folder_name):
+            if file_name.endswith('.npy'):
+                zip_file.write(os.path.join(map_folder_name, file_name), arcname=file_name)
+    
+    print(f"압축 완료: {zip_file_name}")
+    
+        
+# # 시각화를 위한 메인 코드
+# def visualize_seed_map(seed=DEFAULT_SEED):
+    
+#     cfg = EnvConfig()
+#     rng = np.random.default_rng(seed=seed)  # 재현성을 위해 시드 설정
+
+#     # Map 생성
+#     obstacles = generate_house_like_obstacles(cfg, rng, visualize=True)
+    
+#     # Map 시각화
+#     plt.figure(figsize=(6, 6))
+#     custom_cmap = ListedColormap(['white', 'black', 'red', 'blue', 'purple'])
+#     im = plt.imshow(obstacles, cmap=custom_cmap, origin='lower', vmin=0, vmax=4)
+    
+#     # Legend 정의
+#     legend_elements = [
+#         Patch(facecolor='black', edgecolor='black', label='Wall'),
+#         Patch(facecolor='red', edgecolor='red', label='Table Leg'),
+#         Patch(facecolor='blue', edgecolor='blue', label='Chair Leg'),
+#         Patch(facecolor='purple', edgecolor='purple', label='More obstacle')
+#     ]
+#     plt.legend(
+#         handles=legend_elements, 
+#         loc='upper left', 
+#         bbox_to_anchor=(1.05, 1), # 그래프 오른쪽 살짝 바깥에 배치
+#         title="Obstacle Types",
+#         title_fontsize='12',
+#         fontsize='10'
+#     )
+    
+#     H = obstacles.shape[0]; W = obstacles.shape[1]
+#     plt.title(f"House-like Obstacles ({H}x{W}): Seed={seed}", fontsize=15)
+#     plt.xlabel("Width")
+#     plt.ylabel("Height")
+    
+#     # 격자 표시 (선택 사항)
+#     plt.grid(color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
+#     plt.show()
+    
 
 # 실행
 if __name__ == "__main__":
-    visualize_seed_map(seed=DEFAULT_SEED)
+    generate_map_by_seed_and_visualize(seed=DEFAULT_SEED, eff_size=None)

@@ -16,6 +16,7 @@ from dataclasses import dataclass
 
 from .config import EnvConfig, DEFAULT_SEED, ACTION_NUM, CLEANED_MAP_MAX, TRACE_MAP_MAX, LOCAL_VIEW_DIM
 from .map_generator import generate_house_like_obstacles
+from .utils import display_image, float_to_int_coord
 
 def get_args():
     
@@ -55,152 +56,6 @@ def visualize_mask(robot_size: int):
     plt.title(f"Robot Mask (Size: {robot_size}x{robot_size})")
     plt.colorbar(label='Mask Value')
     plt.show()
-
-# # Environment에서 trajectory 정보를 저장하기 위한 class. 이용하기 편하게 하기 위한 method가 포함되어 있음.
-# class Trajectory:
-#     """
-#     Step이 수행된 후의 상태를 저장
-#     steps:              Step 수. 로봇 청소기의 최초 위치는 steps=0
-#     pos:                해당 step에서 로봇 청소기의 위치
-#     covered_cells:      해당 로봇 청소기 위치로 이동하면서 새롭게 cover한 cell들의 indices, Numpy array: (N, 2)
-#     covered_cell_num:   해당 step에서 cover한 cell 수
-#     dir:                해당 step에서 로봇이 바라보고 있는 방향
-    
-#     """
-#     # FIXME: 이거 step 별로 묶는 것으로 수정
-#     def __init__(self):
-        
-#         # Data를 저장하는 dictionary    
-#         self._data = []
-        
-#     def __len__(self):
-        
-#         lengths = {len(key_data) for key_data in self._data.values()} # 각 data의 len을 set 형태로 담음
-        
-#         # Data가 아예 없는 경우
-#         if not lengths:
-#             return 0
-        
-#         # Data를 담는 list가 생성된 경우: 모든 data list의 길이는 같아야 함.
-#         assert len(lengths) == 1
-#         return next(iter(lengths))
-    
-#     def append(self, traj_data: dict):
-#         try:
-#             for key in self._data.keys():
-#                 self._data[key].append(traj_data[key])
-#         except KeyError as e:
-#             raise KeyError(f"Error in appending trajectory: Lost key {e}")
-    
-#     def pop(self):
-#         """
-#         마지막에 저장된 data를 제거
-#         """
-#         # 가장 처음 데이터(로봇이 처음 방안에 배치되었을 때의 데이터)는 보호
-#         if len(self) <= 1:
-#             print("Trajectory is at its initial state. Nothing to pop.")
-#             return None
-            
-#         popped_data = {key: self._data[key].pop() for key in self._data}
-#         return popped_data
-    
-#     def get_last_data(self):
-        
-#         if len(self) <= 0:
-#             print("Trajectory is empty. Cannot get last data.")
-#             return None
-        
-#         last_data = {key: self._data[key][-1] for key in self._data}
-#         return last_data
-    
-#     def clear(self):
-#         for key in self._data.keys():
-#                 self._data[key] = []
-    
-#     def get_pos_traj(self):
-        
-#         assert 'pos' in self._data
-        
-#         return np.array(self._data['pos'])  
-    
-#     def get_cleaning_time(self):
-        
-#         action_seq = self._data['dir']
-        
-#         total_time = 0.0
-#         v_max = 0.4  # m/s
-#         w_max = 90   # deg/s
-#         lin_accel = 0.1 # m/s^2
-#         ang_accel = 30  # deg/s^2
-#         step_length = 0.04  # 4cm -> 0.04m
-#         angle_interval = 360 / ACTION_NUM   # 각도 간격(deg)
-#         angle_threshold = 30    # 정지 회전 임계값(deg)
-        
-#         straight_distance = 0.0 # 직진으로 이동한 총 거리
-        
-#         for i in range(len(action_seq)):
-#             curr_dir = action_seq[i]
-#             # prev_dir = action_seq[i-1] if i > 0 else curr_dir
-            
-#             straight_distance += step_length
-            
-#             is_last = (i == len(action_seq) - 1)
-#             rotate_needed = False
-#             angle_diff = 0.0
-            
-#             if not is_last:
-#                 next_dir = action_seq[i+1]
-#                 # 방향 차이 계산 (Index 차이를 각도로 변환)
-#                 dir_diff = abs(next_dir - curr_dir)
-#                 if dir_diff > ACTION_NUM/2: dir_diff = ACTION_NUM - dir_diff # 최단 회전 경로
-                
-#                 angle_diff = dir_diff * angle_interval
-#                 if angle_diff > angle_threshold: # 22.5도 초과 시 정지 회전
-#                     rotate_needed = True
-
-#             # 3. 정지 회전이 필요하거나 마지막이면 누적된 직진 구간 시간 계산
-#             if rotate_needed or is_last:
-#                 # --- 직진 구간 시간 계산 (v^2 = 2as 활용) ---
-#                 # 최대 속도 도달 가능 거리 (가속 + 감속)
-#                 d_crit = (v_max**2) / lin_accel 
-                
-#                 if straight_distance >= d_crit:
-#                     # 최대 속도 도달 가능: 가속시간 + 정속시간 + 감속시간
-#                     t_accel = v_max / lin_accel
-#                     d_accel = 0.5 * lin_accel * (t_accel**2)
-#                     d_const = straight_distance - (2 * d_accel)
-#                     t_const = d_const / v_max
-#                     total_time += (2 * t_accel) + t_const
-#                 else:
-#                     # 최대 속도 미도달: 삼각형 가감속
-#                     # s = 2 * (0.5 * a * t^2) => t = sqrt(s/a)
-#                     t_tri = np.sqrt(straight_distance / lin_accel)
-#                     total_time += 2 * t_tri
-                
-#                 # 직진 거리 리셋
-#                 straight_distance = 0.0
-                
-#                 # 4. 회전 시간 계산 (정지 상태에서 회전)
-#                 if rotate_needed:
-#                     # 최대 각속도에 도달하기 위한 최소 필요 각도 (가속 + 감속 거리)
-#                     # theta = w^2 / alpha
-#                     angle_crit = (w_max**2) / ang_accel
-                    
-#                     if angle_diff >= angle_crit:
-#                         # 사다리꼴: 최대 각속도 도달 가능
-#                         t_ang_accel = w_max / ang_accel
-#                         angle_accel_dec = angle_crit # 가속+감속에 쓰인 총 각도
-#                         angle_const = angle_diff - angle_accel_dec
-#                         t_ang_const = angle_const / w_max
-#                         total_time += (2 * t_ang_accel) + t_ang_const
-#                     else:
-#                         # 삼각형: 최대 각속도 도달 전 감속 시작
-#                         # theta = 2 * (0.5 * alpha * t^2) => t = sqrt(theta / alpha)
-#                         t_ang_tri = np.sqrt(angle_diff / ang_accel)
-#                         total_time += 2 * t_ang_tri
-
-#         return total_time
-            
 
 class CoverageEnv(gym.Env):
     metadata = {"render_modes": []}
@@ -296,88 +151,17 @@ class CoverageEnv(gym.Env):
         self.warmup = warmup
         self.warmup_steps = ep_steps
     
-    # def _in_bounds_center(self, cx: float, cy: float) -> bool:
-    #     robot_r = self.robot_size / 2.0
-    #     eps = 1e-7
-    #     return (robot_r-1-eps < cx < self.W-robot_r+eps) and (robot_r-1-eps <= cy < self.H-robot_r+eps)
-    
-    def _float_to_int_coord(self, cx: float, cy: float) -> tuple[int, int]:
-        return int(cx+0.5), int(cy+0.5)
-
-    # def _in_bounds_center(self, cx: float, cy: float) -> bool:
-    #     robot_r = self.robot_size / 2.0
-    #     eps = 1e-7
-    #     return (robot_r-1-eps < cx < self.W-robot_r+eps) and (robot_r-1-eps <= cy < self.H-robot_r+eps)
-    
     def _in_bounds_center(self, cx: float, cy: float) -> bool:
-        cx, cy = self._float_to_int_coord(cx, cy)
+        cx, cy = float_to_int_coord(cx, cy)
         return (self.robot_half_size <= cx < self.W - self.robot_half_size) and (self.robot_half_size <= cy < self.H - self.robot_half_size)
-
-    # def _get_footprint_coords(self, cx: float, cy: float) -> tuple[np.ndarray, np.ndarray]:
-    #     robot_r = self.robot_size / 2.0
-    #     eps = 1e-7 # 부동소수점 오차 방지용
-        
-    #     # 좌표가 정수로 들어올 경우, robot_mask_offsets을 활용
-    #     if (isinstance(cx, int) and isinstance(cy, int)) or (cx.is_integer() and cy.is_integer()):
-    #         return int(cx) + self.robot_mask_offsets[:, 0], int(cy) + self.robot_mask_offsets[:, 1]
-        
-    #     # 좌표가 실수일 경우
-    #     # Index 탐색 범위 설정
-    #     x_min = cx - robot_r; x_max = cx + robot_r
-    #     y_min = cy - robot_r; y_max = cy + robot_r
-        
-    #     # 격자 생성
-    #     x_indices = np.arange(np.ceil(x_min-eps), np.floor(x_max+eps) + 1, dtype=int)
-    #     y_indices = np.arange(np.ceil(y_min-eps), np.floor(y_max+eps) + 1, dtype=int)
-    #     xs, ys = np.meshgrid(x_indices, y_indices)
-    #     xs = xs.flatten(); ys = ys.flatten()
-
-    #     # 원형 영역 안에 들어오는 grid 좌표를 얻음
-    #     dist_2 = (cx - xs)**2 + (cy - ys)**2
-    #     in_range = dist_2 <= (robot_r+eps)**2
-    #     xs = xs[in_range]; ys = ys[in_range]
-        
-    #     return xs, ys
 
     def _get_footprint_coords(self, cx: float, cy: float) -> tuple[np.ndarray, np.ndarray]:
         
-        cx, cy = self._float_to_int_coord(cx, cy)
+        cx, cy = float_to_int_coord(cx, cy)
         
         xs = cx + self.robot_mask_offsets[:, 0]
         ys = cy + self.robot_mask_offsets[:, 1]
         return xs, ys
-
-    
-    # def _collides(self, *args) -> bool:
-    #     """
-    #     Case 1: _collides(cx, cy) -> 중심 좌표로 경계 및 장애물 체크
-    #     Case 2: _collides(xs, ys) -> 이미 계산된 마스크 좌표 배열들로 장애물 체크
-    #     """
-    #     assert len(args) == 2
-        
-    #     arg1, arg2 = args
-    #     if np.isscalar(arg1) and np.isscalar(arg2):
-            
-    #         cx, cy = float(arg1), float(arg2)
-            
-    #         # 좌표가 정수로 주어지고 collision_map이 있는 경우
-    #         if cx.is_integer() and cy.is_integer() and self.collision_map is not None:
-    #             cx, cy = int(cx), int(cy)
-    #             if not (0 <= cx < self.W and 0 <= cy < self.H):
-    #                 return True
-    #             return bool(self.collision_map[cy, cx])
-                        
-    #         # 좌표가 실수이거나 collision map이 없는 경우
-    #         if not self._in_bounds_center(cx, cy):
-    #             return True
-    #         xs, ys = self._get_footprint_coords(cx, cy)
-            
-    #     elif isinstance(arg1, np.ndarray) and isinstance(arg2, np.ndarray):
-    #         xs, ys = arg1, arg2
-    #     else:
-    #         raise TypeError("Input must be tuple of scalar or tuple of np.ndarray")
-            
-    #     return bool((self.obstacles[ys, xs] == 1).any())
     
     def _collides(self, *args) -> bool:
         """
@@ -388,7 +172,7 @@ class CoverageEnv(gym.Env):
         
         arg1, arg2 = args
         if np.isscalar(arg1) and np.isscalar(arg2):
-            cx, cy = self._float_to_int_coord(arg1, arg2)
+            cx, cy = float_to_int_coord(arg1, arg2)
             if self.collision_map is not None:
                 if not (0 <= cx < self.W and 0 <= cy < self.H):
                     return True
@@ -666,34 +450,6 @@ class CoverageEnv(gym.Env):
 
         return total_time
 
-    # def _ray_distance_forward(self, cx: float, cy: float, d: int) -> int:
-    #     dx, dy = self.dir_vecs[d]
-    #     ex = cx + dx*self.max_forward; ex = int(max(0, min(self.W-1, ex)))
-    #     ey = cy + dy*self.max_forward; ey = int(max(0, min(self.H-1, ey)))
-        
-    #     x_start = cx + dx; x_end = ex + dx
-    #     y_start = cy + dy; y_end = ey + dy
-        
-    #     if dx != 0:
-    #         line_x_idx_raw = np.arange(x_start, x_end, dx)
-    #         line_x_idx = np.clip(np.round(line_x_idx_raw), 0, self.W-1).astype(int)
-    #     else:
-    #         line_x_idx = cx
-            
-    #     if dy != 0:
-    #         line_y_idx_raw = np.arange(y_start, y_end, dy)
-    #         line_y_idx = np.clip(np.round(line_y_idx_raw), 0, self.H-1).astype(int)
-    #     else:
-    #         line_y_idx = cy
-        
-    #     line = self.collision_map[line_y_idx, line_x_idx]
-            
-    #     obstacles = np.where(line == 1)[0]
-    #     if len(obstacles) > 0:
-    #         return int(obstacles[0]) # 첫 번째 장애물까지의 거리
-    #     else:
-    #         return len(line) # 장애물이 없으면 최대 거리 반환
-
     def _ray_distance_forward(self, cx: float, cy: float, d: int) -> float:
         
         dx = self.dir_vecs[d][0]; dy = self.dir_vecs[d][1] # dx, dy는 실수
@@ -712,6 +468,7 @@ class CoverageEnv(gym.Env):
         if not np.any(valid): # 해당 방향으로 한칸만 이동해도 로봇의 중심이 map을 벗어나는 경우
             return 0.0
         
+        # FIXME: 이것도 utils.py의 float_to_int_coord를 쓸 수 있을듯?
         # 4. 실수 좌표를 가장 가까운 정수 격자 인덱스로 변환 (반올림)
         line_x_idx = np.floor(line_x[valid]+0.5).astype(int)
         line_y_idx = np.floor(line_y[valid]+0.5).astype(int)
@@ -742,7 +499,7 @@ class CoverageEnv(gym.Env):
         Returns:
             np.ndarray: Local map data, Shape: (C, H, W) or (H, W)
         """
-        cx, cy = self._float_to_int_coord(cx, cy)
+        cx, cy = float_to_int_coord(cx, cy)
         r = self.local_view//2
         px, py = cx+r+1, cy+r+1
         
@@ -861,8 +618,7 @@ class CoverageEnv(gym.Env):
         else:
             self.patch_stack.append(current_patch)
     
-    # FIXME: Map data state를 수정
-    def _get_obs(self, append_patch_stack: bool=True):
+    def _get_obs(self):
         
         cx, cy = self.pos
         
@@ -934,25 +690,6 @@ class CoverageEnv(gym.Env):
         }
         
         return traj_data
-    
-    # FIXME: 삭제?
-    # def _back_step_by_traj_data(self, traj_data: dict):
-        
-    #     # self.steps = traj_data['steps']
-    #     # self.pos = traj_data['steps']
-    #     # self.dir = traj_data['dir']
-        
-    #     px, py = traj_data['pos']
-    #     px = int(px+0.5); py = int(py+0.5) # 실수 좌표를 반올림: self.visited를 수정한 grid 좌표
-        
-    #     covered_x = traj_data['covered_cells'][:, 0]; covered_y = traj_data['covered_cells'][:, 1]
-        
-    #     if not self.visited[py, px] > 0:
-    #         self.visited[py, px] -= 1
-        
-    #     if len(covered_x) > 0:
-    #         self.cleaned[covered_y, covered_x] = np.where(self.cleaned[covered_y, covered_x] > 0, self.cleaned[covered_y, covered_x]-1, 0)
-
 
     def _get_collision_map(self):
         extend_obstacles = np.pad(self.obstacles, pad_width=1, mode='constant', constant_values=1) # 맵 바깥에 가상의 벽을 설치
@@ -1537,18 +1274,7 @@ class CoverageEnv(gym.Env):
             raise ValueError(f"Invalid img_choice: {img_choice}. Must be one of ['layer', 'traj', 'obs']")
         
         img_array = self.get_visualized_img(img_choice)
-
-        from PIL import Image
-        img_pil = Image.fromarray(img_array)
-        
-        try:
-            # 주피터 셀 환경일 때: 여러 번 호출하면 셀 아래에 그림이 순서대로 쭉 나열됩니다.
-            from IPython.display import display
-            display(img_pil)
-        except ImportError:
-            # 터미널 환경일 때: 시스템 이미지 뷰어로 창을 띄웁니다. 
-            # 여러 번 호출하면 창이 여러 개 뜹니다.
-            img_pil.show()
+        display_image(img_array)
             
 
 if __name__ == "__main__":

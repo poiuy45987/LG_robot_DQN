@@ -1,8 +1,10 @@
 # Model and checkpoints
 *.pth
+*.zip
 models/
 logs/
 *_checkpoints/
+mujoco_environments/
 
 # Python cache files
 __pycache__/
