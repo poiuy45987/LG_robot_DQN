@@ -967,7 +967,7 @@ class CoverageEnv(gym.Env):
         if last_map_vary_data['covered_cell_num'] > 0:
             self.coveraged_area -= last_map_vary_data['covered_cell_num']
         
-        if len(last_map_vary_data['covered_cells'][:, 0]) > 0:
+        if last_map_vary_data['covered_cells'] is not None and len(last_map_vary_data['covered_cells'][:, 0]) > 0:
             cx = last_map_vary_data['covered_cells'][:, 0]; cy = last_map_vary_data['covered_cells'][:, 1]
             self.cleaned[cy, cx] -= 1
             
