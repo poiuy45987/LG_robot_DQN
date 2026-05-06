@@ -52,3 +52,18 @@ def display_image(img_array: np.ndarray):
         # 터미널 환경일 때: 시스템 이미지 뷰어로 창을 띄웁니다. 
         # 여러 번 호출하면 창이 여러 개 뜹니다.
         img_pil.show()
+        
+def normal_round(x):
+    """
+    x(단일 숫자 또는 여러 숫자)를 반올림하는 함수.
+    모든 경우 X.5를 X+1로 반올림하도록 함.
+    기존 round 함수는 X.5를 반올린할 때 가장 가까운 짝수로 반올림함.
+    """
+    
+    # 1. 단일 숫자(float, int)인 경우 -> 순수 파이썬으로 초고속 처리
+    if isinstance(x, (int, float, np.floating, np.integer)):
+        return int(x + 0.5) if x >= 0 else int(x - 0.5)
+
+    # 2. 리스트나 배열인 경우 -> 넘파이의 벡터화 연산 활용
+    x_np = np.asanyarray(x)
+    return np.floor(x_np + 0.5).astype(int)

@@ -875,8 +875,9 @@ class CoverageEnv(gym.Env):
                 reward -= revisit_degree * self.cfg.cleaned_penalty
             
         # 5. Turn penalty
-        if self.dir != action: 
-            reward -= self.cfg.turn_penalty
+        if self.dir != action:
+            ang_diff = abs(self.dir - action) * ACTION_NUM / 360 # deg 단위
+            reward -= (ang_diff / 180) * self.cfg.turn_penalty
         
         # 6. Complete reward
         if self.coverage >= self.cfg.target_coverage:

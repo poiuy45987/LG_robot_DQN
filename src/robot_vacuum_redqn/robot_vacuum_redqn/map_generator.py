@@ -612,47 +612,6 @@ def zip_map_files(zip_file_name: str = 'maps.zip'):
                 zip_file.write(os.path.join(map_folder_name, file_name), arcname=file_name)
     
     print(f"압축 완료: {zip_file_name}")
-    
-        
-# # 시각화를 위한 메인 코드
-# def visualize_seed_map(seed=DEFAULT_SEED):
-    
-#     cfg = EnvConfig()
-#     rng = np.random.default_rng(seed=seed)  # 재현성을 위해 시드 설정
-
-#     # Map 생성
-#     obstacles = generate_house_like_obstacles(cfg, rng, visualize=True)
-    
-#     # Map 시각화
-#     plt.figure(figsize=(6, 6))
-#     custom_cmap = ListedColormap(['white', 'black', 'red', 'blue', 'purple'])
-#     im = plt.imshow(obstacles, cmap=custom_cmap, origin='lower', vmin=0, vmax=4)
-    
-#     # Legend 정의
-#     legend_elements = [
-#         Patch(facecolor='black', edgecolor='black', label='Wall'),
-#         Patch(facecolor='red', edgecolor='red', label='Table Leg'),
-#         Patch(facecolor='blue', edgecolor='blue', label='Chair Leg'),
-#         Patch(facecolor='purple', edgecolor='purple', label='More obstacle')
-#     ]
-#     plt.legend(
-#         handles=legend_elements, 
-#         loc='upper left', 
-#         bbox_to_anchor=(1.05, 1), # 그래프 오른쪽 살짝 바깥에 배치
-#         title="Obstacle Types",
-#         title_fontsize='12',
-#         fontsize='10'
-#     )
-    
-#     H = obstacles.shape[0]; W = obstacles.shape[1]
-#     plt.title(f"House-like Obstacles ({H}x{W}): Seed={seed}", fontsize=15)
-#     plt.xlabel("Width")
-#     plt.ylabel("Height")
-    
-#     # 격자 표시 (선택 사항)
-#     plt.grid(color='gray', linestyle='--', linewidth=0.5, alpha=0.3)
-#     plt.show()
-    
 
 # 실행
 if __name__ == "__main__":
