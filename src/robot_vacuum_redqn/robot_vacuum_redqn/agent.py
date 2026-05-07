@@ -469,9 +469,12 @@ class DQNAgent:
         visited = {(int(start[0]+0.5), int(start[1]+0.5))} # set 형태. 탐색을 빠르게 수행. BFS를 하면서 지나간 grid를 저장하기 위한 용도
         parent = {start: None}  # 해당 grid로 오기 위해 어떤 grid를 거쳤는지 저장.
         
+        uturn_idx = (env.dir + ACTION_NUM) % ACTION_NUM
+        uturn_dir = (env.dir_vecs[uturn_idx][0], env.dir_vecs[uturn_idx][1])
+        dir_vecs = env.base_dir_vecs + [uturn_dir] if uturn_dir not in env.base_dir_vecs else env.base_dir_vecs
         while queue:
             curr_pos = queue.popleft()
-            for dir_vec in env.base_dir_vecs:
+            for dir_vec in dir_vecs:
                 next_pos = (curr_pos[0]+dir_vec[0], curr_pos[1]+dir_vec[1])
                 new_cleaned_num, collided, _, _ = env.mark_trajectory(next_pos[0], next_pos[1], virtual=True)
                 if not collided and (int(next_pos[0]+0.5), int(next_pos[1]+0.5)) not in visited:
@@ -482,6 +485,10 @@ class DQNAgent:
                 if new_cleaned_num > 0: # 새로운 grid를 밟을 수 있는 위치를 발견하면 그 위치로 이동하는 경로를 생성
                     self._get_dijkstra_traj_from_parent(parent, next_pos)
                     return env.get_next_action_from_next_pos(self.dijkstra_traj.pop(0))
+            dir_vecs = env.base_dir_vecs
+
+        print("_get_heuristic_action ERROR")
+        return 0
         
         
     # State만 받는 것으로 수정    
@@ -665,9 +672,13 @@ class DQNAgent:
             self.tb_writer.add_scalar('Validation/Coverage_mean', coverage_mean, episode)
         if self.wandb_run:
             self.wandb_run.log({'Validation/Coverage_mean': coverage_mean,
+                                'Validation/Overlap Rate Mean': overlap_rate_mean,
+                                'Validation/Cleaning Time Mean': cleaning_time_mean,
                                 'Validation/Best_path': wandb.Image(best_traj_img)}, step=self.total_steps)
         if self.args.use_vessl:
             vessl.log(step=episode, payload={'Validation/Coverage_mean': coverage_mean,
+                                             'Validation/Overlap Rate Mean': overlap_rate_mean,
+                                             'Validation/Cleaning Time Mean': cleaning_time_mean,
                                              'Validation/Best_path': vessl.Image(best_traj_img)})
         
         # Validation 결과 출력

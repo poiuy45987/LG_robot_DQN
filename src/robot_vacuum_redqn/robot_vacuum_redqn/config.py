@@ -15,7 +15,6 @@ class TrainConfig: # Training과 관련된 설정들
     
     # --- Training 설정 및 Warmup ---
     buffer_size: int = 500000
-    # warmup_episodes: int = 20
     warmup_ep_steps: int = 10000
     warmup_tot_steps: int = 200000
     max_episodes: int = 30000
