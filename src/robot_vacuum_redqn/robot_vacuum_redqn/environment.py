@@ -379,12 +379,10 @@ class CoverageEnv(gym.Env):
         coverage_with_overlap = self.cleaned.sum(dtype=np.int64)
         return float((coverage_with_overlap - self.coveraged_area) / self.coveraged_area)
     
-    # FIXME: 완료
     @property
     def cleaning_time(self):
         
-        if not self.traj:
-            return 0.0
+        dir_seq = [traj_data['dir'] for traj_data in self.traj]
         
         total_time = 0.0
         v_max = 0.4  # m/s
@@ -393,27 +391,36 @@ class CoverageEnv(gym.Env):
         ang_accel = 10  # rad/s^2
         
         step_length = self.cfg.grid_size*0.01*self.step_len  # 4cm -> 0.04m
-        angle_threshold = 30 * np.pi / 180  # 정지 회전 임계값(rad)
+        angle_interval = (2*math.pi) / ALL_DIR_NUM   # 각도 간격(rad)
+        angle_threshold = 30 * math.pi / 180  # 정지 회전 임계값(rad)
         
         straight_distance = 0.0 # 직진으로 이동한 총 거리
         
-        for i in range(len(self.traj)):
-            action = self.traj[i]['action']
-            if action is None:
-                continue
-            
-            angle_diff = self.ang_diff_diridx[action] # Action에 대응하는 각도 변화량
+        for i in range(len(dir_seq)):
+            curr_dir = dir_seq[i]
             
             straight_distance += step_length
             
-            rotate_needed = angle_diff > angle_threshold
-            is_last = (i == len(self.traj) - 1)
+            is_last = (i == len(dir_seq) - 1)
+            rotate_needed = False
+            angle_diff = 0.0
+            
+            if not is_last:
+                next_dir = dir_seq[i+1]
+                # 방향 차이 계산 (Index 차이를 각도로 변환)
+                dir_diff = abs(next_dir - curr_dir)
+                if dir_diff > ALL_DIR_NUM/2: dir_diff = ALL_DIR_NUM - dir_diff # 최단 회전 경로
+                
+                angle_diff = dir_diff * angle_interval
+                if angle_diff > angle_threshold: # 30도 초과 시 정지 회전
+                    rotate_needed = True
 
             # 3. 정지 회전이 필요하거나 마지막이면 누적된 직진 구간 시간 계산
             if rotate_needed or is_last:
                 # --- 직진 구간 시간 계산 (v^2 = 2as 활용) ---
                 # 최대 속도 도달 가능 거리 (가속 + 감속)
                 d_crit = (v_max**2) / lin_accel 
+                
                 if straight_distance >= d_crit:
                     # 최대 속도 도달 가능: 가속시간 + 정속시간 + 감속시간
                     t_accel = v_max / lin_accel
@@ -450,6 +457,79 @@ class CoverageEnv(gym.Env):
                         total_time += 2 * t_ang_tri
 
         return total_time
+    
+    
+    # # FIXME: 완료
+    # @property
+    # def cleaning_time(self):
+        
+    #     if not self.traj:
+    #         return 0.0
+        
+    #     total_time = 0.0
+    #     v_max = 0.4  # m/s
+    #     w_max = 3.0   # rad/s
+    #     lin_accel = 4.0 # m/s^2
+    #     ang_accel = 10  # rad/s^2
+        
+    #     step_length = self.cfg.grid_size*0.01*self.step_len  # 4cm -> 0.04m
+    #     angle_threshold = 30 * np.pi / 180  # 정지 회전 임계값(rad)
+        
+    #     straight_distance = 0.0 # 직진으로 이동한 총 거리
+        
+    #     for i in range(len(self.traj)):
+    #         action = self.traj[i]['action']
+    #         if action is None:
+    #             continue
+            
+    #         angle_diff = self.ang_diff_diridx[action] # Action에 대응하는 각도 변화량
+            
+    #         straight_distance += step_length
+            
+    #         rotate_needed = angle_diff > angle_threshold
+    #         is_last = (i == len(self.traj) - 1)
+
+    #         # 3. 정지 회전이 필요하거나 마지막이면 누적된 직진 구간 시간 계산
+    #         if rotate_needed or is_last:
+    #             # --- 직진 구간 시간 계산 (v^2 = 2as 활용) ---
+    #             # 최대 속도 도달 가능 거리 (가속 + 감속)
+    #             d_crit = (v_max**2) / lin_accel 
+    #             if straight_distance >= d_crit:
+    #                 # 최대 속도 도달 가능: 가속시간 + 정속시간 + 감속시간
+    #                 t_accel = v_max / lin_accel
+    #                 d_accel = 0.5 * lin_accel * (t_accel**2)
+    #                 d_const = straight_distance - (2 * d_accel)
+    #                 t_const = d_const / v_max
+    #                 total_time += (2 * t_accel) + t_const
+    #             else:
+    #                 # 최대 속도 미도달: 삼각형 가감속
+    #                 # s = 2 * (0.5 * a * t^2) => t = sqrt(s/a)
+    #                 t_tri = np.sqrt(straight_distance / lin_accel)
+    #                 total_time += 2 * t_tri
+                
+    #             # 직진 거리 리셋
+    #             straight_distance = 0.0
+                
+    #             # 4. 회전 시간 계산 (정지 상태에서 회전)
+    #             if rotate_needed:
+    #                 # 최대 각속도에 도달하기 위한 최소 필요 각도 (가속 + 감속 거리)
+    #                 # theta = w^2 / alpha
+    #                 angle_crit = (w_max**2) / ang_accel
+                    
+    #                 if angle_diff >= angle_crit:
+    #                     # 사다리꼴: 최대 각속도 도달 가능
+    #                     t_ang_accel = w_max / ang_accel
+    #                     angle_accel_dec = angle_crit # 가속+감속에 쓰인 총 각도
+    #                     angle_const = angle_diff - angle_accel_dec
+    #                     t_ang_const = angle_const / w_max
+    #                     total_time += (2 * t_ang_accel) + t_ang_const
+    #                 else:
+    #                     # 삼각형: 최대 각속도 도달 전 감속 시작
+    #                     # theta = 2 * (0.5 * alpha * t^2) => t = sqrt(theta / alpha)
+    #                     t_ang_tri = np.sqrt(angle_diff / ang_accel)
+    #                     total_time += 2 * t_ang_tri
+
+    #     return total_time
 
     # FIXME: 완료
     def _ray_distance_forward(self, cx: float, cy: float, d: int) -> float:
@@ -743,12 +823,25 @@ class CoverageEnv(gym.Env):
         return (dir + self.action_diridx) % ALL_DIR_NUM
     
     
-    def get_uturn_dir(self, dir: int = None) -> tuple[float, float]:
-        # 현재 로봇이 바라보고 있는 방향인 self.dir를 고려하여 U-turn 방향 벡터를 출력하는 method
-        assert dir is not None, "Direction (self.dir) is not set."
-        return self.all_dir_vecs[self._get_all_dir_indices(dir)[-1]]
+    # def classify_base_dir_and_non_base_dir(self, dir: int = None) -> tuple[np.ndarray, np.ndarray]:
+    #     # 현재 로봇이 바라보고 있는 방향인 self.dir를 고려하여 U-turn 방향 벡터를 출력하는 method
+    #     assert dir is not None, "Direction (self.dir) is not set."
         
-
+    #     eps = 1e-7
+    #     possible_dir_vecs = self.all_dir_vecs[self._get_all_dir_indices(dir)] # Shape: (ACTION_NUM, 2)
+    #     base_vecs = np.array(self.base_dir_vecs) # Shape: (4, 2)
+        
+    #     diffs = abs(possible_dir_vecs[:, np.newaxis, :] - base_vecs[np.newaxis, :, :]) # Shape: (ACTION_NUM, 4, 2)
+    #     matches = np.all(diffs < eps, axis=2) # Shape: (ACTION_NUM, 4)
+    #     mask = np.any(matches, axis=1) # Shape: (ACTION_NUM,)
+        
+    #     possible_base_dir_vecs = possible_dir_vecs[mask] # Shape: (N, 2), N은 base_dir_vecs와 일치하는 벡터의 수
+    #     possible_non_base_dir_vecs = possible_dir_vecs[~mask] # Shape: (M, 2), M은 base_dir_vecs와 일치하지 않는 벡터의 수
+        
+    #     return possible_base_dir_vecs,  possible_non_base_dir_vecs
+    
+        
+    # FIXME: dir이 없을 때, self.dir로 취급
     def get_next_pos(self, dir: int = None, action: int = None) -> tuple[float, float]:
         assert self.pos is not None, "Current position (self.pos) is not set."
         assert action is not None, "Action is not provided."
@@ -761,20 +854,26 @@ class CoverageEnv(gym.Env):
     
     
     # FIXME: 완료
-    def get_next_action_from_next_pos(self, next_pos: tuple[float, float], curr_pos: tuple[float, float] = None, dir: int = None) -> int:
+    def get_dir_from_next_pos(self, next_pos: tuple[float, float], curr_pos: tuple[float, float] = None) -> int:
         eps = 1e-7
         if curr_pos is None:
             curr_pos = self.pos
         cx, cy = curr_pos; nx, ny = next_pos
-        
-        dir_vecs = self.all_dir_vecs[self._get_all_dir_indices(dir)] # 현재 방향을 기준으로 한 action 방향 벡터
             
-        for action, dir_vec in enumerate(dir_vecs):
+        for dir_idx, dir_vec in enumerate(self.all_dir_vecs):
             dx = dir_vec[0]; dy = dir_vec[1]
             if abs(nx - (cx+dx)) < eps and abs(ny - (cy+dy)) < eps:
-                return action
+                return dir_idx
         else:
             raise ValueError(f"We can't arrived at next_pos {next_pos} from start_pos {self.pos} by one action!")
+            
+            # for dir_idx in abnormal_action_indices:
+            #     dir_vec = self.all_dir_vecs[dir_idx]
+            #     dx = dir_vec[0]; dy = dir_vec[1]
+            #     if abs(nx - (cx+dx)) < eps and abs(ny - (cy+dy)) < eps:
+            #         return -1, (dx, dy) # 정상적인 action이 아닌 경우, -1을 반환
+            # else:
+                
     
     
     def reset(self, *, seed=None, saved_obstacle_data: np.ndarray=None, options=None):

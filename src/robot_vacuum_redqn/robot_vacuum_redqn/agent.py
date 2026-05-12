@@ -21,7 +21,7 @@ from IPython.display import display, clear_output
 from .config import EnvConfig, TrainConfig, ANG_SEG_NUM, CLEANED_MAP_MAX, TRACE_MAP_MAX, LOCAL_VIEW_DIM
 from .environment import CoverageEnv, ACTION_NUM, ALL_DIR_NUM
 from .redqn_network import CNN_ReDQN
-from .utils import get_device_info, set_torch_seed
+from .utils import get_device_info, set_torch_seed, float_to_int_coord
 
 class DQNAgent:
     
@@ -359,8 +359,7 @@ class DQNAgent:
         
         # 다음 좌표 계산
         cx, cy = env.pos
-        dx = env.dir_vecs[action][0]; dy = env.dir_vecs[action][1]
-        nx = cx+dx; ny = cy+dy
+        nx, ny = env.get_next_pos(dir=env.dir, action=action)
         
         # Action masking 여부 계산
         if len(self.coverage_hist) >= ks:
@@ -428,7 +427,7 @@ class DQNAgent:
             
             # Heuristic 방법으로 만든 trajectory를 RL policy가 따라가는 경우, self.dijkstra_traj를 유지
             if self.dijkstra_traj:
-                next_pos_x, next_pos_y = env.get_next_pos(action_RL)   # RL_policy를 따랐을 때 다음 위치
+                next_pos_x, next_pos_y = env.get_next_pos(dir=env.dir, action=action_RL)   # RL_policy를 따랐을 때 다음 위치
                 next_dji_pos_x, next_dji_pos_y = self.dijkstra_traj.pop(0)  # dijkstra_traj에서의 다음 위치
                 
                 # 두 위치가 일치하지 않는 경우 dijkstra_traj를 초기화
@@ -462,19 +461,19 @@ class DQNAgent:
         
         if len(self.dijkstra_traj) > 0: # 이미 생성한 경로가 있으면 다음 action을 출력
             next_pos = self.dijkstra_traj.pop(0)
-            return env.get_next_action_from_next_pos(next_pos)
+            next_dir = env.get_dir_from_next_pos(next_pos)
+            env.dir = next_dir
+            return 0 # Action 0: 앞으로 이동
         
         # BFS 탐색으로 경로 탐색
         queue = deque([env.pos])
         start = env.pos        # 현재 위치를 시작 지점으로 저장
-        visited = {(int(start[0]+0.5), int(start[1]+0.5))} # set 형태. 탐색을 빠르게 수행. BFS를 하면서 지나간 grid를 저장하기 위한 용도
+        visited = {float_to_int_coord(*start)} # set 형태. 탐색을 빠르게 수행. BFS를 하면서 지나간 grid를 저장하기 위한 용도
         parent = {start: None}  # 해당 grid로 오기 위해 어떤 grid를 거쳤는지 저장.
-        
-        uturn_dir = env.get_uturn_dir(env.dir)
-        dir_vecs = env.base_dir_vecs + [uturn_dir] if uturn_dir not in env.base_dir_vecs else env.base_dir_vecs
+            
         while queue:
             curr_pos = queue.popleft()
-            for dir_vec in dir_vecs:
+            for dir_vec in env.base_dir_vecs:
                 next_pos = (curr_pos[0]+dir_vec[0], curr_pos[1]+dir_vec[1])
                 new_cleaned_num, collided, _, _ = env.mark_trajectory(next_pos[0], next_pos[1], virtual=True)
                 if not collided and (int(next_pos[0]+0.5), int(next_pos[1]+0.5)) not in visited:
@@ -484,11 +483,19 @@ class DQNAgent:
                 
                 if new_cleaned_num > 0: # 새로운 grid를 밟을 수 있는 위치를 발견하면 그 위치로 이동하는 경로를 생성
                     self._get_dijkstra_traj_from_parent(parent, next_pos)
-                    return env.get_next_action_from_next_pos(self.dijkstra_traj.pop(0))
-            dir_vecs = env.base_dir_vecs
-
-        print("_get_heuristic_action ERROR")
-        return 0
+                    next_pos = self.dijkstra_traj.pop(0)
+                    next_dir = env.get_dir_from_next_pos(next_pos)
+                    env.dir = next_dir
+                    return 0 # Action 0: 앞으로 이동
+                
+        # base_dir_vec으로 갈 수 있는 위치가 없는 경우, 갈 수 있는 action을 찾아 return
+        for action in range(ACTION_NUM):
+            next_pos = env.get_next_pos(dir=env.dir, action=action)
+            _, collided, _, _ = env.mark_trajectory(next_pos[0], next_pos[1], virtual=True)
+            if not collided:
+                return action
+        else:
+            raise ValueError(f"No valid actions available in heuristic action selection! All actions are blocked at position {env.pos}.\n")
         
         
     # State만 받는 것으로 수정    
