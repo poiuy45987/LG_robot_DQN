@@ -3,7 +3,7 @@ import warnings
 
 DEFAULT_SEED = 42
 
-ACTION_NUM = 16
+ANG_SEG_NUM = 7 # 0~90도 사이 각도를 나누는 간격 수.
 CLEANED_MAP_MAX = 10
 TRACE_MAP_MAX = 50
 LOCAL_VIEW_DIM = 51

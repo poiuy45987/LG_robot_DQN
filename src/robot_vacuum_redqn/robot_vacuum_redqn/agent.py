@@ -18,8 +18,8 @@ from PIL import Image
 from IPython.display import display, clear_output
 
 # 앞서 정의한 클래스들을 임포트한다고 가정 (또는 같은 파일에 위치)
-from .config import EnvConfig, TrainConfig, ACTION_NUM, CLEANED_MAP_MAX, TRACE_MAP_MAX, LOCAL_VIEW_DIM
-from .environment import CoverageEnv
+from .config import EnvConfig, TrainConfig, ANG_SEG_NUM, CLEANED_MAP_MAX, TRACE_MAP_MAX, LOCAL_VIEW_DIM
+from .environment import CoverageEnv, ACTION_NUM, ALL_DIR_NUM
 from .redqn_network import CNN_ReDQN
 from .utils import get_device_info, set_torch_seed
 
@@ -48,6 +48,7 @@ class DQNAgent:
         # Policy network 조성
         network_config = {
             'action_size': ACTION_NUM,
+            'all_dir_num': ALL_DIR_NUM,
             'use_noisy': args.use_noisy,
             'local_view_dim': LOCAL_VIEW_DIM,
             'do_normalize': args.do_normalize,
@@ -469,8 +470,7 @@ class DQNAgent:
         visited = {(int(start[0]+0.5), int(start[1]+0.5))} # set 형태. 탐색을 빠르게 수행. BFS를 하면서 지나간 grid를 저장하기 위한 용도
         parent = {start: None}  # 해당 grid로 오기 위해 어떤 grid를 거쳤는지 저장.
         
-        uturn_idx = (env.dir + ACTION_NUM) % ACTION_NUM
-        uturn_dir = (env.dir_vecs[uturn_idx][0], env.dir_vecs[uturn_idx][1])
+        uturn_dir = env.get_uturn_dir(env.dir)
         dir_vecs = env.base_dir_vecs + [uturn_dir] if uturn_dir not in env.base_dir_vecs else env.base_dir_vecs
         while queue:
             curr_pos = queue.popleft()
