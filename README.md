@@ -7,4 +7,27 @@
 - Reward 수정:
     - Revisit penalty: 다음 step에서 다시 cover한 grid 수에 비례하게 증가하도록 설정
     - Turning penalty: Turning한 각도에 비례하여 penalty 증가
-2. 사용 모델: Modify_state.pth, Modify_state_max_step_3000.pth
+2. 사용 모델: 2604_Tuning_3.pth
+- 학습 episode: 600 episode
+- 학습 시간: 4 days
+- Hyperparameters:
+    --optimizer adam
+    --batch_size 64
+    --gamma 0.99
+    --lr 1e-5
+    --momentum 0.9
+    --buffer_size 30000
+    --warmup_ep_steps 1000
+    --warmup_tot_steps 5000
+    --target_update 100000
+    --policy_update 1
+    --max_steps 5000
+    --use_noisy
+    --double_dqn
+    --uncleaned_reward 1.0
+    --cleaned_penalty 1.0
+    --obstacle_penalty 100.0
+    --turn_penalty 0.7
+    --step_penalty 5.0
+    --complete_reward 0.0
+- Result: 평균 Time = 6.75분 / 평균 Overlap = 71.72% / 평균 연산 시간: 8.69 s
