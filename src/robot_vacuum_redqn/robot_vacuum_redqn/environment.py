@@ -319,7 +319,6 @@ class CoverageEnv(gym.Env):
         
         # virtual인 경우 map에 trajectory를 표시하지 않음.
         if not virtual:
-            # self.cleaned[ys, xs] = 1 # cleaned_map은 무조건 1로만 덮어씌움
             
             # self.cleaned 수정: 이전 step에서 차지하지 않았던 grid의 수치를 1 올림
             if self._prev_xs is not None and self._prev_ys is not None:
@@ -345,8 +344,6 @@ class CoverageEnv(gym.Env):
             
             # trace_map 업데이트: 로봇 중심이 있는 좌표에 TRACE_MAP_MAX을 더함. 0이 아닌 값이 있는 좌표는 -1씩 감소.
             self._update_trace(cx, cy)
-            
-            # self.visited[cy, cx] = self.visited[cy, cx]+1 if self.visited[cy, cx] < 255 else 255 # visited_map은 다시 방문할 때마다 1을 추가 (Overflow 고려)
             
             self._prev_xs = xs.copy(); self._prev_ys = ys.copy()
             
@@ -820,26 +817,8 @@ class CoverageEnv(gym.Env):
     def _get_all_dir_indices(self, dir: int = None) -> np.ndarray:
         # 현재 로봇이 바라보고 있는 방향인 self.dir를 고려한 action 방향 벡터를 action index 순서대로 출력하는 method
         assert dir is not None, "Direction (self.dir) is not set."
-        return (dir + self.action_diridx) % ALL_DIR_NUM
-    
-    
-    # def classify_base_dir_and_non_base_dir(self, dir: int = None) -> tuple[np.ndarray, np.ndarray]:
-    #     # 현재 로봇이 바라보고 있는 방향인 self.dir를 고려하여 U-turn 방향 벡터를 출력하는 method
-    #     assert dir is not None, "Direction (self.dir) is not set."
+        return (dir + self.action_diridx) % ALL_DIR_NUM    
         
-    #     eps = 1e-7
-    #     possible_dir_vecs = self.all_dir_vecs[self._get_all_dir_indices(dir)] # Shape: (ACTION_NUM, 2)
-    #     base_vecs = np.array(self.base_dir_vecs) # Shape: (4, 2)
-        
-    #     diffs = abs(possible_dir_vecs[:, np.newaxis, :] - base_vecs[np.newaxis, :, :]) # Shape: (ACTION_NUM, 4, 2)
-    #     matches = np.all(diffs < eps, axis=2) # Shape: (ACTION_NUM, 4)
-    #     mask = np.any(matches, axis=1) # Shape: (ACTION_NUM,)
-        
-    #     possible_base_dir_vecs = possible_dir_vecs[mask] # Shape: (N, 2), N은 base_dir_vecs와 일치하는 벡터의 수
-    #     possible_non_base_dir_vecs = possible_dir_vecs[~mask] # Shape: (M, 2), M은 base_dir_vecs와 일치하지 않는 벡터의 수
-        
-    #     return possible_base_dir_vecs,  possible_non_base_dir_vecs
-    
         
     # FIXME: dir이 없을 때, self.dir로 취급
     def get_next_pos(self, dir: int = None, action: int = None) -> tuple[float, float]:
@@ -925,6 +904,7 @@ class CoverageEnv(gym.Env):
             self.steps = 0
             self.no_progress_cnt = 0
             self.collision_count = 0
+            self._prev_xs = None; self._prev_ys = None
             
             # 로봇이 (cx, cy)로 이동했을 때 로봇의 궤적, coverage 정도 등을 update
             new_cleaned_num, _, new_cleaned_grid_indices, _ = self.mark_trajectory(*self.pos) # cleaned_layer에 robot이 cover한 영역을 표시
@@ -1220,6 +1200,14 @@ class CoverageEnv(gym.Env):
         ax1.legend(handles=legend_elements_1, loc='upper left', bbox_to_anchor=(1.05, 1))
         ax1.set_title(f"Coverage: {self.coverage*100:.2f}%, Overlap rate: {self.overlap_rate*100:.2f}%")
         ax1.text(0, -0.1, f"Path length: {len(self.traj)}\nCleaning time: {self.cleaning_time/60:.2f} min", transform=ax1.transAxes, ha="left", va="top", fontsize=11, color='black')
+        
+        # debug_text = (f"[Debugging text]\n"
+        # f"- Steps: {self.steps}\n"
+        # f"- Covered grid num: {self.coveraged_area}\n"
+        # f"- Real covered grid num: {np.sum(self.cleaned > 0)}\n"
+        # f"- Negative grid num: {np.sum(self.cleaned < 0)}")
+        # ax1.text(0, -0.5, debug_text, transform=ax1.transAxes, ha="left", va="top", fontsize=11, color='black')
+        
         # --------------------------------------------------------------------
         
         # --------------------------------------------------------------------
@@ -1338,11 +1326,6 @@ class CoverageEnv(gym.Env):
             cbar.set_label('Trace value', fontsize=10)
             axes[2].plot(H//2, W//2, 'r.') # 로봇 위치를 빨간 점으로 표시
             axes[2].set_title(f"Trace layer local view(Last {self.cfg.stack_steps-i-1} steps ago)")
-            # legend_elements2 = [ # 그래프 높이를 맞추기 위한 가상의 범례
-            #     Patch(facecolor='none', edgecolor='none', label=' '),
-            #     Patch(facecolor='none', edgecolor='none', label=' '),
-            # ]
-            # axes[2].legend(handles=legend_elements2, loc='upper left', bbox_to_anchor=(0, -0.1), frameon=False)
         # -----------------------------
         
         # ---- obs의 vec data를 text 형식으로 출력하기 ----
@@ -1352,13 +1335,13 @@ class CoverageEnv(gym.Env):
         ax_txt.axis('off')
         
         # text 출력
-        ray_data = obs['vec'][2+self.action_space.n : 2+self.action_space.n*2]
+        ray_data = obs['vec'][2+ALL_DIR_NUM:2+ALL_DIR_NUM+self.action_space.n]
         ray_str = np.array2string(ray_data, separator=', ', formatter={'float_kind': lambda x: f"{x:.2f}"})
         
         vec_info_text = (f"[Observation Status]\n"
         f"- Normlized position: ({obs['vec'][0]:.2f}, {obs['vec'][1]:.2f})\n"
         f"- Normalized ray: {ray_str}\n"
-        f"- Normalized coverage: {obs['vec'][2+self.action_space.n*2]:.2f}\n")
+        f"- Normalized coverage: {obs['vec'][2+ALL_DIR_NUM+self.action_space.n]:.2f}\n")
         ax_txt.text(0, 0.5, vec_info_text, transform=ax_txt.transAxes, fontsize=14,
                     va='top', ha='left', family='monospace')
         # ---------------------------------------------
@@ -1414,7 +1397,6 @@ if __name__ == "__main__":
     
     # Debug step() method
     if args.debug_step:
-        # action_seq = [0]*150 + [1]*3 + [3]*150 + [2]*250 + [3]*100 + [1]*200
         action_seq = [0]*1000 + [3]*1000 + [2]*1000 + [1]*1000
         for action in action_seq:
             obs, reward, terminated, truncated, info = env.step(action)

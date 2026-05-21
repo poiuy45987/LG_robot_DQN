@@ -85,7 +85,8 @@ class DQNAgent:
             self.min_overlap_rate_mean = float('inf')   # Validation을 수행했을 때 가장 낮았던 overlap rate
             self.min_cleaning_time_mean = float('inf')  # Validation을 수행했을 때 가장 낮았던 cleaning time    
             self.best_traj_img = None                   # Validation을 수행했을 때 가장 coverage를 잘 했던 trajectory를 img로 저장 (RGB image)
-        
+            self.num_heuristic = 0                      # Heuristic action이 선택된 횟수
+            
             # Target network, Replay buffer 조성
             self.target_net = CNN_ReDQN(**network_config).to(self.device)   # Target network
             self.memory = deque(maxlen=self.train_cfg.buffer_size)          # Replay Buffer
@@ -382,11 +383,11 @@ class DQNAgent:
         #     raise Exception(f"Unexpected error in action masking: {e}") from e
     
     
-    def _get_action(self, env: CoverageEnv, processed_obs, mode: str='test', reset: bool = False) -> int:
+    def _get_action(self, env: CoverageEnv, processed_obs, mode: str='valid', reset: bool = False, warmup: bool = False) -> int:
         
         # mode 입력값 검사
-        if mode not in ['train', 'test']:
-            raise ValueError(f"Unsupported mode: {mode}. Expected 'train' or 'test'.")
+        if mode not in ['train', 'valid', 'test']:
+            raise ValueError(f"Unsupported mode: {mode}. Expected 'train', 'valid', or 'test'.")
         
         # action_mask로 가능한 action을 판단. 만약 모든 action이 불가능하면 오류를 발생시킴. 로봇이 갇혀 있는 경우는 아예 배제
         action_mask = processed_obs['action_mask']      # 충돌하는 action은 0, 충돌하지 않는 action은 1로 표시
@@ -408,18 +409,19 @@ class DQNAgent:
         map_tensor = torch.from_numpy(processed_obs['map']).float().to(self.device).unsqueeze(0)
         vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
         state = {'map': map_tensor, 'vec': vec_tensor}
-        action_RL = self._get_RL_action(state, mode) # Policy network를 통과시켜서 얻은 action
+        action_RL = self._get_RL_action(state, mode, action_mask) # Policy network를 통과시켜서 얻은 action
         # RL policy와 heuristic policy 중 무엇을 사용할지 결정
-        if self._decide_action_masking(env, action_RL, mode, reset): # Heuristic action을 사용
+        if mode == 'train' and (warmup or self.train_cfg.use_heuristic) and self._decide_action_masking(env, action_RL, mode, reset): # Heuristic action을 사용
             
             # action_RL을 수행: next_state, reward, terminated 및 truncated 여부 등을 받음.
             # environment 내에서 trajectory의 변화는 없지만, replay buffer에는 transition data를 저장함.
             # 수행한 뒤, action을 수행하기 전의 환경으로 돌아감.
-            if mode == 'train':
-                next_obs, reward, terminated, truncated, info = env.step(action_RL)
-                next_processed_obs = self._pre_process_obs(next_obs, local_view_dim=LOCAL_VIEW_DIM)
-                self.memory.append((processed_obs, action_RL, reward, next_processed_obs, terminated)) # processed_obs의 map data는 np.uint8 형태, Memory 용량을 줄임
-                env.one_step_back()
+            self.num_heuristic += 1
+            
+            next_obs, reward, terminated, truncated, info = env.step(action_RL)
+            next_processed_obs = self._pre_process_obs(next_obs, local_view_dim=LOCAL_VIEW_DIM)
+            self.memory.append((processed_obs, action_RL, reward, next_processed_obs, terminated)) # processed_obs의 map data는 np.uint8 형태, Memory 용량을 줄임
+            env.one_step_back()
             
             return self._get_heuristic_action(env) # Heuristic action을 return
         
@@ -499,13 +501,13 @@ class DQNAgent:
         
         
     # State만 받는 것으로 수정    
-    def _get_RL_action(self, state, mode: str = 'test') -> int:
+    def _get_RL_action(self, state, mode: str = 'valid', action_mask: np.ndarray = None) -> int:
         """
         현재 state에서 RL action을 얻는 method
 
         Args:
             state: Q-network에 통과시키기 위한 state
-            mode (str, optional): 'train' 또는 'test' 중 선택할 mode를 결정. Defaults to 'test'.
+            mode (str, optional): 'train', 'valid', 또는 'test' 중 선택할 mode를 결정. Defaults to 'valid'.
 
         Returns:
             int: 선택한 action
@@ -524,6 +526,11 @@ class DQNAgent:
             probs = F.softmax(q_values / self.train_cfg.softmax_temp, dim=1).cpu().numpy().flatten() # 확률값 계산
             probs = probs / (probs.sum() + 1e-8) # 확률 합이 1이 안 될 경우를 대비해 normalize (안전장치)
             action = self.train_rng.choice(len(probs), p=probs)
+        elif mode == 'test':
+            assert action_mask is not None, "Action mask must be provided in test mode."
+            masked_q_values = q_values.cpu().numpy().flatten()
+            masked_q_values[action_mask == 0] = -np.inf
+            action = masked_q_values.argmax().item()
         else:
             action = q_values.argmax().item()
         
@@ -610,7 +617,7 @@ class DQNAgent:
                 # start_num == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
                 if start_num != 0:
                     obs, _ = self.valid_env.reset(options=options) # 시작 지점 초기화
-                cur_coverage, cur_overlap_rate, cur_cleaning_time = self._test_one_map(self.valid_env, obs) # Coverage 성능을 평가
+                cur_coverage, cur_overlap_rate, cur_cleaning_time = self._test_one_map(self.valid_env, obs, mode='valid') # Coverage 성능을 평가
                 
                 # Coverage 값이 유효한 경우에만 저장: Reachable grid의 수가 전체 grid 수의 절반은 넘어야 함.
                 if self.valid_env.coverable.sum() >= self.valid_env.H * self.valid_env.W * 0.5:
@@ -696,7 +703,7 @@ class DQNAgent:
             
         self.policy_net.train() # train mode로 전환
         
-    def _test_one_map(self, env: CoverageEnv, obs: dict, debug: bool = False) -> tuple[float, float, float]:
+    def _test_one_map(self, env: CoverageEnv, obs: dict, mode: str = 'valid', debug: bool = False) -> tuple[float, float, float]:
         
         done = False
         reset = True
@@ -730,7 +737,7 @@ class DQNAgent:
         
         while not done:
             processed_obs = self._pre_process_obs(last_obs, local_view_dim=LOCAL_VIEW_DIM)
-            action = self._get_action(env, processed_obs, mode='test', reset=reset)
+            action = self._get_action(env, processed_obs, mode=mode, reset=reset)
             
             if debug:
                 
@@ -832,6 +839,7 @@ class DQNAgent:
             warmup = False      # 현재 buffer에 data를 쌓고만 있는지 parameter도 같이 update 중인지 결정
             reset = True        # 첫 번째 action을 선택할 때, action masking을 위한 buffer를 초기화
             self.dijkstra_traj = [] # Heuristic action을 위한 dijkstra_traj 초기화
+            self.num_heuristic = 0 # Heuristic action이 선택된 횟수 세기
             
             last_info = {}          # Episode 마지막에 얻은 info
             
@@ -844,7 +852,10 @@ class DQNAgent:
             else:
                 warmup = False
                 self.env.set_env_mode(warmup=False, ep_steps=self.train_cfg.warmup_ep_steps)
-                
+            
+            first_q_value = None # Episode에서 처음으로 관찰되는 Q-value 저장 (Episode마다 초기화)
+            cumulated_reward = 0.0 # Episode에서 누적된 reward 저장 (Episode마다 초기화)
+            gamma_exp = 1.0 # 감쇠 계수
             # ~~~~ Episode 내에서 training 수행 ~~~~
             while not done_ep:
                 
@@ -861,7 +872,7 @@ class DQNAgent:
                     self.wandb_run.log({"Train/Episodes": episode}, step=self.total_steps)
                 
                 # Action 선택: Warmup 중에는 100% random, 그 이후에는 epsilon 기법 사용
-                action = self._get_action(self.env, processed_obs, mode='train', reset=reset)
+                action = self._get_action(self.env, processed_obs, mode='train', reset=reset, warmup=warmup)
                 reset = False
                 
                 # ----------------------------- Action 수행 ---------------------------------
@@ -888,7 +899,17 @@ class DQNAgent:
                 last_info = info
                 
                 # Episode reward 계산
-                episode_reward += reward             
+                episode_reward += reward
+                
+                # First q_value와 cumulate reward 계산
+                if first_q_value is None:
+                    map_tensor = torch.from_numpy(processed_obs['map']).float().to(self.device).unsqueeze(0)
+                    vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
+                    with torch.no_grad():
+                        q_values = self.policy_net(map_tensor, vec_tensor) # Shape: (1, action_space)
+                        first_q_value = q_values[0, action].item()
+                cumulated_reward += reward * gamma_exp
+                gamma_exp *= self.train_cfg.gamma
                 
                 # 학습 수행
                 if not warmup and self.no_warmup_steps % self.train_cfg.policy_update == 0:
@@ -968,10 +989,14 @@ class DQNAgent:
                 self.tb_writer.add_scalar("Stats/Cleaning_time", cleaning_time, episode)
             if self.wandb_run:
                 self.wandb_run.log({"Stats/Episode_reward": episode_reward,
-                           "Stats/Coverage_rate": coverage,
-                           "Stats/Collision_count": ep_collision,
-                           "Stats/Overlap_rate": overlap_rate,
-                           "Stats/Cleaning_time": cleaning_time}, step=self.total_steps)
+                                    "Stats/Cumulated_reward": cumulated_reward,
+                                    "Stats/First_Q_value": first_q_value,
+                                    "Stats/Difference_btw_first_Q_and_Cum_Q": first_q_value - cumulated_reward,
+                                    "Stats/Coverage_rate": coverage,
+                                    "Stats/Collision_count": ep_collision,
+                                    "Stats/Overlap_rate": overlap_rate,
+                                    "Stats/Cleaning_time": cleaning_time,
+                                    "Stats/Num_Heuristic_actions": self.num_heuristic}, step=self.total_steps)
             if self.args.use_vessl:
                 vessl.log(step=episode, payload={
                     "Stats/Episode_reward": episode_reward,
@@ -1046,7 +1071,7 @@ class DQNAgent:
                 if start_idx != 0:
                     obs, _ = self.test_env.reset(options=options) # 시작 지점 초기화
                 start_time = time.time()
-                cur_coverage, cur_overlap_rate, cur_cleaning_time = self._test_one_map(self.test_env, obs, self.args.debug) # Coverage 성능을 평가
+                cur_coverage, cur_overlap_rate, cur_cleaning_time = self._test_one_map(self.test_env, obs, mode='test', debug=self.args.debug) # Coverage 성능을 평가
                 end_time = time.time()
                 computation_time.append(end_time-start_time)
                 self.test_env.show_visualized_img(img_choice='traj') # trajectory 시각화
