@@ -105,6 +105,7 @@ class CoverageEnv(gym.Env):
         self.H = cfg.H; self.W = cfg.W
         self.obstacles = None     # 장애물의 위치를 표시하는 layer: uint8 [H,W] (장애물: 1, 빈 공간: 0)
         self.cleaned = None       # 로봇이 청소한 grid를 표시하는 layer: uint8 [H,W] (Cleaned: 1, Uncleaned: 0)
+        self.uncleaned = None     # 로봇이 청소하지 않은 grid를 표시하는 layer: uint8 [H,W] (Uncleaned: 1, Cleaned: 0)
         self.trace = None         # 로봇의 중심이 지나간 잔상을 표시하는 layer: uint8 [H,W] (방문한 수를 표시)
         self.collision_map = None # Obstacle dilated map: uint8 [H,W] (Dilated obstacles: 1, 빈 공간: 0)
         self.reachable = None     # Reachable robot centers: uint8 [H,W] (Reachable center: 1, Unreachable center: 0)
@@ -344,6 +345,9 @@ class CoverageEnv(gym.Env):
             
             # trace_map 업데이트: 로봇 중심이 있는 좌표에 TRACE_MAP_MAX을 더함. 0이 아닌 값이 있는 좌표는 -1씩 감소.
             self._update_trace(cx, cy)
+            
+            # uncleand_map 업데이트
+            self.uncleaned[ys, xs] = 0
             
             self._prev_xs = xs.copy(); self._prev_ys = ys.copy()
             
@@ -612,7 +616,8 @@ class CoverageEnv(gym.Env):
 
         # 5. 회전 변환을 위한 affine matrix 생성
         dir_vecs = self.all_dir_vecs[self.dir]
-        c = dir_vecs[1]; s = dir_vecs[0]
+        # c = dir_vecs[1]; s = dir_vecs[0] # 로봇이 바라보는 방향이 위쪽 방향인 경우
+        c = dir_vecs[0]; s = -dir_vecs[1] # 로봇이 바라보는 방향이 오른쪽 방향인 경우
         M = np.array([
             [ c, -s, (1-c)*crop_r +  s*crop_r],
             [ s,  c, -s*crop_r + (1-c)*crop_r]
@@ -622,8 +627,13 @@ class CoverageEnv(gym.Env):
         # 장애물 마스크 등이 포함되어 있다면 INTER_LINEAR 후 임계값 처리를 권장합니다.
         rotated_patch = cv2.warpAffine(not_rot_patch, M, (W, H), flags=cv2.INTER_LINEAR)
 
-        # 6. 중앙부 최종 크롭
-        final_patch = rotated_patch[crop_r-r:crop_r+r+1, crop_r-r:crop_r+r+1]
+        # 6. Polar coordinate으로 변환
+        # final_patch = rotated_patch[crop_r-r:crop_r+r+1, crop_r-r:crop_r+r+1]
+        final_patch = cv2.warpPolar(rotated_patch, 
+                                    dsize=(self.local_view, self.local_view), 
+                                    center=(crop_r, crop_r),
+                                    maxRadius=r,
+                                    flags=cv2.WARP_POLAR_LINEAR | cv2.INTER_LINEAR)
 
         # 7. 후처리 (정규화 및 차원 복구)
         if arr.ndim == 3:
@@ -631,12 +641,18 @@ class CoverageEnv(gym.Env):
             final_patch = final_patch.transpose(2, 0, 1).astype(np.float32) # (H, W, C) -> (C, H, W) 복구
             
             # Cleaned_map(Index 1) 및 Trace_map(Index 2) 정규화
+            robot_r_idx = math.ceil((self.robot_half_size / r) * self.local_view)
             final_patch[1] /= CLEANED_MAP_MAX
-            final_patch[2] /= TRACE_MAP_MAX
+            final_patch[1, :, :robot_r_idx+1] = 0
         else:
             final_patch = final_patch.astype(np.float32)
 
         return final_patch
+    
+    
+    def _convert_polar_coord(self):
+        
+        pass
 
     
     def _get_agent_layer(self, cx: float, cy: float):
@@ -663,7 +679,7 @@ class CoverageEnv(gym.Env):
         cx, cy = self.pos
         
         # 1. 현재 step에서 local_map 정보가 담긴 patch를 얻음
-        full_layer = np.stack([self.collision_map, self.cleaned, self.trace], axis=0)
+        full_layer = np.stack([self.collision_map, self.cleaned, self.uncleaned], axis=0)
         current_patch = self._crop_patch(full_layer, cx, cy, value=[1, 0, 0])
         
         # 2. 현재 step의 local_map 정보를 self.patch_stack에 저장.
@@ -878,6 +894,7 @@ class CoverageEnv(gym.Env):
             # 청소된 grid를 표시하는 layer
             self.cleaned = np.zeros((self.H, self.W), dtype=np.uint8)
             self.trace = np.zeros((self.H, self.W), dtype=np.uint8)
+            self.uncleaned = (self.obstacles == 0).astype(np.uint8) 
 
             # 3. 출발 위치와 방향 선정: 시작 지점은 map의 가장 자리로 한정
             # 가장자리 위치 중 collision이 일어나지 않는 위치를 start_pos의 후보로 선정
@@ -1067,6 +1084,8 @@ class CoverageEnv(gym.Env):
         self.trace = np.zeros((self.H, self.W), dtype=np.uint8) # trace를 초기화
         self.trace[active_trace_indices[:, 1], active_trace_indices[:, 0]] = active_trace_value
         
+        self.uncleaned = ((self.obstacles == 0) & (self.cleaned == 0)).astype(np.uint8)
+        
         # ----------------- self.patch_stack 변경 -----------------
         
         # self.cfg.stack_steps 전의 cleaned layer 얻음
@@ -1087,9 +1106,11 @@ class CoverageEnv(gym.Env):
         active_trace_indices, active_trace_value = past_traj_data['trace_map_data']
         past_trace[active_trace_indices[:, 1], active_trace_indices[:, 0]] = active_trace_value
         
+        past_uncleaned = ((self.obstacles == 0) & (past_cleaned == 0)).astype(np.uint8)
+        
         # crop을 얻고 self.patch_stack에 추가
         cx, cy = past_traj_data['pos']
-        full_layer = np.stack([self.collision_map, past_cleaned, past_trace], axis=0)
+        full_layer = np.stack([self.collision_map, past_cleaned, past_uncleaned], axis=0)
         past_patch = self._crop_patch(full_layer, cx, cy, value=[1, 0, 0])
         
         self.patch_stack.appendleft(past_patch)
@@ -1137,10 +1158,10 @@ class CoverageEnv(gym.Env):
         
         # visited
         # 현재 로봇 위치를 점으로 찍음
-        axes[1, 1].imshow(self.trace, cmap='gray_r', origin='lower')
+        axes[1, 1].imshow(self.uncleaned, cmap='gray_r', origin='lower')
         cx, cy = self.pos
         axes[1, 1].plot(cx, cy, 'r.') # 로봇 위치를 빨간 점으로 표시
-        axes[1, 1].set_title(f"Trace layer")
+        axes[1, 1].set_title(f"Uncleaned Area")
         
         # reachable
         axes[0, 2].imshow(self.reachable, cmap='gray_r', origin='lower')
@@ -1314,18 +1335,32 @@ class CoverageEnv(gym.Env):
                                         pad=0.1, shrink=0.8, aspect=30, fraction=0.05)
             cbar_fake1.ax.set_visible(False)
             
-            # trace
-            # 현재 로봇 위치를 점으로 찍음
-            img2 = axes[2].imshow(obs['map'][3*i+2]*TRACE_MAP_MAX, cmap='gray_r', origin='lower', vmin=0, vmax=TRACE_MAP_MAX) # self.trace을 시각화
-            cbar = self.fig.colorbar(img2, ax=axes[2], 
-                                    orientation='horizontal',
-                                    pad=0.1,
-                                    shrink=0.8,
-                                    aspect=30,
-                                    fraction=0.05) # colorbar 추가
-            cbar.set_label('Trace value', fontsize=10)
-            axes[2].plot(H//2, W//2, 'r.') # 로봇 위치를 빨간 점으로 표시
-            axes[2].set_title(f"Trace layer local view(Last {self.cfg.stack_steps-i-1} steps ago)")
+            # # trace
+            # # 현재 로봇 위치를 점으로 찍음
+            # img2 = axes[2].imshow(obs['map'][3*i+2]*TRACE_MAP_MAX, cmap='gray_r', origin='lower', vmin=0, vmax=TRACE_MAP_MAX) # self.trace을 시각화
+            # cbar = self.fig.colorbar(img2, ax=axes[2], 
+            #                         orientation='horizontal',
+            #                         pad=0.1,
+            #                         shrink=0.8,
+            #                         aspect=30,
+            #                         fraction=0.05) # colorbar 추가
+            # cbar.set_label('Trace value', fontsize=10)
+            # axes[2].plot(H//2, W//2, 'r.') # 로봇 위치를 빨간 점으로 표시
+            # axes[2].set_title(f"Trace layer local view(Last {self.cfg.stack_steps-i-1} steps ago)")
+            
+            # collision_map
+            img2 = axes[2].imshow(obs['map'][3*i+2], cmap='gray_r', origin='lower')
+            axes[2].plot(H//2, W//2, 'r.')
+            axes[2].set_title(f"Uncleaned map local view(Last {self.cfg.stack_steps-i-1} steps ago)")
+            legend_elements0 = [
+                Patch(facecolor='black', edgecolor='black', label='Obstacles'),
+                Patch(facecolor='white', edgecolor='black', label='Free space'),
+            ]
+            axes[2].legend(handles=legend_elements0, loc='upper left', bbox_to_anchor=(0, -0.1))
+            # 그래프 위치를 맞추기 위한 가상의 colorbar
+            cbar_fake0 = self.fig.colorbar(img2, ax=axes[2], orientation='horizontal', 
+                                        pad=0.1, shrink=0.8, aspect=30, fraction=0.05)
+            cbar_fake0.ax.set_visible(False)
         # -----------------------------
         
         # ---- obs의 vec data를 text 형식으로 출력하기 ----
