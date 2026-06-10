@@ -884,7 +884,7 @@ class CoverageEnv(gym.Env):
                 self.obstacles = saved_obstacle_data    # 사전에 생성된 map
                 new_obstacle = True
             elif self.obstacles is None or options is None or not options['reset_only_start_pos']: # 아직 장애물이 아예 생성되지 않은 경우 or start_pos만 reset하는 경우
-                self.obstacles = generate_house_like_obstacles(self.cfg, self.map_rng) # 장애물의 위치를 표시하는 layer
+                self.obstacles, _, _ = generate_house_like_obstacles(self.cfg, self.map_rng) # 장애물의 위치를 표시하는 layer
                 new_obstacle = True
             
             # 2. Collision map 생성: Map 바깥에 가상의 벽이 있다고 가정하고 장애물을 dilation하여 생성
