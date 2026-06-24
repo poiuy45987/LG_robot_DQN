@@ -1,3 +1,4 @@
+from sympy import re
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -702,6 +703,117 @@ class DQNAgent:
               f"\tCleaning Time Mean = {cleaning_time_mean/60:.2f} min")
             
         self.policy_net.train() # train mode로 전환
+    
+    
+    def _get_zigzag_global_dir(self, env: CoverageEnv) -> int:
+        """
+        [고도화된 지그재그 플래너]
+        - 0단계: Heuristic 구역(0) 진입 시 남서쪽(아래+왼쪽) 구석 기점으로 이동 ("INIT")
+        - 1단계: 로봇 지름(ROBOT_DIAMETER) 칸만큼 연속 수직 이동 ("MOVING_UP" / "MOVING_DOWN")
+        - 2단계: 수직 이동 완료 혹은 벽에 막혀 조기 종료 시 즉시 좌우 상태를 반전하여 전진 ("EAST" / "WEST")
+        
+        * 방향 매핑 규격 -> 0: East, 1: North, 2: West, 3: South
+        """
+        cy, cx = env.pos
+        
+        # 📌 환경 설정값 매칭 (환경 파일에 규격이 없다면 기본값 3격자 적용)
+        ROBOT_DIAMETER = env.cfg.robot_diameter
+
+        # 1. 상태 변수 초기화
+        if not hasattr(self, 'zigzag_state'):
+            self.zigzag_state = "INIT"
+            self.init_phase = "SOUTH"
+            self.vertical_move_remain = 0
+
+        # =========================================================================
+        # 🏁 [0단계] 남서쪽 구석 기점 정렬 로직 (INIT)
+        # =========================================================================
+        if self.zigzag_state == "INIT":
+            if self.init_phase == "SOUTH":
+                nx, ny = env.get_next_pos(current_dir=3 * env.ANG_SEG_NUM, action=0)
+                if hasattr(env, 'mode_map') and 0 <= ny < env.mode_map.shape[0] and 0 <= nx < env.mode_map.shape[1]:
+                    if not env._collides(nx, ny) and env.mode_map[ny, nx] == 0:
+                        return 3 # 남쪽 벽을 만날 때까지 하강
+                self.init_phase = "WEST"
+                
+            if self.init_phase == "WEST":
+                nx, ny = env.get_next_pos(current_dir=2 * env.ANG_SEG_NUM, action=0)
+                if hasattr(env, 'mode_map') and 0 <= ny < env.mode_map.shape[0] and 0 <= nx < env.mode_map.shape[1]:
+                    if not env._collides(nx, ny) and env.mode_map[ny, nx] == 0:
+                        return 2 # 서쪽 벽을 만날 때까지 좌클릭 밀착
+                
+                # 남서쪽 구석 기점 도달 완료 -> 동쪽(EAST)을 보며 위(UP)로 쓸어올릴 준비
+                self.zigzag_state = "EAST"
+                self.zigzag_vertical_dir = "UP"
+                self.vertical_move_remain = 0
+                return 0 
+
+        # =========================================================================
+        # ↕️ [특별 단계] 로봇 지름만큼 연속 수직 이동 중인 경우 (라인 변경)
+        # =========================================================================
+        if self.zigzag_state in ["MOVING_UP", "MOVING_DOWN"]:
+            target_dir = 1 if self.zigzag_state == "MOVING_UP" else 3
+            nx, ny = env.get_next_pos(current_dir=target_dir * env.ANG_SEG_NUM, action=0)
+            
+            # 수직 이동 공간이 확보되어 있고 유효하다면 한 칸 전진
+            if hasattr(env, 'mode_map') and 0 <= ny < env.mode_map.shape[0] and 0 <= nx < env.mode_map.shape[1]:
+                if not env._collides(nx, ny) and env.mode_map[ny, nx] == 0:
+                    self.vertical_move_remain -= 1
+                    
+                    # 지름만큼 다 이동했다면 수직 전진을 멈추고 백업해둔 수평 주행 방향으로 복귀
+                    if self.vertical_move_remain <= 0:
+                        self.zigzag_state = "EAST" if self.next_horizontal == "EAST" else "WEST"
+                    return target_dir
+            
+            # 🚨 [예외 처리] 위/아래로 지름만큼 가려는데 천장 벽이나 가구 등에 조기 차단당한 경우
+            self.vertical_move_remain = 0
+            # 위로 가다 막혔으면 DOWN으로, 아래서 막혔으면 UP으로 거시 방향 패러다임 전환
+            self.zigzag_vertical_dir = "DOWN" if self.zigzag_state == "MOVING_UP" else "UP"
+            
+            # 지그재그 라인이 꼬이지 않도록, 수직 이동이 차단된 즉시 타겟 수평 방향으로 상태 변경
+            self.zigzag_state = "EAST" if self.next_horizontal == "EAST" else "WEST"
+            
+            horiz_dir = 0 if self.zigzag_state == "EAST" else 2
+            return horiz_dir
+
+        # =========================================================================
+        # 🔄 [1단계] 본 주행: EAST(우진) 상태일 때
+        # =========================================================================
+        if self.zigzag_state == "EAST":
+            nx, ny = env.get_next_pos(current_dir=0, action=0)
+            if hasattr(env, 'mode_map') and 0 <= ny < env.mode_map.shape[0] and 0 <= nx < env.mode_map.shape[1]:
+                if not env._collides(nx, ny) and env.mode_map[ny, nx] == 0:
+                    return 0 
+            
+            # 오른쪽 끝 경계 도달 -> 다음 왕복을 위해 수평 타겟을 WEST로 예약
+            self.next_horizontal = "WEST"
+            
+            # 라인 변경 예약: 로봇 지름만큼 수직 강제 이동 모드로 스위칭
+            self.vertical_move_remain = ROBOT_DIAMETER
+            self.zigzag_state = "MOVING_UP" if self.zigzag_vertical_dir == "UP" else "MOVING_DOWN"
+            
+            return 1 if self.zigzag_vertical_dir == "UP" else 3
+
+        # =========================================================================
+        # 🔄 [1단계] 본 주행: WEST(좌진) 상태일 때
+        # =========================================================================
+        elif self.zigzag_state == "WEST":
+            nx, ny = env.get_next_pos(current_dir=2 * env.ANG_SEG_NUM, action=0)
+            if hasattr(env, 'mode_map') and 0 <= ny < env.mode_map.shape[0] and 0 <= nx < env.mode_map.shape[1]:
+                if not env._collides(nx, ny) and env.mode_map[ny, nx] == 0:
+                    return 2
+            
+            # 왼쪽 끝 경계 도달 -> 다음 왕복을 위해 수평 타겟을 EAST로 예약
+            self.next_horizontal = "EAST"
+            
+            # 라인 변경 예약: 로봇 지름만큼 수직 강제 이동 모드로 스위칭
+            self.vertical_move_remain = ROBOT_DIAMETER
+            self.zigzag_state = "MOVING_UP" if self.zigzag_vertical_dir == "UP" else "MOVING_DOWN"
+            
+            return 1 if self.zigzag_vertical_dir == "UP" else 3
+
+        return 0
+    
         
     def _test_one_map(self, env: CoverageEnv, obs: dict, mode: str = 'valid', debug: bool = False) -> tuple[float, float, float]:
         
@@ -736,8 +848,28 @@ class DQNAgent:
             plt.close(fig) # 별도의 정적 출력이 생기지 않도록 닫기
         
         while not done:
+            cx, cy = env.pos
             processed_obs = self._pre_process_obs(last_obs, local_view_dim=LOCAL_VIEW_DIM)
-            action = self._get_action(env, processed_obs, mode=mode, reset=reset)
+            
+            # 발밑 격자가 0번 구역(Heuristic)인지 실시간 검사
+            is_zigzag_zone = (mode in ['valid', 'test'] and hasattr(env, 'mode_map') and env.mode_map[cy, cx] == 0)
+            
+            if is_zigzag_zone:
+                # 1. 고도화 지그재그 플래너에서 격자 기반 절대 방향 수신
+                global_dir = self._get_zigzag_global_dir(env)
+                action = None
+                
+                # 🛡️ [최후의 안전 방어선]: 만약 지그재그 플래너가 지정한 다음 칸이 벽/장애물로 꽉 막혀있다면?
+                # 룰베이스 예외처리 누수로 인해 제자리에서 굳는 무한 루프(Deadlock) 방지
+                tx, ty = env.get_next_pos(current_dir=global_dir * ANG_SEG_NUM, action=0)
+                if env._collides(tx, ty):
+                    # 지그재그 구역 내부라 할지라도 이번 턴만큼은 강제로 DQN(신경망)에게 패스하여 인공지능이 길을 찾아 탈출하게 만듦
+                    is_zigzag_zone = False
+            else:
+                # 2. DQN 구역(1) 혹은 지그재그 예외 탈출 시 신경망 예측 작동
+                action = self._get_action(env, processed_obs, mode=mode, reset=reset)
+                global_dir = None
+            
             
             if debug:
                 
@@ -786,7 +918,10 @@ class DQNAgent:
                     except ValueError:
                         print("숫자 또는 'q'를 입력해주세요.")
 
-            next_obs, _, terminated, truncated, info = env.step(action)
+            if is_zigzag_zone:
+                next_obs, _, terminated, truncated, info = env.step(global_dir=global_dir)
+            else:
+                next_obs, _, terminated, truncated, info = env.step(action=action)
             done = terminated or truncated
             last_obs = next_obs
             last_info = info
@@ -1038,6 +1173,8 @@ class DQNAgent:
         options={"reset_only_start_pos": True} # 시작 지점만 초기화하기 위한 option
         reset_seed = self.seed
         
+        condition_results = {} # Map condition 별로 test 결과를 저장하기 위한 dictionary
+        
         maps_folder = self.args.map_save_dir # Map을 저장한 폴더
         maps = None                          # Map file 이름
         map_num = self.args.test_map_num
@@ -1061,7 +1198,23 @@ class DQNAgent:
             obstacles = np.load(os.path.join(maps_folder, maps[map_idx])) if use_maps_folder else None  # map의 장애물 배치
             map_name = maps[map_idx] if use_maps_folder else f"Map {map_idx+1}"
             
-            obs, _ = self.test_env.reset(saved_obstacle_data=obstacles, seed=reset_seed)
+            match = re.search(r'(\d+)m(\d+)m_level(\d+)', map_name)
+            if match:
+                eff_H = int(match.group(1)) * 100   # 파일명 기준 물리 Height, cm 단위
+                eff_W = int(match.group(2)) * 100   # 파일명 기준 물리 Width, cm 단위
+                map_level = int(match.group(3)) # 파일명 기준 레벨
+            map_info = {"eff_H": eff_H, "eff_W": eff_W, "map_level": map_level}
+            
+            # 딕셔너리 Key 생성 (예: (300, 300, 1) -> 3m x 3m, Level 1)
+            condition_key = (eff_H, eff_W, map_level)
+            if condition_key not in condition_results:
+                condition_results[condition_key] = {
+                    'coverage': [],
+                    'overlap_rate': [],
+                    'cleaning_time': []
+                }
+                
+            obs, _ = self.test_env.reset(saved_obstacle_data=obstacles, seed=reset_seed, map_info=map_info)
             coverage = []; overlap_rate = []; cleaning_time = []
             
             # 여러 starting point에서 model 성능을 test
@@ -1079,18 +1232,22 @@ class DQNAgent:
                 # Reachable grid의 수가 전체 grid 수의 절반을 넘는 경우에만 저장
                 if self.test_env.coverable.sum() >= self.test_env.H * self.test_env.W * 0.5:
                     # 각 지표의 평균을 구하기 위해 현재 test에서의 지표값을 저장
-                    coverage.append(cur_coverage)
-                    overlap_rate.append(cur_overlap_rate)
-                    cleaning_time.append(cur_cleaning_time)
+                    # coverage.append(cur_coverage)
+                    # overlap_rate.append(cur_overlap_rate)
+                    # cleaning_time.append(cur_cleaning_time)
+                    
+                    condition_results[condition_key]['coverage'].append(cur_coverage)
+                    condition_results[condition_key]['overlap_rate'].append(cur_overlap_rate)
+                    condition_results[condition_key]['cleaning_time'].append(cur_cleaning_time)
             
-            coverage_mean = np.mean(coverage) if coverage else 0.0
-            overlap_rate_mean = np.mean(overlap_rate) if overlap_rate else 0.0
-            cleaning_time_mean = np.mean(cleaning_time) if cleaning_time else 0.0
+            # coverage_mean = np.mean(coverage) if coverage else 0.0
+            # overlap_rate_mean = np.mean(overlap_rate) if overlap_rate else 0.0
+            # cleaning_time_mean = np.mean(cleaning_time) if cleaning_time else 0.0
             
-            print(f"[Test result for {map_name}]\n"
-                f"    Coverage mean: {coverage_mean*100:.2f}%\n"
-                f"    Cleaning time mean: {cleaning_time_mean/60:.2f} min\n"
-                f"    Overlap rate mean: {overlap_rate_mean*100:.2f}%")
+            # print(f"[Test result for {map_name}]\n"
+            #     f"    Coverage mean: {coverage_mean*100:.2f}%\n"
+            #     f"    Cleaning time mean: {cleaning_time_mean/60:.2f} min\n"
+            #     f"    Overlap rate mean: {overlap_rate_mean*100:.2f}%")
 
             total_coverage.extend(coverage)
             total_overlap_rate.extend(overlap_rate)
@@ -1098,12 +1255,46 @@ class DQNAgent:
             
             reset_seed = None
         
+        # =========================================================================
+        # ⭐ [추가] 맵 조건(크기 및 난이도)별 최종 평균 및 표준편차 출력부
+        # =========================================================================
+        print("\n" + "="*60)
+        print("📊 [Test Results Breakdown by Map Conditions]")
+        print("="*60)
+        
+        # 가독성을 위해 정렬하여 순회
+        for cond_key in sorted(condition_results.keys()):
+            h_cm, w_cm, level = cond_key
+            res = condition_results[cond_key]
+            
+            # 미터 단위 가독성 변환 (예: 300cm -> 3m)
+            h_m, w_m = h_cm / 100, w_cm / 100
+            
+            # 데이터 개수 체크
+            if not res['coverage']:
+                print(f" ▶ Map Condition: {h_m:.1f}mx{w_m:.1f}m | Level {level} -> No Valid Data")
+                continue
+                
+            # 조건별 평균(mean) 및 표준편차(std) 계산
+            cov_m, cov_s = np.mean(res['coverage']), np.std(res['coverage'])
+            ov_m, ov_s = np.mean(res['overlap_rate']), np.std(res['overlap_rate'])
+            time_m, time_s = np.mean(res['cleaning_time']), np.std(res['cleaning_time'])
+            
+            print(f" ▶ Map Condition: {h_m:.1f}mx{w_m:.1f}m | Level {level} (Total tests: {len(res['coverage'])})")
+            print(f"    - Coverage:     {cov_m*100:.2f}% ± {cov_s*100:.2f}%")
+            print(f"    - Overlap Rate: {ov_m*100:.2f}% ± {ov_s*100:.2f}%")
+            print(f"    - Cleaning Time: {time_m/60:.2f} min ± {time_s/60:.2f} min")
+            print("-" * 50)
+
+        # 전체 총합 결과 (기존 코드 유지)
         total_coverage_mean = np.mean(total_coverage) if total_coverage else 0.0
         total_overlap_rate_mean = np.mean(total_overlap_rate) if total_overlap_rate else 0.0
         total_cleaning_time_mean = np.mean(total_cleaning_time) if total_cleaning_time else 0.0
         
+        print("\n" + "="*60)
         print(f"[Overall Test result]\n"
             f"    Coverage mean: {total_coverage_mean*100:.2f}%\n"
             f"    Cleaning time mean: {total_cleaning_time_mean/60:.2f} min\n"
             f"    Overlap rate mean: {total_overlap_rate_mean*100:.2f}%\n"
             f"    Average computation time per map: {np.mean(computation_time):.2f} s")
+        print("="*60)

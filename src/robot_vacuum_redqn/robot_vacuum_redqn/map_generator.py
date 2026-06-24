@@ -571,66 +571,6 @@ def get_map_img(obstacles: np.ndarray, fig: Figure, canvas: FigureCanvasAgg,
     
     return np.array(canvas.buffer_rgba(), dtype=np.uint8)[:, :, :3] # [H, W, C]
 
-def crop_and_fill_safe_squares(
-    obs: np.ndarray, 
-    crop_size: int, 
-    robot_diameter: int, 
-    stride: int, 
-    eff_size: tuple[float, float] = None,
-    fill_value: int = WALL
-) -> np.ndarray:
-    """
-    로봇의 이동 경로를 막지 않는 안전한 빈 공간만 찾아 장애물로 채우는 함수.
-
-    Args:
-        obs (np.ndarray): 현재 장애물 맵 (H, W)
-        eff_size (tuple[float, float]): 효과적인 맵 크기 (높이, 너비)
-        crop_size (int): 실제로 채워버릴 정사각형의 한 변의 길이
-        robot_diameter (int): 로봇의 지름 (안전 마진으로 활용할 상하좌우 확장 크기)
-        stride (int): 탐색 윈도우의 이동 간격 (crop_size보다 작은 값 가능)
-        fill_value (int): 채울 장애물 종류 (기본값: WALL = 1)
-    """
-    H, W = obs.shape
-    if eff_size is not None:
-        H, W = eff_size[0], eff_size[1]
-
-    # 5. 모순을 방지하기 위해 실제로 채울 영역을 기록할 임시 마스크 생성 (False로 초기화)
-    crop_mask = np.zeros_like(obs, dtype=bool)
-    
-    y_indices = list(range(0, H - crop_size + 1, stride))
-    if (H - crop_size) not in y_indices:
-        y_indices.append(H - crop_size)  # 하단 끝 좌표 강제 추가
-
-    x_indices = list(range(0, W - crop_size + 1, stride))
-    if (W - crop_size) not in x_indices:
-        x_indices.append(W - crop_size)  # 우측 끝 좌표 강제 추가
-
-    # 탐색 루프 (기존 맵 내부에서 crop_size만큼 움직임)
-    for y in y_indices:
-        for x in x_indices:
-            
-            # --- [3번 & 6번 요구사항: 안전 마진 확장 및 Index Out 방지] ---
-            # 원래 크기에서 로봇 지름만큼 확장한 검사 영역(Check Window) 계산
-            check_y_min = max(0, y - robot_diameter)
-            check_y_max = min(H, y + crop_size + robot_diameter)
-            check_x_min = max(0, x - robot_diameter)
-            check_x_max = min(W, x + crop_size + robot_diameter)
-            
-            # 확장된 영역 슬라이싱
-            check_window = obs[check_y_min:check_y_max, check_x_min:check_x_max]
-            
-            # --- [2번 요구사항: 주변 경로를 막지 않도록 검사] ---
-            # 확장 영역 내에 '장애물(BLANK가 아닌 값)'이 단 하나도 없어야 안전한 공간으로 판단
-            if np.all(check_window == BLANK):
-                
-                # --- [4번 요구사항: 실제 기록은 늘리기 전 원래 정사각형 사이즈만] ---
-                crop_mask[y : y + crop_size, x : x + crop_size] = True
-
-    # 5. 검사가 모두 끝난 후, 마스크가 True인 영역만 한꺼번에 장애물 배치
-    obs[crop_mask] = fill_value
-    
-    return obs
-
 def generate_map_by_seed_and_visualize(seed: int = DEFAULT_SEED, eff_size: tuple[float, float] = None):
     
     cfg = EnvConfig()
@@ -638,14 +578,6 @@ def generate_map_by_seed_and_visualize(seed: int = DEFAULT_SEED, eff_size: tuple
 
     # Map 생성
     obstacles, H, W = generate_house_like_obstacles(cfg, rng, visualize=True, eff_size=eff_size)
-    obstacles = crop_and_fill_safe_squares(
-        obstacles,
-        crop_size=cfg.robot_size,
-        robot_diameter=cfg.robot_size, 
-        stride=cfg.robot_size // 4, 
-        eff_size=(H, W),
-        fill_value=MORE_OBS
-    )
     
     # Map 시각화
     fig = Figure()

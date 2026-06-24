@@ -110,7 +110,7 @@ class TrainConfig: # Training과 관련된 설정들
     def __post_init__(self):
         
         self._validate_configs() # 정상적인 config가 들어왔는지 검사
-    
+
 
 @dataclass
 class EnvConfig:
@@ -158,7 +158,7 @@ class EnvConfig:
     final_coverage_thres: float = 0.90
     local_view: int = 200  # 단위: cm
     max_forward: int = 50 # 단위: cm
-    robot_size: float = 30.0 # cm 단위
+    robot_size: float = 32.0 # cm 단위
     stack_steps: int = 1 # Map의 observation data의 step 수
     
     # Reward function parameter (footprint-based)

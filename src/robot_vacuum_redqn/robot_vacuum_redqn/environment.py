@@ -16,7 +16,7 @@ import math
 
 from .config import EnvConfig, DEFAULT_SEED, ANG_SEG_NUM, CLEANED_MAP_MAX, TRACE_MAP_MAX, LOCAL_VIEW_DIM
 from .map_generator import generate_house_like_obstacles
-from .utils import display_image, float_to_int_coord
+from .utils import display_image, float_to_int_coord, generate_navigation_mode_map
 
 # Action 및 진행 가능 각도 종류 설정
 # Action: 현재 로봇이 바라보는 방향과의 각도 차이를 의미. 0~90, -90~0를 각각 ACTION_SEG_NUM개의 구간으로 나눠서 얻은 2*ACTION_SEG_NUM+1가지의 각도 + 유턴
@@ -733,7 +733,7 @@ class CoverageEnv(gym.Env):
         return {"map": total_patch, "vec": obs_vec, 'action_mask': action_mask}
     
     
-    def _get_traj_data(self, new_cleaned_num: int, new_covered_cell_indices: np.array, action: int = None) -> dict:
+    def _get_traj_data(self, new_cleaned_num: int, new_covered_cell_indices: np.array) -> dict:
         """
         Trajectory class에 저장할 단일 data를 생성하는 method
         Action이 수행된 후의 data를 저장
@@ -758,7 +758,6 @@ class CoverageEnv(gym.Env):
             'dir': self.dir,
             'no_progress_cnt': self.no_progress_cnt,
             'last_coverage': self.last_coverage,
-            'action': action, # pos로 이동하기 위해 수행한 action
         }
         
         return traj_data
@@ -871,7 +870,7 @@ class CoverageEnv(gym.Env):
                 
     
     
-    def reset(self, *, seed=None, saved_obstacle_data: np.ndarray=None, options=None):
+    def reset(self, *, seed=None, saved_obstacle_data: np.ndarray=None, map_info: dict=None, options=None):
         super().reset(seed=seed) # 난수 생성기 self.np_random가 생성됨. 첫 episode에는 seed 초기화가 일어남. 다음 episode부터는 seed 초기화를 수행하지 않음.(seed=None)
 
         for _ in range(100):
@@ -880,16 +879,25 @@ class CoverageEnv(gym.Env):
             # 사전에 생성한 map이 주어지지 않은 경우, map을 random하게 생성.
             # 시작 지점만 reset하고 map은 그대로 사용하는 경우에는 map을 다시 생성하지 않음
             new_obstacle = False
+            eff_H = map_info['eff_H'] if map_info is not None else None
+            eff_W = map_info['eff_W'] if map_info is not None else None
             if saved_obstacle_data is not None:
                 self.obstacles = saved_obstacle_data    # 사전에 생성된 map
                 new_obstacle = True
             elif self.obstacles is None or options is None or not options['reset_only_start_pos']: # 아직 장애물이 아예 생성되지 않은 경우 or start_pos만 reset하는 경우
-                self.obstacles, _, _ = generate_house_like_obstacles(self.cfg, self.map_rng) # 장애물의 위치를 표시하는 layer
+                self.obstacles, eff_H, eff_W = generate_house_like_obstacles(self.cfg, self.map_rng) # 장애물의 위치를 표시하는 layer
                 new_obstacle = True
             
             # 2. Collision map 생성: Map 바깥에 가상의 벽이 있다고 가정하고 장애물을 dilation하여 생성
             if new_obstacle:
                 self.collision_map = self._get_collision_map()
+                self.mode_map = generate_navigation_mode_map(
+                    obs=self.obstacles,
+                    crop_size=self.robot_size,      
+                    robot_diameter=self.robot_size, # 환경에 이미 인스턴스 변수로 존재하는 로봇 지름
+                    stride=self.robot_size // 4,     
+                    eff_size=(eff_H, eff_W)         # 확정된 맵의 shape를 동적으로 주입
+                )
 
             # 청소된 grid를 표시하는 layer
             self.cleaned = np.zeros((self.H, self.W), dtype=np.uint8)
@@ -940,9 +948,10 @@ class CoverageEnv(gym.Env):
             raise RuntimeError("Failed to reset environment after 100 attempts.")
     
     
-    def step(self, action):
+    def step(self, action=None, global_dir=None):
         
-        assert action is not None, "Action is not provided."
+        if action is None and global_dir is None:
+            raise ValueError("Either action or global_dir must be provided.")
             
         self.steps += 1
 
@@ -952,55 +961,82 @@ class CoverageEnv(gym.Env):
         truncated = False
         collision = False
         success = False
-
-        ############### 다음 위치로 이동: Collision이 일어나면 더 나아가지 않음 ###############
-        # Collision이 일어나면, collision 사실을 info에 넣어 알리기만 하고 더 나아가지 않음
-        # 이 작업은 training 시와 test 시에 동일하게 동작함.
         
-        # ---------- 다음 위치로 이동하면서 새롭게 cover한 grid를 칠하고, 그 수와 충돌 여부를 얻음. ----------
         cx, cy = self.pos
-        nx, ny = self.get_next_pos(self.dir, action)
-
-        new_cleaned_num, collided, new_cleaned_grid_indices, revisit_degree = self.mark_trajectory(nx, ny)
-        self.coveraged_area += new_cleaned_num
-        # -------------------------------------------------------------------------------------------
         
-        # ------------------------------------------------------------
-        # [REWARD FUNCTION]
-        # ------------------------------------------------------------
-        # 1. Step penalty
-        reward -= self.cfg.step_penalty
-        
-        if collided:
-            # 2. Obstacle penalty
-            reward -= self.cfg.obstacle_penalty            
-        else:
-            if new_cleaned_num > 0:
-                # 3. Cover reward
-                reward += self.cfg.uncleaned_reward * new_cleaned_num
-                reward += self.coverage * self.cfg.step_penalty # 새로운 grid를 cover하면 step_penalty를 완화
-            else:
-                # 4. Cleaned grid penalty
-                reward -= revisit_degree * self.cfg.cleaned_penalty
+        if global_dir is not None:
+            # 전달받은 0~3 값에 ANG_SEG_NUM을 곱해 환경 규격에 맞는 dir 인덱스로 변환 및 할당
+            self.dir = global_dir * ANG_SEG_NUM
             
-        # 5. Turn penalty
-        ang_diff_coeff = abs(self.action_diridx[action]) / ANG_SEG_NUM    # 90도 회전: 1.0, 180도 회전: 2.0
-        reward -= ang_diff_coeff * self.cfg.turn_penalty
+            # 머리 방향(self.dir)을 원하는 절대 방향으로 바꿨으므로, 
+            # 상대 액션 0(직진)을 주면 해당 방향으로 똑바로 전진합니다.
+            nx, ny = self.get_next_pos(self.dir, action=0) 
+            
+            # 궤적 마킹 및 커버리지 업데이트
+            new_cleaned_num, collided, new_cleaned_grid_indices, revisit_degree = self.mark_trajectory(nx, ny)
+            self.coveraged_area += new_cleaned_num
+            
+            if collided:
+                collision = True
+                self.collision_count += 1
+                nx, ny = cx, cy  # 충돌 시 제자리
+            
+            self.pos = (nx, ny)
+            
+            # 지그재그 모드는 보상 계산을 스킵하고 바로 종료 조건 검사로 가기 위해 pass
+            pass
         
-        # 6. Complete reward
-        if self.coverage >= self.cfg.target_coverage:
-            reward += self.cfg.complete_reward
-        # ------------------------------------------------------------
-        
-        # 상태 update
-        if collided:
-            collision = True
-            self.collision_count += 1
-            nx, ny = cx, cy # 충돌이 일어나면 로봇을 움직이지 않음
-        cx, cy = nx, ny # 위치 update
-        self.dir = self._get_all_dir_indices(self.dir)[action] # 방향 update
-        self.pos = (cx, cy)
-        ############################################################################
+        # =========================================================================
+        # 🧠 [DQN 기본 주행 분기] 기존 코드 그대로 유지
+        # =========================================================================
+        else: 
+            ############### 다음 위치로 이동: Collision이 일어나면 더 나아가지 않음 ###############
+            # Collision이 일어나면, collision 사실을 info에 넣어 알리기만 하고 더 나아가지 않음
+            # 이 작업은 training 시와 test 시에 동일하게 동작함.
+            
+            # ---------- 다음 위치로 이동하면서 새롭게 cover한 grid를 칠하고, 그 수와 충돌 여부를 얻음. ----------
+            nx, ny = self.get_next_pos(self.dir, action)
+
+            new_cleaned_num, collided, new_cleaned_grid_indices, revisit_degree = self.mark_trajectory(nx, ny)
+            self.coveraged_area += new_cleaned_num
+            # -------------------------------------------------------------------------------------------
+            
+            # ------------------------------------------------------------
+            # [REWARD FUNCTION]
+            # ------------------------------------------------------------
+            # 1. Step penalty
+            reward -= self.cfg.step_penalty
+            
+            if collided:
+                # 2. Obstacle penalty
+                reward -= self.cfg.obstacle_penalty            
+            else:
+                if new_cleaned_num > 0:
+                    # 3. Cover reward
+                    reward += self.cfg.uncleaned_reward * new_cleaned_num
+                    reward += self.coverage * self.cfg.step_penalty # 새로운 grid를 cover하면 step_penalty를 완화
+                else:
+                    # 4. Cleaned grid penalty
+                    reward -= revisit_degree * self.cfg.cleaned_penalty
+                
+            # 5. Turn penalty
+            ang_diff_coeff = abs(self.action_diridx[action]) / ANG_SEG_NUM    # 90도 회전: 1.0, 180도 회전: 2.0
+            reward -= ang_diff_coeff * self.cfg.turn_penalty
+            
+            # 6. Complete reward
+            if self.coverage >= self.cfg.target_coverage:
+                reward += self.cfg.complete_reward
+            # ------------------------------------------------------------
+            
+            # 상태 update
+            if collided:
+                collision = True
+                self.collision_count += 1
+                nx, ny = cx, cy # 충돌이 일어나면 로봇을 움직이지 않음
+            cx, cy = nx, ny # 위치 update
+            self.dir = self._get_all_dir_indices(self.dir)[action] # 방향 update
+            self.pos = (cx, cy)
+            ############################################################################
         
         # ---- Terminate과 Truncated 조건 ----
         # Terminate: Coverage를 성공한 경우 & Collision이 일어난 경우
@@ -1043,7 +1079,7 @@ class CoverageEnv(gym.Env):
         # ----------------------------------
         
         # Trajectory data를 저장
-        self.traj.append(self._get_traj_data(new_cleaned_num, new_cleaned_grid_indices, action))
+        self.traj.append(self._get_traj_data(new_cleaned_num, new_cleaned_grid_indices))
         
         # self.patch_stack update
         self._update_patch_stack()
