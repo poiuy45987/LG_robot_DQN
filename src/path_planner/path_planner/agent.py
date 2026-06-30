@@ -123,6 +123,8 @@ class DQNAgent:
             
         # Loading model
         self._load_model(args)
+
+        self.zigzag_fallback_path = None
         
     
     def _setup_logging(self):
@@ -713,323 +715,144 @@ class DQNAgent:
               f"\tCleaning Time Mean = {cleaning_time_mean/60:.2f} min")
             
         self.policy_net.train() # train mode로 전환
+
     
-    
-    # def _get_zigzag_global_dir(self, env: CoverageEnv) -> int:
-    #     """
-    #     [고도화된 지그재그 플래너]
-    #     - 0단계: Heuristic 구역(0) 진입 시 남서쪽(아래+왼쪽) 구석 기점으로 이동 ("INIT")
-    #     - 1단계: 로봇 지름(ROBOT_DIAMETER) 칸만큼 연속 수직 이동 ("MOVING_UP" / "MOVING_DOWN")
-    #     - 2단계: 수직 이동 완료 혹은 벽에 막혀 조기 종료 시 즉시 좌우 상태를 반전하여 전진 ("EAST" / "WEST")
+    def _generate_zigzag_trajectory(self, env: CoverageEnv, start_pos: tuple[int, int]) -> list[tuple[int, int]]:
+        """
+        저밀도 zone(mode_map==0) 전체를 커버하는 boustrophedon 경로를 생성.
+        반환값: start_pos를 포함한, 인접한 칸들로만 이루어진 좌표 리스트.
+        """
+        cx0, cy0 = start_pos
+        mode_map = env.map_layers.mode_map
+        H = env.map_layers.map_info.eff_H; W = env.map_layers.map_info.eff_W
+
+        def free(x, y):
+            return 0 <= x < W and 0 <= y < H and mode_map[y, x] == 0 and not env.is_collide(x, y)
+
+        # 1. Zone 영역(로봇 중심 reachable mask) BFS
+        reachable = np.zeros((H, W), dtype=np.uint8)
+        reachable[cy0, cx0] = 1
+        queue = deque([(cx0, cy0)])
+        while queue:
+            x, y = queue.popleft()
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nx, ny = x + dx, y + dy
+                if free(nx, ny) and not reachable[ny, nx]:
+                    reachable[ny, nx] = 1
+                    queue.append((nx, ny))
+
+        ys, _ = np.nonzero(reachable)
+        if len(ys) == 0:
+            return [start_pos]
+        y_min, y_max = int(ys.min()), int(ys.max())
         
-    #     * 방향 매핑 규격 -> 0: East, 1: North, 2: West, 3: South
-    #     """
-    #     cx, cy = float_to_int_coord(*env.pos)
+        robot_diameter = max(1, env.cfg.robot_size)
+        num_rows = int(np.ceil((y_max - y_min) / robot_diameter)) + 1
+        row_ys = [int(y) for y in np.linspace(y_min, y_max, num_rows)]
         
-    #     # 📌 환경 설정값 매칭 (환경 파일에 규격이 없다면 기본값 3격자 적용)
-    #     ROBOT_DIAMETER = env.cfg.robot_size
+        def bfs_path(src, dst):
+            """reachable mask 안에an서 src -> dst 최단 경로(src 제외)를 구함"""
+            if src == dst:
+                return []
+            q = deque([src])
+            visited = {src}
+            parent = {src: None}
+            while q:
+                x, y = q.popleft()
+                if (x, y) == dst:
+                    break
+                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                    nx, ny = x + dx, y + dy
+                    if 0 <= nx < W and 0 <= ny < H and reachable[ny, nx] and (nx, ny) not in visited:
+                        visited.add((nx, ny))
+                        parent[(nx, ny)] = (x, y)
+                        q.append((nx, ny))
+            if dst not in parent:
+                return []  # 이론상 같은 reachable 영역이면 항상 도달 가능
+            path = []
+            node = dst
+            while node != src:
+                path.append(node)
+                node = parent[node]
+            path.reverse()
+            return path
 
-    #     # 1. 상태 변수 초기화
-    #     if not hasattr(self, 'zigzag_state'):
-    #         self.zigzag_state = "INIT"
-    #         self.init_phase = "SOUTH"
-    #         self.vertical_move_remain = 0
+        all_segments = []
+        for row_y in row_ys:
+            row_xs = sorted(int(x) for x in np.nonzero(reachable[row_y, :])[0])
+            if not row_xs:
+                continue
             
-    #     # ────────────── [추가] 1. 최초 진입 시 로봇 기점 연결된 바닥 영역 계산 (BFS) ──────────────
-    #     if not hasattr(self, 'initialized_local_zone') or not self.initialized_local_zone:
-    #         from collections import deque
-    #         queue = deque([(cx, cy)])
-    #         visited = set([(cx, cy)])
-    #         self.accessible_tiles = []
-            
-    #         H, W = env.map_layers.mode_map.shape
-    #         while queue:
-    #             curr_x, curr_y = queue.popleft()
-    #             self.accessible_tiles.append((curr_x, curr_y))
-                
-    #             for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-    #                 nx, ny = curr_x + dx, curr_y + dy
-    #                 if 0 <= nx < W and 0 <= ny < H and (nx, ny) not in visited:
-    #                     # 같은 플래너 구역(0)이고 충돌이 없는 바닥인지 검사
-    #                     if env.map_layers.mode_map[ny, nx] == 0 and not env.is_collide(nx, ny):
-    #                         visited.add((nx, ny))
-    #                         queue.append((nx, ny))
-                            
-    #         self.total_accessible_count = len(self.accessible_tiles)
-    #         self.initialized_local_zone = True
-
-    #     # ────────────── [추가] 2. 실시간 로컬 청소율 계산 및 탈출 조건 점검 ──────────────
-    #     if self.total_accessible_count > 0:
-    #         cleaned_count = sum(1 for tx, ty in self.accessible_tiles if env.map_layers.uncleaned[ty, tx] == 0)
-    #         local_coverage = float(cleaned_count / self.total_accessible_count)
-    #     else:
-    #         local_coverage = 1.0
-
-    #     # 로컬 구역 청소율이 90% 이상이거나 이미 완료 상태라면 탈출 신호(-1) 반환
-    #     if local_coverage >= 0.90 or self.zigzag_state == "DONE":
-    #         self.zigzag_state = "DONE"
-    #         return -1
+            # 장애물 등으로 끊어진 x축 구간 분리
+            seg_start = row_xs[0]
+            prev = row_xs[0]
+            for x in row_xs[1:]:
+                if x != prev + 1:
+                    all_segments.append((row_y, seg_start, prev))
+                    seg_start = x
+                prev = x
+            all_segments.append((row_y, seg_start, prev))        
         
-    #     # =========================================================================
-    #     # 🏁 [0단계] 남서쪽 구석 기점 정렬 로직 (INIT)
-    #     # =========================================================================
-    #     if self.zigzag_state == "INIT":
-    #         if self.init_phase == "SOUTH":
-    #             nx, ny = cx, cy-1
-    #             if 0 <= ny < env.map_layers.mode_map.shape[0] and 0 <= nx < env.map_layers.mode_map.shape[1]:
-    #                 if not env.is_collide(nx, ny) and env.map_layers.mode_map[ny, nx] == 0:
-    #                     return 3 # 남쪽 벽을 만날 때까지 하강
-    #             self.init_phase = "WEST"
+        trajectory = [(cx0, cy0)]
+        current = (cx0, cy0)
+        
+        while all_segments:
+            # 현재 위치에서 각 segment의 양 끝단(a, b)까지의 단순 거리(우회 비용 대용) 계산
+            def get_closest_dist(seg):
+                y, a, b = seg
+                dist_a = abs(current[0] - a) + abs(current[1] - y)
+                dist_b = abs(current[0] - b) + abs(current[1] - y)
+                return min(dist_a, dist_b), dist_a <= dist_b
+
+            # 가장 가까운 segment를 다음 목표로 결정하고 리스트에서 제거
+            best_seg = min(all_segments, key=lambda s: get_closest_dist(s)[0])
+            all_segments.remove(best_seg)
+            
+            y, a, b = best_seg
+            _, a_is_closer = get_closest_dist(best_seg)
+            
+            # 더 가까운 쪽 진입점(x_from)과 끝점(x_to) 결정
+            x_from, x_to = (a, b) if a_is_closer else (b, a)
+            target_start = (x_from, y)
+            
+            # 6-A. 현재 위치에서 다음 청소 구간 시작점까지 장애물을 우회하여 이동 (A*나 BFS 경로)
+            if current != target_start:
+                hop = bfs_path(current, target_start)
+                trajectory.extend(hop)
+                current = target_start
                 
-    #         if self.init_phase == "WEST":
-    #             nx, ny = cx-1, cy
-    #             if 0 <= ny < env.map_layers.mode_map.shape[0] and 0 <= nx < env.map_layers.mode_map.shape[1]:
-    #                 if not env.is_collide(nx, ny) and env.map_layers.mode_map[ny, nx] == 0:
-    #                     return 2 # 서쪽 벽을 만날 때까지 좌클릭 밀착
-                
-    #             # 남서쪽 구석 기점 도달 완료 -> 동쪽(EAST)을 보며 위(UP)로 쓸어올릴 준비
-    #             self.zigzag_state = "EAST"
-    #             self.zigzag_vertical_dir = "UP"
-    #             self.vertical_move_remain = 0
-    #             return 0 
+            # 6-B. 진입한 segment를 쭉 한 방향으로 훑으며 청소 수행
+            step = 1 if x_to >= x_from else -1
+            for x in range(x_from + step, x_to + step, step):
+                trajectory.append((x, y))
+                current = (x, y)
 
-    #     # =========================================================================
-    #     # ↕️ [특별 단계] 로봇 지름만큼 연속 수직 이동 중인 경우 (라인 변경)
-    #     # =========================================================================
-    #     if self.zigzag_state in ["MOVING_UP", "MOVING_DOWN"]:
-    #         target_dir = 1 if self.zigzag_state == "MOVING_UP" else 3
-    #         if self.zigzag_state == "MOVING_UP":
-    #             nx, ny = cx, cy+1
-    #         else:
-    #             nx, ny = cx, cy-1
-            
-    #         # 수직 이동 공간이 확보되어 있고 유효하다면 한 칸 전진
-    #         if 0 <= ny < env.map_layers.mode_map.shape[0] and 0 <= nx < env.map_layers.mode_map.shape[1]:
-    #             if not env.is_collide(nx, ny) and env.map_layers.mode_map[ny, nx] == 0:
-    #                 self.vertical_move_remain -= 1
-                    
-    #                 # 지름만큼 다 이동했다면 수직 전진을 멈추고 백업해둔 수평 주행 방향으로 복귀
-    #                 if self.vertical_move_remain <= 0:
-    #                     self.zigzag_state = "EAST" if self.next_horizontal == "EAST" else "WEST"
-    #                 return target_dir
-            
-    #         # 🚨 [예외 처리] 위/아래로 지름만큼 가려는데 천장 벽이나 가구 등에 조기 차단당한 경우
-    #         self.vertical_move_remain = 0
-    #         # 위로 가다 막혔으면 DOWN으로, 아래서 막혔으면 UP으로 거시 방향 패러다임 전환
-    #         self.zigzag_vertical_dir = "DOWN" if self.zigzag_state == "MOVING_UP" else "UP"
-            
-    #         # 지그재그 라인이 꼬이지 않도록, 수직 이동이 차단된 즉시 타겟 수평 방향으로 상태 변경
-    #         self.zigzag_state = "EAST" if self.next_horizontal == "EAST" else "WEST"
-            
-    #         horiz_dir = 0 if self.zigzag_state == "EAST" else 2
-    #         return horiz_dir
+        return trajectory
 
-    #     # =========================================================================
-    #     # 🔄 [1단계] 본 주행: EAST(우진) 상태일 때
-    #     # =========================================================================
-    #     if self.zigzag_state == "EAST":
-    #         nx, ny = cx+1, cy
-    #         if 0 <= ny < env.map_layers.mode_map.shape[0] and 0 <= nx < env.map_layers.mode_map.shape[1]:
-    #             if not env.is_collide(nx, ny) and env.map_layers.mode_map[ny, nx] == 0:
-    #                 return 0 
-            
-    #         # 오른쪽 끝 경계 도달 -> 다음 왕복을 위해 수평 타겟을 WEST로 예약
-    #         self.next_horizontal = "WEST"
-            
-    #         # 라인 변경 예약: 로봇 지름만큼 수직 강제 이동 모드로 스위칭
-    #         self.vertical_move_remain = ROBOT_DIAMETER
-    #         self.zigzag_state = "MOVING_UP" if self.zigzag_vertical_dir == "UP" else "MOVING_DOWN"
-            
-    #         return 1 if self.zigzag_vertical_dir == "UP" else 3
-
-    #     # =========================================================================
-    #     # 🔄 [1단계] 본 주행: WEST(좌진) 상태일 때
-    #     # =========================================================================
-    #     elif self.zigzag_state == "WEST":
-    #         nx, ny = cx-1, cy
-    #         if 0 <= ny < env.map_layers.mode_map.shape[0] and 0 <= nx < env.map_layers.mode_map.shape[1]:
-    #             if not env.is_collide(nx, ny) and env.map_layers.mode_map[ny, nx] == 0:
-    #                 return 2
-            
-    #         # 왼쪽 끝 경계 도달 -> 다음 왕복을 위해 수평 타겟을 EAST로 예약
-    #         self.next_horizontal = "EAST"
-            
-    #         # 라인 변경 예약: 로봇 지름만큼 수직 강제 이동 모드로 스위칭
-    #         self.vertical_move_remain = ROBOT_DIAMETER
-    #         self.zigzag_state = "MOVING_UP" if self.zigzag_vertical_dir == "UP" else "MOVING_DOWN"
-            
-    #         return 1 if self.zigzag_vertical_dir == "UP" else 3
-
-    #     return 0
-    
     def _get_zigzag_global_dir(self, env: CoverageEnv) -> int:
         """
-        지그재그(boustrophedon) 플래너.
-        - INIT: 남서쪽 코너로 정렬
-        - EAST/WEST: 한 방향으로 직진(sweep)
-        - MOVING_UP/MOVING_DOWN: 로봇 지름만큼 수직 이동 후 sweep 방향 반전
-        - 정상 진행이 완전히 막히면(양쪽 라인 변경 모두 불가) zone 내에서 가장 가까운
-        미청소 grid까지 BFS 경로를 만들어 이동(FALLBACK) 후 sweep 재개
-
+        저밀도 zone에 진입하면 zone 전체를 커버하는 trajectory를 한 번에 생성하고,
+        이후로는 그 경로를 한 칸씩 따라가며 방향만 반환.
         * 방향 매핑: 0: East, 1: North, 2: West, 3: South
         """
         cx, cy = float_to_int_coord(*env.pos)
-        mode_map = env.map_layers.mode_map
-        H, W = env.map_layers.map_info.eff_H, env.map_layers.map_info.eff_W
-        ROBOT_DIAMETER = env.cfg.robot_size
-        DIR_OFFSETS = {0: (1, 0), 1: (0, 1), 2: (-1, 0), 3: (0, -1)}
-
-        def free(nx, ny):
-            return 0 <= nx < W and 0 <= ny < H and mode_map[ny, nx] == 0 and not env.is_collide(nx, ny)
-
-        # 1. 상태 초기화
-        if not hasattr(self, 'zigzag_state'):
-            self.zigzag_state = "INIT"
-            self.init_phase = "SOUTH"
-            self.vertical_move_remain = 0
-            self.zigzag_fallback_path = None
-            self.tried_alt_vertical = False
-
-        # 2. Zone BFS: zone에 새로 진입했을 때 1회만 계산
-        if not getattr(self, 'initialized_local_zone', False):
-            self.zone_mask = np.zeros_like(env.map_layers.cleaned, dtype=np.uint8)
-            queue = deque([(cx, cy)])
-            self.zone_mask[y, x] = 1
-            while queue:
-                x, y = queue.popleft()
-                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                    nx, ny = x + dx, y + dy
-                    if free(nx, ny) and not self.zone_mask[ny, nx]:
-                        self.zone_mask[ny, nx] = 1
-                        queue.append((nx, ny))
-            self.total_accessible_count = np.sum(self.zone_mask)
-            self.initialized_local_zone = True
-
-        # 3. 탈출 조건 검사
-        if self.total_accessible_count > 0:
-            cleaned_count = sum(self.zone_mask &  env.map_layers.cleaned)
-            local_coverage = cleaned_count / self.total_accessible_count
-        else:
-            local_coverage = 1.0
-        if local_coverage >= 0.90 or self.zigzag_state == "DONE":
-            self.zigzag_state = "DONE"
+        
+        if env.cleaned_segment[cy, cx] == 1:
             return -1
 
-        # 4. Fallback 경로를 따라가는 중이면 그것을 우선 처리
-        if self.zigzag_fallback_path:
-            next_pos = self.zigzag_fallback_path.pop(0)
-            dx, dy = next_pos[0] - cx, next_pos[1] - cy
-            global_dir = next(d for d, off in DIR_OFFSETS.items() if off == (dx, dy))
-            if not self.zigzag_fallback_path:
-                self.zigzag_state = self.zigzag_resume_state
-            return global_dir
+        if not hasattr(self, 'zigzag_trajectory') or self.zigzag_trajectory is None:
+            self.zigzag_trajectory = self._generate_zigzag_trajectory(env, (cx, cy))
+            self.zigzag_trajectory.pop(0)  # 시작점(현재 위치) 제외
 
-        # 5. INIT: 남서쪽 코너 정렬
-        if self.zigzag_state == "INIT":
-            if self.init_phase == "SOUTH":
-                if free(cx, cy - 1):
-                    return 3
-                self.init_phase = "WEST"
-            if self.init_phase == "WEST":
-                if free(cx - 1, cy):
-                    return 2
-                self.zigzag_state = "EAST"
-                self.zigzag_vertical_dir = "UP"
-                self.vertical_move_remain = 0
-                return 0
+        if not self.zigzag_trajectory:
+            return -1  # 경로를 다 따라갔으면 탈출 신호
 
-        # 6. 라인 변경 (수직 이동)
-        if self.zigzag_state in ["MOVING_UP", "MOVING_DOWN"]:
-            dy = 1 if self.zigzag_state == "MOVING_UP" else -1
-            if free(cx, cy + dy):
-                self.tried_alt_vertical = False
-                self.vertical_move_remain -= 1
-                if self.vertical_move_remain <= 0:
-                    self.zigzag_state = self.next_horizontal
-                return 1 if dy == 1 else 3
-
-            # 현재 방향이 막힘 -> 반대 방향을 아직 안 시도해봤으면 시도
-            if not self.tried_alt_vertical:
-                self.tried_alt_vertical = True
-                alt_dy = -dy
-                if free(cx, cy + alt_dy):
-                    self.zigzag_state = "MOVING_UP" if alt_dy == 1 else "MOVING_DOWN"
-                    self.vertical_move_remain = ROBOT_DIAMETER
-                    return 1 if alt_dy == 1 else 3
-
-            # 양쪽 모두 막힘 -> 같은 줄에서 더 진행 불가, zone 내 미청소 영역으로 fallback
-            self.tried_alt_vertical = False
-            return self._zigzag_fallback_to_nearest_uncleaned(env, cx, cy, resume_state=self.next_horizontal)
-
-        # 7. 본 주행: EAST / WEST
-        if self.zigzag_state in ["EAST", "WEST"]:
-            dx = 1 if self.zigzag_state == "EAST" else -1
-            if free(cx + dx, cy):
-                return 0 if dx == 1 else 2
-
-            # 끝까지 도달 -> 라인 변경 시도 (현재 방향 먼저, 막히면 반대 방향)
-            self.next_horizontal = "WEST" if self.zigzag_state == "EAST" else "EAST"
-            self.vertical_move_remain = ROBOT_DIAMETER
-            for vdir in ([self.zigzag_vertical_dir, "DOWN" if self.zigzag_vertical_dir == "UP" else "UP"]):
-                vdy = 1 if vdir == "UP" else -1
-                if free(cx, cy + vdy):
-                    self.zigzag_vertical_dir = vdir
-                    self.zigzag_state = "MOVING_UP" if vdir == "UP" else "MOVING_DOWN"
-                    return 1 if vdy == 1 else 3
-
-            # 양쪽 다 막힘 -> fallback
-            return self._zigzag_fallback_to_nearest_uncleaned(env, cx, cy, resume_state=self.next_horizontal)
-
-        return 0
+        next_pos = self.zigzag_trajectory.pop(0)
+        dx, dy = next_pos[0] - cx, next_pos[1] - cy
+        dir_offsets = {(1, 0): 0, (0, 1): 1, (-1, 0): 2, (0, -1): 3}
+        return dir_offsets[(dx, dy)]
     
     
-    def _zigzag_fallback_to_nearest_uncleaned(self, env: CoverageEnv, cx: int, cy: int, resume_state: str) -> int:
-        """
-        Boustrophedon 진행이 완전히 막혔을 때, 현재 zone(self.accessible_tiles) 안에서
-        아직 청소되지 않은 가장 가까운 grid까지 BFS로 경로를 구해 그쪽으로 이동시킴.
-        """
-        mode_map = env.map_layers.mode_map
-        H, W = env.map_layers.map_info.eff_H, env.map_layers.map_info.eff_W
-        
-        target_zone = self.zone_mask & env.map_layers.uncleaned
-
-        if not np.any(target_zone):
-            self.zigzag_state = "DONE"
-            return -1
-
-        queue = deque([(cx, cy)])
-        visited = {(cx, cy)}
-        parent = {(cx, cy): None}
-        found = None
-        while queue:
-            x, y = queue.popleft()
-            if env.map_layers.has_uncleaned_grid(x, y):
-                found = (x, y)
-                break
-            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                nx, ny = x + dx, y + dy
-                if (nx, ny) not in visited and 0 <= nx < W and 0 <= ny < H \
-                and mode_map[ny, nx] == 0 and not env.is_collide(nx, ny):
-                    visited.add((nx, ny))
-                    parent[(nx, ny)] = (x, y)
-                    queue.append((nx, ny))
-
-        if found is None:
-            self.zigzag_state = "DONE"
-            return -1
-
-        path = []
-        node = found
-        while node is not None:
-            path.append(node)
-            node = parent[node]
-        path.reverse()
-        path.pop(0)  # 현재 위치는 제외
-
-        self.zigzag_fallback_path = path
-        self.zigzag_resume_state = resume_state
-        return self._get_zigzag_global_dir(env)  # 방금 만든 경로의 첫 스텝을 즉시 사용
-        
     def _test_one_map(self, env: CoverageEnv, obs: dict, mode: str = 'valid', debug: bool = False) -> tuple[float, float, float]:
         
         done = False
@@ -1039,14 +862,8 @@ class DQNAgent:
         debug_skip_count = 0
         self.dijkstra_traj = []
         
-        self.zigzag_state = "INIT"
-        self.init_phase = "SOUTH"
-        self.vertical_move_remain = 0
-        
         # ────────────── [추가] 새 맵 시작 시 로컬 구역 초기화 플래그 리셋 ──────────────
-        self.initialized_local_zone = False
-        self.accessible_tiles = []
-        self.total_accessible_count = 0
+        self.zigzag_trajectory = None
         
         # [1] 디버그 모드일 때 사용할 도화지(fig)를 미리 딱 한 번만 만듭니다.
         if debug:
@@ -1072,42 +889,24 @@ class DQNAgent:
             plt.close(fig) # 별도의 정적 출력이 생기지 않도록 닫기
         
         while not done:
-            cx, cy = float_to_int_coord(*env.pos)
             processed_obs = self._pre_process_obs(last_obs, local_view_dim=LOCAL_VIEW_DIM)
             
             # 발밑 격자가 0번 구역(Heuristic)인지 실시간 검사
-            is_zigzag_zone = (mode in ['valid', 'test'] and env.map_layers.mode_map[cy, cx] == 0)
-            
+            is_zigzag_zone = env.is_zigzag_zone()
             if is_zigzag_zone:
-                # 1. 고도화 지그재그 플래너에서 격자 기반 절대 방향 수신
+                self.dijkstra_traj = []
                 global_dir = self._get_zigzag_global_dir(env)
                 action = None
-                
-                # ────────────── [추가] 지그재그 플래너가 완료 신호(-1)를 던진 경우 ──────────────
+
                 if global_dir == -1:
-                    is_zigzag_zone = False  # 이번 스텝부터 즉시 DQN 모드로 제어권 전환
-                    
-                else:
-                    # 🛡️ [최후의 안전 방어선]: 방향별 예외처리 (기존과 동일)
-                    if global_dir == 0: tx, ty = cx+1, cy
-                    elif global_dir == 1: tx, ty = cx, cy+1
-                    elif global_dir == 2: tx, ty = cx-1, cy
-                    elif global_dir == 3: tx, ty = cx, cy-1
-                    else: raise ValueError(f"Invalid global_dir: {global_dir}. Expected 0, 1, 2, or 3.")
-                    if env.is_collide(tx, ty):
-                        is_zigzag_zone = False
-                    
+                    is_zigzag_zone = False # 경로를 다 소진했으면 즉시 DQN 모드로 전환
+                    env.mark_current_segment()
+
             if not is_zigzag_zone:
-                
-                if env.map_layers.mode_map[cy, cx] != 0:
-                    self.zigzag_state = "INIT"
-                    self.init_phase = "SOUTH"
-                    self.vertical_move_remain = 0
-                    self.initialized_local_zone = False
-                    self.zigzag_fallback_path = None
-                    # 2. DQN 구역(1) 혹은 지그재그 예외 탈출 시 신경망 예측 작동
+                self.zigzag_trajectory = None
                 action = self._get_action(env, processed_obs, mode=mode, reset=reset)
                 global_dir = None
+                reset = False
             
             
             if debug:
@@ -1165,7 +964,6 @@ class DQNAgent:
             last_obs = next_obs
             last_info = info
             
-            reset = False
             
         coverage = last_info['Coverage']
         overlap_percent = env.overlap_percent
@@ -1206,6 +1004,7 @@ class DQNAgent:
             obs, info = self.env.reset(seed=seed, map_config=map_config)
             processed_obs = self._pre_process_obs(obs, local_view_dim=LOCAL_VIEW_DIM) # Map data를 resize, Observation data를 얻음
             # ----------------------------------------------------------------------------------------
+            self.zigzag_trajectory = None
             
             # Environment에서 step을 처음 시작할 때 설정
             episode_reward = 0      # Episode에서 얻은 reward 총합
@@ -1237,21 +1036,25 @@ class DQNAgent:
                 # Steps 수 세기
                 self.total_steps += 1
                 steps += 1
-                if warmup:
-                    self.warmup_steps += 1
-                else:
-                    self.no_warmup_steps += 1
-                
-                # Episode 수 저장
-                if self.wandb_run:
-                    self.wandb_run.log({"Train/Episodes": episode}, step=self.total_steps)
                 
                 # Action 선택: Warmup 중에는 100% random, 그 이후에는 epsilon 기법 사용
-                action = self._get_action(self.env, processed_obs, mode='train', reset=reset, warmup=warmup)
-                reset = False
+                is_zigzag_zone = self.env.is_zigzag_zone()
+                if is_zigzag_zone:
+                    self.dijkstra_traj = []
+                    global_dir = self._get_zigzag_global_dir(self.env)
+                    action = None
+                    
+                    if global_dir == -1:
+                        is_zigzag_zone = False
+                        self.env.mark_current_segment()
                 
-                # ----------------------------- Action 수행 ---------------------------------
-                next_obs, reward, terminated, truncated, info = self.env.step(action)
+                if not is_zigzag_zone:
+                    self.zigzag_trajectory = None
+                    action = self._get_action(self.env, processed_obs, mode='train', reset=reset, warmup=warmup)
+                    global_dir = None
+                    reset = False
+                
+                next_obs, reward, terminated, truncated, info = self.env.step(action=action, global_dir=global_dir)
                 next_processed_obs = self._pre_process_obs(next_obs, local_view_dim=LOCAL_VIEW_DIM)
                 
                 # Episode를 종료하는 조건: Coverage에 성공한 경우 or Episode가 조기 종료된 경우 (Collision 포함)
@@ -1260,12 +1063,95 @@ class DQNAgent:
                     done_ep = terminated or (truncated & (info['Steps'] >= self.train_cfg.warmup_ep_steps))
                 else:
                     done_ep = terminated or truncated
-                
                 done = terminated # Buffer에 done이라고 저장하는 조건: Collision & Coverage 성공
-                # ---------------------------------------------------------------------------
                 
-                # 메모리 저장
-                self.memory.append((processed_obs, action, reward, next_processed_obs, done)) # processed_obs의 map data는 np.uint8 형태, Memory 용량을 줄임
+                # Episode reward 계산
+                episode_reward += reward
+                cumulated_reward += reward * gamma_exp
+                gamma_exp *= self.train_cfg.gamma
+                
+                if not is_zigzag_zone:
+                    self.memory.append((processed_obs, action, reward, next_processed_obs, done)) # processed_obs의 map data는 np.uint8 형태, Memory 용량을 줄임
+                    
+                    if warmup:
+                        self.warmup_steps += 1
+                    else:
+                        self.no_warmup_steps += 1
+                        
+                    # First q_value와 cumulate reward 계산
+                    if first_q_value is None:
+                        map_tensor = torch.from_numpy(processed_obs['map']).float().to(self.device).unsqueeze(0)
+                        vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
+                        with torch.no_grad():
+                            q_values = self.policy_net(map_tensor, vec_tensor) # Shape: (1, action_space)
+                            first_q_value = q_values[0, action].item()
+                
+                
+                    # 학습 수행
+                    if not warmup and self.no_warmup_steps % self.train_cfg.policy_update == 0:
+                        batch_indices = self.train_rng.choice(len(self.memory), size=self.train_cfg.batch_size, replace=False)
+                        batch = [self.memory[i] for i in batch_indices]
+                        
+                        # batch 개별 요소의 구조: (processed_obs, action, reward, next_processed_obs, done)
+                        ms_b = torch.from_numpy(np.array([b[0]['map'] for b in batch])).float().to(self.device)     # Map state: (B, 3, 51, 51)
+                        vs_b = torch.from_numpy(np.array([b[0]['vec'] for b in batch])).float().to(self.device)     # Vector state: (B, 12)
+                        a_b = torch.LongTensor([b[1] for b in batch]).unsqueeze(1).to(self.device)                  # Action: (B, 1)
+                        r_b = torch.FloatTensor([b[2] for b in batch]).unsqueeze(1).to(self.device)                 # Reward: (B, 1)
+                        nms_b = torch.from_numpy(np.array([b[3]['map'] for b in batch])).float().to(self.device)    # Next map state: (B, 3, 51, 51)
+                        nvs_b = torch.from_numpy(np.array([b[3]['vec'] for b in batch])).float().to(self.device)    # Next vector state: (B, 12)
+                        d_b = torch.FloatTensor([b[4] for b in batch]).unsqueeze(1).to(self.device)                 # Done: (B, 1)
+                        
+                        # Q(s, a) 계산
+                        if self.train_cfg.use_noisy:
+                            self.policy_net.reset_noise()
+                        curr_q = self.policy_net(ms_b, vs_b).gather(dim=1, index=a_b) # Shape: (B, 4) -> (B, 1)
+                        
+                        # Target Q 계산
+                        with torch.no_grad():
+                            if self.train_cfg.use_noisy and self.train_cfg.target_with_noisy:
+                                self.target_net.reset_noise()
+                                
+                            if self.train_cfg.double_dqn: # Double DQN을 사용
+                                next_q_target_b = self.policy_net(nms_b, nvs_b) # 다음 state에 대한 Q-value를 얻음. Shape: (B, 4)
+                                next_a_b = next_q_target_b.max(dim=1)[1].unsqueeze(1) # Shape: (B, 1)
+                                next_q = self.target_net(nms_b, nvs_b).gather(dim=1, index=next_a_b) # Shape: (B, 1)
+                            else: 
+                                next_q = self.target_net(nms_b, nvs_b).max(dim=1)[0].unsqueeze(1) # Shape: (B, 1) (torch.max에 dimension을 지정하면 최댓값 tensor와 indices tensor를 tuple로 반환하기 때문에 [0]이 필요)
+                            
+                            target_q = r_b + (1 - d_b) * self.train_cfg.gamma * next_q
+                        
+                        # Loss 계산 후 parameter update
+                        loss_func = nn.HuberLoss(delta=1.0)
+                        loss = loss_func(curr_q, target_q.detach())
+                        self.optimizer.zero_grad()
+                        loss.backward()
+                        
+                        # Gradient clipping: gradient 폭주 방지
+                        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
+                        
+                        # Weight update
+                        self.optimizer.step()
+                        
+                        # TensorBoard 또는 wandb 기록
+                        sigma_logs = self.policy_net.get_sigma_data()
+                        if self.tb_writer:
+                            self.tb_writer.add_scalar("Train/Loss", loss.item(), self.total_steps)
+                            self.tb_writer.add_scalar("Train/Q_value_mean", curr_q.mean().item(), self.total_steps)
+                        if self.wandb_run:
+                            self.wandb_run.log({"Train/Loss": loss.item(),
+                                                "Train/Q_value_mean": curr_q.mean().item(), **sigma_logs}, step=self.total_steps)
+                        if self.args.use_vessl:
+                            vessl.log(step=self.total_steps, 
+                                            payload={"Train/Loss": loss.item(), 
+                                                        "Train/Q_value_mean": curr_q.mean().item()})
+                            
+                    # Target Network 업데이트
+                    if not warmup and self.no_warmup_steps % self.train_cfg.target_update == 0:
+                        self.target_net.load_state_dict(self.policy_net.state_dict())
+                    
+                # Episode 수 저장
+                if self.wandb_run:
+                    self.wandb_run.log({"Train/Episodes": episode}, step=self.total_steps)
                 
                 # State update
                 processed_obs = next_processed_obs
@@ -1273,80 +1159,6 @@ class DQNAgent:
                 # info update
                 last_info = info
                 
-                # Episode reward 계산
-                episode_reward += reward
-                
-                # First q_value와 cumulate reward 계산
-                if first_q_value is None:
-                    map_tensor = torch.from_numpy(processed_obs['map']).float().to(self.device).unsqueeze(0)
-                    vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
-                    with torch.no_grad():
-                        q_values = self.policy_net(map_tensor, vec_tensor) # Shape: (1, action_space)
-                        first_q_value = q_values[0, action].item()
-                cumulated_reward += reward * gamma_exp
-                gamma_exp *= self.train_cfg.gamma
-                
-                # 학습 수행
-                if not warmup and self.no_warmup_steps % self.train_cfg.policy_update == 0:
-                    batch_indices = self.train_rng.choice(len(self.memory), size=self.train_cfg.batch_size, replace=False)
-                    batch = [self.memory[i] for i in batch_indices]
-                    
-                    # batch 개별 요소의 구조: (processed_obs, action, reward, next_processed_obs, done)
-                    ms_b = torch.from_numpy(np.array([b[0]['map'] for b in batch])).float().to(self.device)     # Map state: (B, 3, 51, 51)
-                    vs_b = torch.from_numpy(np.array([b[0]['vec'] for b in batch])).float().to(self.device)     # Vector state: (B, 12)
-                    a_b = torch.LongTensor([b[1] for b in batch]).unsqueeze(1).to(self.device)                  # Action: (B, 1)
-                    r_b = torch.FloatTensor([b[2] for b in batch]).unsqueeze(1).to(self.device)                 # Reward: (B, 1)
-                    nms_b = torch.from_numpy(np.array([b[3]['map'] for b in batch])).float().to(self.device)    # Next map state: (B, 3, 51, 51)
-                    nvs_b = torch.from_numpy(np.array([b[3]['vec'] for b in batch])).float().to(self.device)    # Next vector state: (B, 12)
-                    d_b = torch.FloatTensor([b[4] for b in batch]).unsqueeze(1).to(self.device)                 # Done: (B, 1)
-                    
-                    # Q(s, a) 계산
-                    if self.train_cfg.use_noisy:
-                        self.policy_net.reset_noise()
-                    curr_q = self.policy_net(ms_b, vs_b).gather(dim=1, index=a_b) # Shape: (B, 4) -> (B, 1)
-                    
-                    # Target Q 계산
-                    with torch.no_grad():
-                        if self.train_cfg.use_noisy and self.train_cfg.target_with_noisy:
-                            self.target_net.reset_noise()
-                            
-                        if self.train_cfg.double_dqn: # Double DQN을 사용
-                            next_q_target_b = self.policy_net(nms_b, nvs_b) # 다음 state에 대한 Q-value를 얻음. Shape: (B, 4)
-                            next_a_b = next_q_target_b.max(dim=1)[1].unsqueeze(1) # Shape: (B, 1)
-                            next_q = self.target_net(nms_b, nvs_b).gather(dim=1, index=next_a_b) # Shape: (B, 1)
-                        else: 
-                            next_q = self.target_net(nms_b, nvs_b).max(dim=1)[0].unsqueeze(1) # Shape: (B, 1) (torch.max에 dimension을 지정하면 최댓값 tensor와 indices tensor를 tuple로 반환하기 때문에 [0]이 필요)
-                        
-                        target_q = r_b + (1 - d_b) * self.train_cfg.gamma * next_q
-                    
-                    # Loss 계산 후 parameter update
-                    loss_func = nn.HuberLoss(delta=1.0)
-                    loss = loss_func(curr_q, target_q.detach())
-                    self.optimizer.zero_grad()
-                    loss.backward()
-                    
-                    # Gradient clipping: gradient 폭주 방지
-                    torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
-                    
-                    # Weight update
-                    self.optimizer.step()
-                    
-                    # TensorBoard 또는 wandb 기록
-                    sigma_logs = self.policy_net.get_sigma_data()
-                    if self.tb_writer:
-                        self.tb_writer.add_scalar("Train/Loss", loss.item(), self.total_steps)
-                        self.tb_writer.add_scalar("Train/Q_value_mean", curr_q.mean().item(), self.total_steps)
-                    if self.wandb_run:
-                        self.wandb_run.log({"Train/Loss": loss.item(),
-                                            "Train/Q_value_mean": curr_q.mean().item(), **sigma_logs}, step=self.total_steps)
-                    if self.args.use_vessl:
-                        vessl.log(step=self.total_steps, 
-                                           payload={"Train/Loss": loss.item(), 
-                                                    "Train/Q_value_mean": curr_q.mean().item()})
-                        
-                # Target Network 업데이트
-                if not warmup and self.no_warmup_steps % self.train_cfg.target_update == 0:
-                    self.target_net.load_state_dict(self.policy_net.state_dict())
                 # ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
             
             # log로 보낼 info data를 얻음
@@ -1366,7 +1178,7 @@ class DQNAgent:
                 self.wandb_run.log({"Stats/Episode_reward": episode_reward,
                                     "Stats/Cumulated_reward": cumulated_reward,
                                     "Stats/First_Q_value": first_q_value,
-                                    "Stats/Difference_btw_first_Q_and_Cum_Q": first_q_value - cumulated_reward,
+                                    "Stats/Difference_btw_first_Q_and_Cum_Q": first_q_value - cumulated_reward if first_q_value is not None else None,
                                     "Stats/Coverage_rate": coverage,
                                     "Stats/Collision_count": ep_collision,
                                     "Stats/overlap_percent": overlap_percent,
@@ -1388,6 +1200,7 @@ class DQNAgent:
                 
             # Validation 수행
             if not warmup and episode % self.train_cfg.valid_freq == 0:
+                print("Validation...")
                 self._validation(episode)
             
             # Map 기록 저장
@@ -1415,12 +1228,12 @@ class DQNAgent:
         
         condition_results = {} # Map condition 별로 test 결과를 저장하기 위한 dictionary
         
-        maps_folder = self.args.map_save_dir # Map을 저장한 폴더
+        maps_folder = os.path.join(self.args.map_save_dir, 'test') # Map을 저장한 폴더
         maps = None                          # Map file 이름
         map_num = self.args.test_map_num
         if use_maps_folder:
-            if os.path.isdir(self.args.map_save_dir):
-                maps = sorted([f for f in os.listdir(self.args.map_save_dir) if f.endswith('.npy')])
+            if os.path.isdir(maps_folder):
+                maps = sorted([f for f in os.listdir(maps_folder) if f.endswith('.npy')])
                 if len(maps) > 0:
                     print(f"There is {len(maps)} map files for testing.")
                     map_num = len(maps)

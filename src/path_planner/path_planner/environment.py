@@ -110,6 +110,9 @@ class CoverageEnv(gym.Env):
         self.fig = Figure()
         self.canvas = FigureCanvasAgg(self.fig)
         # ----------------------------------------------------
+        
+        # FIXME: 일단 여기에 둔 변수
+        self.cleaned_segment: np.ndarray | None = None
     
     def reset(self, *, seed=None, map_config: MapConfigSchema | None = None):
         """
@@ -138,6 +141,9 @@ class CoverageEnv(gym.Env):
         eff_H = self.map_layers.map_info.eff_H
         eff_W = self.map_layers.map_info.eff_W
         self.dir = self._get_init_dir(self.pos, (eff_H, eff_W))
+        
+        # FIXME:
+        self.cleaned_segment = np.zeros((self.map_layers.map_info.H, self.map_layers.map_info.W), dtype=np.uint8)
         
         # 로봇이 (cx, cy)로 이동했을 때 로봇이 cover한 영역, coverage 수치 등을 update
         self.map_layers.update_map_layers(*self.pos)
@@ -183,6 +189,7 @@ class CoverageEnv(gym.Env):
             nx, ny = self.get_next_pos(self.dir, action=0) # self.dir를 바꾼 뒤 action 0 수행하여 해당 방향으로 이동
         else: # DQN network로 얻은 action으로 이동하는 경우
             nx, ny = self.get_next_pos(self.dir, action)
+            self.dir = self._get_all_dir_indices(self.dir)[action] # 방향 update
         
         collided, new_cleaned_degree, revisit_degree = self.map_layers.update_map_layers(nx, ny)
             
@@ -202,7 +209,10 @@ class CoverageEnv(gym.Env):
             reward -= revisit_degree * self.cfg.cleaned_penalty
             
         # 4. Turn penalty
-        ang_diff_coeff = abs(self.action_diridx[action]) / ANG_SEG_NUM    # 90도 회전: 1.0, 180도 회전: 2.0
+        if global_dir is not None:
+            ang_diff_coeff = 0.0  # global_dir 이동(zigzag 등)은 action 기반 회전 패널티 대상이 아님
+        else:
+            ang_diff_coeff = abs(self.action_diridx[action]) / ANG_SEG_NUM    # 90도 회전: 1.0, 180도 회전: 2.0
         reward -= ang_diff_coeff * self.cfg.turn_penalty
         
         # 5. Complete reward
@@ -215,7 +225,7 @@ class CoverageEnv(gym.Env):
             collision = True
             self.collision_count += 1
             nx, ny = cx, cy # 충돌이 일어나면 로봇을 움직이지 않음
-        self.dir = self._get_all_dir_indices(self.dir)[action] # 방향 update
+        
         self.pos = (nx, ny)
         ############################################################################
         
@@ -303,8 +313,8 @@ class CoverageEnv(gym.Env):
             step_num (int, optional): _description_. Defaults to 1.
         """
         
-        if len(self.traj) <= step_num + 1:
-            print(f"Cannnot backstep {step_num} steps. Only {len(self.traj)-1} steps are available.")
+        if len(self.env_history) <= step_num + 1:
+            print(f"Cannnot backstep {step_num} steps. Only {len(self.env_history)-1} steps are available.")
             return self._get_obs()
         
         while step_num > 0:
@@ -321,6 +331,31 @@ class CoverageEnv(gym.Env):
     
     def is_collide(self, cx: float, cy: float) -> bool:
         return self.map_layers.collides(cx, cy)
+    
+    
+    def mark_current_segment(self):
+        cx, cy = float_to_int_coord(*self.pos)
+        mode_map = self.map_layers.mode_map
+        H, W = mode_map.shape
+
+        if not (0 <= cx < W and 0 <= cy < H) or mode_map[cy, cx] != 0:
+            return
+
+        # 이미 이 구역을 마킹 중인지 체크하기 위해 cleaned_segment 확인
+        # 만약 이미 1로 칠해진 곳이라면 굳이 BFS를 또 돌릴 필요가 없음
+        if self.cleaned_segment[cy, cx] == 1:
+            return
+
+        queue = deque([(cx, cy)])
+        self.cleaned_segment[cy, cx] = 1
+        while queue:
+            x, y = queue.popleft()
+            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < W and 0 <= ny < H:
+                    if mode_map[ny, nx] == 0 and self.cleaned_segment[ny, nx] == 0:
+                        self.cleaned_segment[ny, nx] = 1
+                        queue.append((nx, ny))
     
 
     @property
@@ -640,6 +675,10 @@ class CoverageEnv(gym.Env):
         
         img_array = self.get_visualized_img(img_choice)
         display_image(img_array)
+    
+    def is_zigzag_zone(self):
+        cx, cy = float_to_int_coord(*self.pos)
+        return self.map_layers.mode_map[cy, cx] == 0
             
 
 if __name__ == "__main__":

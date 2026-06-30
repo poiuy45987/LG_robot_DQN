@@ -235,7 +235,7 @@ class EnvConfig:
     max_no_progress_steps_final: int = 500
     target_coverage: float = 0.95
     final_coverage_thres: float = 0.90
-    stack_steps: int = 3 # Map의 observation data의 step 수
+    stack_steps: int = 1 # Map의 observation data의 step 수
     
     # Reward function parameter (footprint-based)
     uncleaned_reward: float = 1.0

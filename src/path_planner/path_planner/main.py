@@ -25,8 +25,8 @@ def parse_args():
     # model_name: 저장할 model 이름 또는 test시 loading할 model 이름. 
     #             이 모델의 학습이 끝나지 않았을 경우, model_name을 가지고 checkpoint를 탐색한 뒤 최신 checkpoint부터 
     #             학습을 재개함.
-    parser.add_argument('--model_dir', type=str, default='src/robot_vacuum_redqn/robot_vacuum_redqn/models', help='Model file name for saving or loading')
-    parser.add_argument('--tb_save_dir', type=str, default='src/robot_vacuum_redqn/robot_vacuum_redqn/logs', help='Tensorboard save directory')
+    parser.add_argument('--model_dir', type=str, default='src/path_planner/path_planner/models', help='Model file name for saving or loading')
+    parser.add_argument('--tb_save_dir', type=str, default='src/path_planner/path_planner/logs', help='Tensorboard save directory')
     parser.add_argument('--pre_model_name', type=str, default=None, help='Pre-trained model file name for continued training')
     parser.add_argument('--model_name', type=str, default='model.pth', help='Model file name for saving or loading')
     parser.add_argument('--best_traj_img_name', type=str, default='best_coverage_path.png', help='Best path image file name')

@@ -464,8 +464,8 @@ class MapGenerator:
                     )
                     break # 의자 배치까지 완료했으면 책상 배치를 그만 시도
             
-            else:
-                print(f"Table {table_num+1}: Failed to place a table after max trials.")
+            #else:
+                #print(f"Table {table_num+1}: Failed to place a table after max trials.")
                         
         # 고밀도 환경 조성을 위해 작은 장애물을 더 배치
         window_size = self.cfg.window_size

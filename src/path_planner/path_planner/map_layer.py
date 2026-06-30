@@ -373,11 +373,11 @@ class MapLayers():
         # 1. 로봇이 맵을 벗어나거나 충돌하는 방향으로 움직일 때, parameter들을 계산하지 않음.
         # 중심 좌표가 맵을 벗어나는 경우
         if not self._in_bounds_center(cx, cy):
-            return new_cleaned_num, True, new_cleaned_grid_indices_curr_step, revisit_degree
-        
+            return True, new_cleaned_degree, revisit_degree, new_cleaned_num, new_cleaned_grid_indices_curr_step
+
         # 로봇이 장애물과 충돌하는 경우
         if self.collides(cx, cy):
-            return new_cleaned_num, True, new_cleaned_grid_indices_curr_step, revisit_degree
+            return True, new_cleaned_degree, revisit_degree, new_cleaned_num, new_cleaned_grid_indices_curr_step
         
         # 2. Parameter를 계산하기 위한 indices 정보 계산
         # xs, ys: 현재 로봇이 cover하고 있는 grid indices
