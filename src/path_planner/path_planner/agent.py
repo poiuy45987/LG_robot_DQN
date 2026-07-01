@@ -69,6 +69,7 @@ class DQNAgent:
         self.map_config_combinations = list(product(levels, eff_sizes_cm))
         self.map_config_generator = cycle(self.map_config_combinations)
         
+        
         # Train과 관련된 instance 변수는 mode가 train일 때만 생성
         if args.mode == 'train':
             
@@ -422,18 +423,19 @@ class DQNAgent:
         vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
         state = {'map': map_tensor, 'vec': vec_tensor}
         action_RL = self._get_RL_action(state, mode, action_mask) # Policy network를 통과시켜서 얻은 action
+        action_masking = self._decide_action_masking(env, action_RL, mode, reset)
         # RL policy와 heuristic policy 중 무엇을 사용할지 결정
-        if mode == 'train' and (warmup or self.train_cfg.use_heuristic) and self._decide_action_masking(env, action_RL, mode, reset): # Heuristic action을 사용
-            
+        # Heuristic action을 사용
+        if env.is_zigzag_zone() or (mode == 'train' and (warmup or self.train_cfg.use_heuristic) and action_masking):
             # action_RL을 수행: next_state, reward, terminated 및 truncated 여부 등을 받음.
             # environment 내에서 trajectory의 변화는 없지만, replay buffer에는 transition data를 저장함.
             # 수행한 뒤, action을 수행하기 전의 환경으로 돌아감.
-            self.num_heuristic += 1
-            
-            next_obs, reward, terminated, truncated, info = env.step(action_RL)
-            next_processed_obs = self._pre_process_obs(next_obs, local_view_dim=LOCAL_VIEW_DIM)
-            self.memory.append((processed_obs, action_RL, reward, next_processed_obs, terminated)) # processed_obs의 map data는 np.uint8 형태, Memory 용량을 줄임
-            env.one_step_back()
+            if mode == 'train':
+                self.num_heuristic += 1
+                next_obs, reward, terminated, truncated, info = env.step(action_RL)
+                next_processed_obs = self._pre_process_obs(next_obs, local_view_dim=LOCAL_VIEW_DIM)
+                self.memory.append((processed_obs, action_RL, reward, next_processed_obs, terminated)) # processed_obs의 map data는 np.uint8 형태, Memory 용량을 줄임
+                env.one_step_back()
             
             return self._get_heuristic_action(env) # Heuristic action을 return
         
@@ -496,7 +498,7 @@ class DQNAgent:
                     parent[next_pos] = curr_pos
                     queue.append(next_pos)
                 
-                if env.map_layers.has_uncleaned_grid(*next_pos): # 새로운 grid를 밟을 수 있는 위치를 발견하면 그 위치로 이동하는 경로를 생성
+                if not env.is_zigzag_zone(*next_pos) and env.map_layers.has_uncleaned_grid(*next_pos): # 새로운 grid를 밟을 수 있는 위치를 발견하면 그 위치로 이동하는 경로를 생성
                     self._get_dijkstra_traj_from_parent(parent, next_pos)
                     next_pos = self.dijkstra_traj.pop(0)
                     next_dir = env.get_dir_from_next_pos(next_pos)
@@ -711,8 +713,8 @@ class DQNAgent:
         # Validation 결과 출력
         print(f"[Validation] Episode {episode}: \n"
               f"\tCoverage Mean = {coverage_mean*100:.2f}%\n"
-              f"\tOverlap Rate Mean = {overlap_percent_mean*100:.2f}%\n"
-              f"\tCleaning Time Mean = {cleaning_time_mean/60:.2f} min")
+              f"\tOverlap Rate Mean = {overlap_percent_mean:.2f}%\n"
+              f"\tCleaning Time Mean = {cleaning_time_mean:.2f} min")
             
         self.policy_net.train() # train mode로 전환
 

@@ -676,8 +676,10 @@ class CoverageEnv(gym.Env):
         img_array = self.get_visualized_img(img_choice)
         display_image(img_array)
     
-    def is_zigzag_zone(self):
-        cx, cy = float_to_int_coord(*self.pos)
+    def is_zigzag_zone(self, cx: float = None, cy: float = None):
+        if cx is None or cy is None:
+            cx, cy = self.pos
+        cx, cy = float_to_int_coord(cx, cy)
         return self.map_layers.mode_map[cy, cx] == 0
             
 
