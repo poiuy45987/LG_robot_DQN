@@ -14,3 +14,6 @@ __pycache__/
 
 # Vessl output files
 /output/
+
+# Simulation files
+lgsim.tar.gz
