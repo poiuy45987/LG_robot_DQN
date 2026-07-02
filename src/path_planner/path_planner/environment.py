@@ -204,9 +204,11 @@ class CoverageEnv(gym.Env):
             reward -= self.cfg.obstacle_penalty            
         else:
             # 3. Cover reward and Cleaned grid penalty
-            reward += self.cfg.uncleaned_reward * new_cleaned_degree
-            reward += self.coverage * self.cfg.step_penalty # 새로운 grid를 cover하면 step_penalty를 완화
-            reward -= revisit_degree * self.cfg.cleaned_penalty
+            if new_cleaned_degree > 0:
+                reward += self.cfg.uncleaned_reward * new_cleaned_degree
+                reward += self.coverage * self.cfg.step_penalty # 새로운 grid를 cover하면 step_penalty를 완화
+            else:
+                reward -= revisit_degree * self.cfg.cleaned_penalty
             
         # 4. Turn penalty
         if global_dir is not None:

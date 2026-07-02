@@ -330,7 +330,8 @@ class MapLayers():
             self.coverable = compute_coverable_cells_from_reachable(self.obstacles, self.reachable, self.robot_mask_offsets)
             self.total_coverable_area = int(self.coverable.sum(dtype=np.int64)) # Cover할 수 있는 영역의 넓이
             coverable_area_rate = self.total_coverable_area / (eff_H * eff_W) # coverable_area_rate이 너무 낮으면 맵을 재생성해야 함.
-            
+            print(eff_H * eff_W)
+            print(self.total_coverable_area)
             if coverable_area_rate >= 0.5:
                 return (float(start_x), float(start_y))
             

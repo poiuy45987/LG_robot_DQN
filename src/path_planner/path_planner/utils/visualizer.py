@@ -124,6 +124,37 @@ def visualize_saved_map(map_file_path: str):
     display_image(map_img)
 
 
+def visualize_mode_map(map_file_path: str):
+    """
+    시각화하고 싶은 map의 파일 이름을 입력하면, 이를 시각화해주는 method. mode에 train 또는 test를 입력하여
+    해당 map이 train용인지 test용인지 적음.
+
+    Args:
+        map_folder_path (str): map 파일이 저장된 폴더 경로
+        map_file_name (str): map 파일 이름
+    """
+
+    if not os.path.exists(map_file_path):
+        print(f"Error: {map_file_path} 파일이 존재하지 않습니다.")
+        return
+    
+    from path_planner.map_generator import ObstacleMap
+    map_obj = ObstacleMap.load_from_file(map_file_path)
+    obstacles = map_obj.obs_map
+    map_file_name = os.path.basename(map_file_path)
+    from path_planner.utils.map_utils import generate_navigation_mode_map
+    mode_map = generate_navigation_mode_map(obstacles, crop_size=17, robot_diameter=17, stride=int(17/4),
+                                            eff_size=(map_obj.eff_H, map_obj.eff_W))
+    print(mode_map.shape)
+    obstacles[mode_map == 0] = 4
+    
+    # Map 시각화
+    fig = Figure()
+    canvas = FigureCanvasAgg(fig)
+    map_img = get_map_img(obstacles, fig=fig, canvas=canvas, map_name=map_file_name, visualized=True)
+    display_image(map_img)
+
+
 def visualize_mask(robot_mask: np.ndarray):
     plt.figure(figsize=(6, 6))
     plt.imshow(robot_mask, cmap='gray_r') # 0은 검정, 1은 흰색으로 표시

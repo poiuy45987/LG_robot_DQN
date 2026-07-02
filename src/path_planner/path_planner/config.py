@@ -225,7 +225,7 @@ class EnvConfig:
     # ---- environment params ----
     
     # Size 관련
-    robot_size: float = 32.0 # cm 단위
+    robot_size: float = 31.0 # cm 단위
     local_view: int = 200  # 단위: cm
     max_forward: int = 50 # 단위: cm
     

@@ -62,7 +62,7 @@ def generate_navigation_mode_map(
 
     # 1. 기본적으로 모든 영역을 DQN 구역(1)으로 초기화한 '새로운 제어 맵' 생성
     # 검증된 청정 구역만 Heuristic(0)으로 깎아 나가는 방식이 안전합니다.
-    mode_map = np.ones((H, W), dtype=np.int8)
+    mode_map = np.ones((obs.shape[0], obs.shape[1]), dtype=np.int8)
     
     y_indices = list(range(0, H - crop_size + 1, stride))
     if (H - crop_size) not in y_indices:
