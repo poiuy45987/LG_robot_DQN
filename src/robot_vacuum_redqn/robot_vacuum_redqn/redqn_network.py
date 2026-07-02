@@ -60,7 +60,8 @@ class CNN_ReDQN(nn.Module):
         super().__init__()
         
         # kwargs 처리
-        self.action_size = kwargs.get('action_size', 4)
+        self.action_size = kwargs.get('action_size', 16)
+        self.all_dir_num = kwargs.get('all_dir_num', 28)
         use_noisy = kwargs.get('use_noisy', False)
         self.local_view_dim = kwargs.get('local_view_dim', 51)
         self.do_normalize = kwargs.get('do_normalize', False)
@@ -96,7 +97,7 @@ class CNN_ReDQN(nn.Module):
         
         # Vector encoder
         self.vec_encoder = nn.Sequential(
-            nn.Linear(2+self.action_size*2+1, 32),
+            nn.Linear(2+self.all_dir_num+self.action_size+1, 32),
             nn.ReLU(),
             nn.Linear(32, 64),
             nn.ReLU(),

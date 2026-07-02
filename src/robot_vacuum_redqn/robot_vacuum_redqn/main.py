@@ -78,7 +78,10 @@ def parse_args():
     train_set_group.add_argument('--target_with_noisy', action='store_true', help='Use noisy layers in the target network') 
     
     # Action masking 설정
-    train_set_group.add_argument('--use_action_masking', action='store_true', help='Use action masking on training') 
+    train_set_group.add_argument('--use_action_masking', action='store_true', help='Use action masking on training')
+    
+    # Heuristic action 사용 여부
+    train_set_group.add_argument('--use_heuristic', action='store_true', help='Use heuristic action in training') 
     
     # State pre-processing 설정
     train_set_group.add_argument('--do_normalize', action='store_true', help='Do normalize on grid map data')

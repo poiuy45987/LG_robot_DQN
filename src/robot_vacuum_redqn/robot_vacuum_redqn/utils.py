@@ -1,4 +1,5 @@
 import numpy as np
+import math
 from PIL import Image
 import torch
 
@@ -31,8 +32,14 @@ def set_torch_seed(seed: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def float_to_int_coord(cx: float, cy: float) -> tuple[int, int]:
-    return int(cx+0.5), int(cy+0.5)
+def float_to_int_coord(cx, cy):
+    
+    # 단일 float 또는 int인 경우
+    if isinstance(cx, (int, float, np.floating, np.integer)):
+        return math.floor(cx+0.5), math.floor(cy+0.5)
+    
+    # list나 array인 경우
+    return np.floor(np.asarray(cx) + 0.5).astype(int), np.floor(np.asarray(cy) + 0.5).astype(int)
 
 
 def display_image(img_array: np.ndarray):

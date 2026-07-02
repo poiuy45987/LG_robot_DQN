@@ -3,7 +3,7 @@ import warnings
 
 DEFAULT_SEED = 42
 
-ACTION_NUM = 16
+ANG_SEG_NUM = 7 # 0~90도 사이 각도를 나누는 간격 수.
 CLEANED_MAP_MAX = 10
 TRACE_MAP_MAX = 50
 LOCAL_VIEW_DIM = 51
@@ -47,6 +47,9 @@ class TrainConfig: # Training과 관련된 설정들
     
     # --- Action masking ---
     use_action_masking: bool = False
+    
+    # --- Heuristic action ---
+    use_heuristic: bool = False
     
     # --- State pre-processing 및 Q-value ---
     do_normalize: bool = False
@@ -156,7 +159,7 @@ class EnvConfig:
     local_view: int = 200  # 단위: cm
     max_forward: int = 50 # 단위: cm
     robot_size: float = 30.0 # cm 단위
-    stack_steps: int = 3 # Map의 observation data의 step 수
+    stack_steps: int = 1 # Map의 observation data의 step 수
     
     # Reward function parameter (footprint-based)
     uncleaned_reward: float = 1.0
