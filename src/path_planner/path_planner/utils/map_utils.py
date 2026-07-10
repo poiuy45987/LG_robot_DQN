@@ -2,6 +2,7 @@ import math
 import numpy as np
 import cv2
 from collections import deque
+from dataclasses import dataclass
 
 
 def float_to_int_coord_1D(x):
@@ -163,42 +164,113 @@ def compute_coverable_cells_from_reachable(obstacles: np.ndarray, reachable: np.
 
 
 def crop_raw_patch(arr: np.ndarray, cx: float, cy: float, crop_radius: int, value: int | list | tuple = 0) -> np.ndarray:
-        """
-        전체 map data에서 local map data를 뽑는 method: 회전 변환 등 다른 변환은 하지 않고 raw patch만 뽑는 method
+    """
+    전체 map data에서 local map data를 뽑는 method: 회전 변환 등 다른 변환은 하지 않고 raw patch만 뽑는 method
 
-        Args:
-            arr (np.ndarray): 전체 map data, Shape: (C, H, W) or (H, W)
-            cx, cy (int): Local map 중심의 좌표
-            value (int | list | tuple, optional): 각 채널에서 local data를 뽑을 때 padding value. 채널 순서대로 지정
+    Args:
+        arr (np.ndarray): 전체 map data, Shape: (C, H, W) or (H, W)
+        cx, cy (int): Local map 중심의 좌표
+        value (int | list | tuple, optional): 각 채널에서 local data를 뽑을 때 padding value. 채널 순서대로 지정
 
-        Returns:
-            np.ndarray: Local map data, Shape: (C, H, W) or (H, W)
-        """
-        # 1. Crop할 크기 설정
-        cx, cy = float_to_int_coord(cx, cy)
-        px, py = cx+crop_radius, cy+crop_radius  # 전체 map에서 padding 추가 이후, (cx, cy)의 좌표 변화
-        
-        # 2. Padding 값 설정 및 padding 수행: 2차원 데이터일 때랑 3차원 데이터일 때 구별
-        if arr.ndim == 3:
-            num_channels = arr.shape[0]
-            if isinstance(value, (list, tuple)):
-                if len(value) != num_channels:
-                    raise ValueError(f"Length of value ({len(value)}) must match num_channels ({num_channels})")
-                pad_vals = value
-            else:
-                pad_vals = [value] * num_channels
-            arr = arr.transpose(1, 2, 0) # (C, H, W) -> (H, W, C) 변환
-        elif arr.ndim == 2:
-            assert isinstance(value, int)
+    Returns:
+        np.ndarray: Local map data, Shape: (C, H, W) or (H, W)
+    """
+    # 1. Crop할 크기 설정
+    cx, cy = float_to_int_coord(cx, cy)
+    px, py = cx+crop_radius, cy+crop_radius  # 전체 map에서 padding 추가 이후, (cx, cy)의 좌표 변화
+    
+    # 2. Padding 값 설정 및 padding 수행: 2차원 데이터일 때랑 3차원 데이터일 때 구별
+    if arr.ndim == 3:
+        num_channels = arr.shape[0]
+        if isinstance(value, (list, tuple)):
+            if len(value) != num_channels:
+                raise ValueError(f"Length of value ({len(value)}) must match num_channels ({num_channels})")
             pad_vals = value
         else:
-            raise ValueError(f"ERROR on _crop_patch(): Not support array dimension {arr.ndim}")
-        
-        padded = cv2.copyMakeBorder(
-            arr, crop_radius, crop_radius, crop_radius, crop_radius, 
-            cv2.BORDER_CONSTANT, value=pad_vals
-        )
-        
-        raw_patch = padded[py-crop_radius:py+crop_radius+1, px-crop_radius:px+crop_radius+1]
-        
-        return raw_patch
+            pad_vals = [value] * num_channels
+        arr = arr.transpose(1, 2, 0) # (C, H, W) -> (H, W, C) 변환
+    elif arr.ndim == 2:
+        assert isinstance(value, int)
+        pad_vals = value
+    else:
+        raise ValueError(f"ERROR on _crop_patch(): Not support array dimension {arr.ndim}")
+    
+    padded = cv2.copyMakeBorder(
+        arr, crop_radius, crop_radius, crop_radius, crop_radius, 
+        cv2.BORDER_CONSTANT, value=pad_vals
+    )
+    
+    raw_patch = padded[py-crop_radius:py+crop_radius+1, px-crop_radius:px+crop_radius+1]
+    
+    return raw_patch
+
+@dataclass(frozen=True)
+class BoundingBox:
+    x_min: int
+    x_max: int
+    y_min: int
+    y_max: int
+
+def get_eff_size_from_obs_map(obs: np.ndarray, BLANK: int=0) -> BoundingBox:
+    """
+    obs map에서 로봇 청소기가 움직일 수 있는 영역의 bounding box를 출력하는 함수
+
+    Args:
+        obs (np.ndarray): 장애물의 위치가 나타나 있는 map
+        BLANK (int, optional): 장애물이 없는 grid cell의 값. Defaults to 0.
+
+    Returns:
+        BoundingBox: x_min, x_max, y_min, y_max로 구성
+    """
+    has_blank_in_row = np.any(obs == BLANK, axis=1)  # Shape: (H,)
+    has_blank_in_col = np.any(obs == BLANK, axis=0)  # Shape: (W,)
+
+    if not np.any(has_blank_in_row):
+        return BoundingBox(0, 0, 0, 0)
+
+    # True인 indices만 추출
+    y_indices = np.flatnonzero(has_blank_in_row)
+    x_indices = np.flatnonzero(has_blank_in_col)
+
+    return BoundingBox(
+        x_min=x_indices[0].item(),
+        x_max=x_indices[-1].item(),
+        y_min=y_indices[0].item(),
+        y_max=y_indices[-1].item()
+    )
+    
+def crop_obstacle_area(obs_map: np.ndarray, robot_diameter: int, BLANK: int=0) -> np.ndarray:
+    """
+    obs_map에서 장애물이 존재하는 영역만 cropping하는 함수.
+    로봇 청소기가 장애물 주위를 자유롭게 움직일 수 있도록 로봇 청소기 지름만큼의 margin만 남기고 나머지 영역은 제거.
+
+    Args:
+        obs_map (np.ndarray): 장애물의 위치가 나타나 있는 map
+        robot_diameter (int): 로봇 청소기 지름
+        BLANK (int, optional): 장애물이 없는 grid cell의 값. Defaults to 0.
+
+    Returns:
+        np.ndarray: 장애물 영역만 남김 cropped map
+    """
+    bbox = get_eff_size_from_obs_map(obs_map, BLANK)
+    eff_obs_map = obs_map[bbox.y_min:bbox.y_max+1, bbox.x_min:bbox.x_max+1]
+    
+    has_obstacle_in_row = np.any(eff_obs_map != BLANK, axis=1)
+    has_obstacle_in_col = np.any(eff_obs_map != BLANK, axis=0)
+    
+    # 장애물이 전혀 없는 경우
+    if not np.any(has_obstacle_in_row):
+        return np.full((robot_diameter, robot_diameter), BLANK, dtype=obs_map.dtype)
+    
+    y_indices = np.flatnonzero(has_obstacle_in_row)
+    x_indices = np.flatnonzero(has_obstacle_in_col)
+    
+    H, W = eff_obs_map.shape
+    
+    y_min = max(0, y_indices[0]-robot_diameter)
+    y_max = min(H-1, y_indices[-1]+robot_diameter)
+    x_min = max(0, x_indices[0]-robot_diameter)
+    x_max = min(W-1, x_indices[-1]+robot_diameter)
+    
+    cropped_map = eff_obs_map[y_min:y_max+1, x_min:x_max+1]
+    return cropped_map.copy()

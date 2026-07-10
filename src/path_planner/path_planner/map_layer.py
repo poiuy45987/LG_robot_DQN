@@ -137,6 +137,7 @@ class MapLayers():
         self.cleaned = np.zeros((self.map_info.H, self.map_info.W), dtype=np.uint8)
         self.uncleaned = (self.coverable == 1).astype(np.uint8) 
         self.trace = np.zeros((self.map_info.H, self.map_info.W), dtype=np.uint8)
+        self.active_trace_indices = None
         
         # Map layer와 관련된 parameter 초기화
         self.coveraged_area = 0 # Cover한 영역의 grid 수
@@ -298,8 +299,8 @@ class MapLayers():
         eff_H = self.map_info.eff_H
         eff_W = self.map_info.eff_W
         
-        min_x, max_x = self.robot_half_size, eff_H-self.robot_half_size-1
-        min_y, max_y = self.robot_half_size, eff_W-self.robot_half_size-1
+        min_x, max_x = self.robot_half_size, eff_W-self.robot_half_size-1
+        min_y, max_y = self.robot_half_size, eff_H-self.robot_half_size-1
         
         x_range = np.arange(min_x, max_x+1)
         y_range = np.arange(min_y+1, max_y)

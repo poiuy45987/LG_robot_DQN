@@ -1,9 +1,6 @@
 from dataclasses import dataclass
 import numpy as np
 import math
-import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
-from matplotlib.patches import Patch
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 import os
@@ -11,6 +8,7 @@ import re
 import zipfile
 
 from path_planner.config import MapConfig, DEFAULT_SEED, MAP_SAVE_DIR, MAP_FILE_FORMAT, MAP_FILE_REGEX, GridCell
+from path_planner.utils.map_utils import BoundingBox, get_eff_size_from_obs_map, crop_obstacle_area
 from path_planner.utils.visualizer import get_map_img, display_image
 
 @dataclass
@@ -19,8 +17,7 @@ class ObstacleMap:
     level: int
     H: int
     W: int
-    eff_H: int
-    eff_W: int
+    eff_size: BoundingBox
     
     @classmethod
     def load_from_file(cls, file_path: str):
@@ -32,27 +29,24 @@ class ObstacleMap:
             
         obs_map = np.load(file_path)
         gd = match.groupdict()
-        grid_size = MapConfig().grid_size
-        
-        # 정수로 변환하여 복원 (height_m, width_m은 H, W가 있으므로 복원 시에는 패스 가능)
+
         return cls(
             obs_map=obs_map,
             level=int(gd['level']),
             H=obs_map.shape[0],
             W=obs_map.shape[1],
-            eff_H=int(int(gd['height_m'])*100 // grid_size), # 상황에 맞게 보정 가능
-            eff_W=int(int(gd['width_m'])*100 // grid_size)
+            eff_size=get_eff_size_from_obs_map(obs_map, GridCell.BLANK)
         )
     
 class MapGenerator:
     
-    def __init__(self, cfg: MapConfig = MapConfig(), rng: np.random.Generator = np.random.default_rng(DEFAULT_SEED)):
+    def __init__(self, map_cfg: MapConfig = MapConfig(), rng: np.random.Generator = np.random.default_rng(DEFAULT_SEED)):
         
-        self.cfg = cfg; self.rng = rng
+        self.cfg = map_cfg; self.rng = rng
         
         # MapGenerator가 만드는 map의 크기 설정: Grid 단위
-        self.H = self.cfg.H
-        self.W = self.cfg.W
+        self.init_H = self.cfg.init_H
+        self.init_W = self.cfg.init_W
     
     def _set_map_boundary(self, eff_size: tuple[float, float]) -> tuple[int, int]:
         """
@@ -66,17 +60,17 @@ class MapGenerator:
         """
         # 유효성 검증
         is_valid = True
-        if eff_size[0] > self.cfg.map_width:
-            print(f"Warning: Active area width ({eff_size[0]:.2f} cm) is larger than the map width ({self.cfg.map_width:.2f} cm)")
+        if eff_size[0] > self.cfg.init_map_width:
+            print(f"Warning: Active area width ({eff_size[0]:.2f} cm) is larger than the map width ({self.cfg.init_map_width:.2f} cm)")
             is_valid = False
-        if eff_size[1] > self.cfg.map_height:
-            print(f"Warning: Active area height ({eff_size[1]:.2f} cm) is larger than the map height ({self.cfg.map_height:.2f} cm)")
+        if eff_size[1] > self.cfg.init_map_height:
+            print(f"Warning: Active area height ({eff_size[1]:.2f} cm) is larger than the map height ({self.cfg.init_map_height:.2f} cm)")
             is_valid = False
 
         # 입력된 eff_size가 유효하면 grid 단위로 변환하여 반환
         if is_valid:
-            eff_W = min(int(eff_size[0] // self.cfg.grid_size), self.W)
-            eff_H = min(int(eff_size[1] // self.cfg.grid_size), self.H)
+            eff_W = min(int(eff_size[0] // self.cfg.grid_size), self.init_W)
+            eff_H = min(int(eff_size[1] // self.cfg.grid_size), self.init_H)
 
             self.obs[:, :] = GridCell.WALL
             self.obs[:eff_H, :eff_W] = GridCell.BLANK
@@ -105,12 +99,12 @@ class MapGenerator:
         grid_indices = []
         
         # 각 grid가 직사각형 영역에 속하는지 검사
-        # 검사 범위는 직사각형의 대각선 길이를 한 변의 길이롤 하는 정사각형
+        # 검사 범위는 직사각형의 대각선 길이를 한 변의 길이로 하는 정사각형
         r = math.sqrt(width**2 + height**2) / 2
         x_min = max(0, int(math.floor(cx - r)))
-        x_max = min(self.eff_W - 1, int(math.ceil(cx + r)))
+        x_max = min(self.init_W - 1, int(math.ceil(cx + r)))
         y_min = max(0, int(math.floor(cy - r)))
-        y_max = min(self.eff_H - 1, int(math.ceil(cy + r)))
+        y_max = min(self.init_H - 1, int(math.ceil(cy + r)))
 
         # 각 그리드 칸의 중심점이 직사각형 내부에 있는지 검사
         for ix in range(x_min, x_max + 1):
@@ -145,11 +139,11 @@ class MapGenerator:
         
         # 직사각형을 그릴 grid의 시작과 끝 좌표를 int 형식으로 얻음
         x_min = max(0, int(cx - width/2 + 0.5))
-        x_max = min(self.eff_W, int(cx + width/2 + 0.5))
+        x_max = min(self.init_W - 1, int(cx + width/2 + 0.5))
         y_min = max(0, int(cy - height/2 + 0.5))
-        y_max = min(self.eff_H, int(cy + height/2 + 0.5))
+        y_max = min(self.init_H - 1, int(cy + height/2 + 0.5))
         
-        grid_indices = [(x, y) for x in range(x_min, x_max) for y in range(y_min, y_max)]
+        grid_indices = [(x, y) for x in range(x_min, x_max + 1) for y in range(y_min, y_max + 1)]
         
         return grid_indices
 
@@ -334,8 +328,8 @@ class MapGenerator:
         y_min: int, y_max: int,
     ) -> bool:
         
-        x_min = max(0, x_min-1); x_max = min(self.eff_W, x_max+1)
-        y_min = max(0, y_min-1); y_max = min(self.eff_H, y_max+1)
+        x_min = max(0, x_min-1); x_max = min(self.init_W, x_max+1)
+        y_min = max(0, y_min-1); y_max = min(self.init_H, y_max+1)
         if np.all(self.obs[y_min:y_max, x_min:x_max] == GridCell.BLANK):
             return True
         return False
@@ -361,17 +355,17 @@ class MapGenerator:
                 ):
                     self.obs[y:y+obs_height, x:x+obs_width] = GridCell.MORE_OBS
   
-    def generate_house_like_obstacles(self, 
+    def generate_house_like_obstacles(self,
+                                      robot_diameter: int,
                                       level: int = 1,
-                                      eff_size: tuple[float, float] = None,
-                                      visualize: bool = False) -> ObstacleMap:
+                                      map_size: tuple[int, int] = None,
+                                      visualize: bool = False,) -> ObstacleMap:
         """
         책상, 의자, 작은 장애물 등 집과 비슷한 형태의 map을 형성하는 method
 
         Args:
-            level (int, optional): map 난이도. 1~3까지 설정 가능. 높을수록 장애물이 많음. Defaults to 1.
+            level (int, optional): map 난이도. 1~4까지 설정 가능. 높을수록 장애물이 많음. Defaults to 1.
             visualize (bool, optional): Map 시각화 시 책상, 의자, 작은 장애물을 구별해서 보여줄지 여부. Defaults to False.
-            eff_size (tuple[float, float], optional): Map의 공간을 제한적으로 사용하고 싶을 때, 사용할 영역의 (가로 길이, 세로 길이)를 cm 단위로 입력. Defaults to None.
 
         Returns:
             ObstacleMap: Obstacle이 배치된 grid map의 numpy 배열과 관련 정보.
@@ -380,20 +374,19 @@ class MapGenerator:
         min_table_size = self.cfg.min_table_size
         table_leg_size = self.cfg.table_leg_size
         
+        num_chairs = self.cfg.num_chairs_per_level.get(level, 4)
         max_chair_size = self.cfg.max_chair_size
         min_chair_size = self.cfg.min_chair_size
         chair_leg_size = self.cfg.chair_leg_size
         chair_spread = self.cfg.chair_spread
         
-        self.obs = np.zeros((self.H, self.W), dtype=np.uint8)
-        self.eff_H, self.eff_W = self.H, self.W
-        if eff_size is not None:
-            self.eff_W, self.eff_H = self._set_map_boundary(eff_size)
-            if self.eff_W is None:
-                self.eff_W = self.W
-            if self.eff_H is None:
-                self.eff_H = self.H
-        
+        if map_size is None:
+            self.obs = np.full((self.init_H, self.init_W), GridCell.BLANK, dtype=np.uint8)
+        else:
+            H, W = map_size
+            self.obs = np.full((H, W), GridCell.BLANK, dtype=np.uint8)
+        H, W = self.obs.shape
+
         # 책상과 의자를 배치
         table_centers = [] # 테이블 중심 좌표와 테이블 radius를 저장
         max_trial = 20000
@@ -411,12 +404,12 @@ class MapGenerator:
                 ))) + 2
                 
                 # 테이블의 중심 좌표 설정: (cx, cy)
-                if table_width >= self.eff_W - table_radius:
+                if table_width >= W - table_radius:
                     continue
-                if table_height >= self.eff_H - table_radius:
+                if table_height >= H - table_radius:
                     continue
-                cx = int(self.rng.integers(table_radius, self.eff_W-table_radius))
-                cy = int(self.rng.integers(table_radius, self.eff_H-table_radius))
+                cx = int(self.rng.integers(table_radius, W - table_radius))
+                cy = int(self.rng.integers(table_radius, H - table_radius))
                 cx += (table_width % 2) / 2.0
                 cy += (table_height % 2) / 2.0
                 
@@ -463,9 +456,6 @@ class MapGenerator:
                         chair_leg_size=chair_leg_size,
                     )
                     break # 의자 배치까지 완료했으면 책상 배치를 그만 시도
-            
-            #else:
-                #print(f"Table {table_num+1}: Failed to place a table after max trials.")
                         
         # 고밀도 환경 조성을 위해 작은 장애물을 더 배치
         window_size = self.cfg.window_size
@@ -473,12 +463,12 @@ class MapGenerator:
         small_obs_size_max = self.cfg.small_obs_size_max
         small_obs_size_min = self.cfg.small_obs_size_min
         
-        for x in range(0, self.eff_W, gap):
-            for y in range(0, self.eff_H, gap):
+        for x in range(0, W, gap):
+            for y in range(0, H, gap):
                 
                 obs_num = self.rng.integers(self.cfg.small_obs_num_per_window_min, self.cfg.small_obs_num_per_window_max+1)
-                x_last = min(self.eff_W, x+window_size)
-                y_last = min(self.eff_H, y+window_size)
+                x_last = min(W, x+window_size)
+                y_last = min(H, y+window_size)
                 obs_num = int(obs_num * (x_last-x)*(y_last-y) / (window_size**2))
                 self._add_small_obstacles_in_window(
                     x_min=x, x_max=x_last,
@@ -491,13 +481,15 @@ class MapGenerator:
         if not visualize:
             self.obs = (self.obs != 0).astype(np.uint8)
         
+        cropped_obs = crop_obstacle_area(self.obs, robot_diameter, GridCell.BLANK)
+        H, W = cropped_obs.shape
+        
         return ObstacleMap(
-            obs_map=self.obs,
+            obs_map=cropped_obs,
             level=level,
-            H=self.H,
-            W=self.W,
-            eff_H=self.eff_H,
-            eff_W=self.eff_W
+            H=H,
+            W=W,
+            eff_size=BoundingBox(x_min=0, x_max=W, y_min=0, y_max=H)
         )
         
 def generate_multiple_maps(mode: str = "test", 

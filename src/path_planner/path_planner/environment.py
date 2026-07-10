@@ -138,6 +138,8 @@ class CoverageEnv(gym.Env):
             raise RuntimeError("Failed to reset environment after 100 attempts.")
             
         # 초기 로봇이 바라보는 방향: 벽면의 반대 방향
+        self.H = self.map_layers.map_info.H
+        self.W = self.map_layers.map_info.W
         eff_H = self.map_layers.map_info.eff_H
         eff_W = self.map_layers.map_info.eff_W
         self.dir = self._get_init_dir(self.pos, (eff_H, eff_W))

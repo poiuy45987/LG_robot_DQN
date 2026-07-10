@@ -894,7 +894,8 @@ class DQNAgent:
             processed_obs = self._pre_process_obs(last_obs, local_view_dim=LOCAL_VIEW_DIM)
             
             # 발밑 격자가 0번 구역(Heuristic)인지 실시간 검사
-            is_zigzag_zone = env.is_zigzag_zone()
+            # is_zigzag_zone = env.is_zigzag_zone()
+            is_zigzag_zone = False
             if is_zigzag_zone:
                 self.dijkstra_traj = []
                 global_dir = self._get_zigzag_global_dir(env)
@@ -976,6 +977,7 @@ class DQNAgent:
     def train(self):
         
         assert self.args.mode == 'train'
+        
         
         # Policy network를 train mode로 설정
         self.policy_net.train()
@@ -1230,7 +1232,7 @@ class DQNAgent:
         
         condition_results = {} # Map condition 별로 test 결과를 저장하기 위한 dictionary
         
-        maps_folder = os.path.join(self.args.map_save_dir, 'test') # Map을 저장한 폴더
+        maps_folder = os.path.join(self.args.map_save_dir) # Map을 저장한 폴더
         maps = None                          # Map file 이름
         map_num = self.args.test_map_num
         if use_maps_folder:
@@ -1260,7 +1262,7 @@ class DQNAgent:
             level = self.test_env.map_layers.map_info.level
             
             # 딕셔너리 Key 생성 (예: (300, 300, 1) -> 3m x 3m, Level 1)
-            condition_key = (eff_H_grid, eff_W_grid, level)
+            condition_key = level
             if condition_key not in condition_results:
                 condition_results[condition_key] = {
                     'coverage': [],
@@ -1284,14 +1286,13 @@ class DQNAgent:
                 
                 # Reachable grid의 수가 전체 grid 수의 절반을 넘는 경우에만 저장
                 if self.test_env.map_layers.coverable.sum() >= self.test_env.H * self.test_env.W * 0.5:
-                    # 각 지표의 평균을 구하기 위해 현재 test에서의 지표값을 저장
-                    # coverage.append(cur_coverage)
-                    # overlap_percent.append(cur_overlap_percent)
-                    # cleaning_time.append(cur_cleaning_time)
-                    
                     condition_results[condition_key]['coverage'].append(cur_coverage)
                     condition_results[condition_key]['overlap_percent'].append(cur_overlap_percent)
                     condition_results[condition_key]['cleaning_time'].append(cur_cleaning_time)
+                    
+                    total_coverage.append(cur_coverage)
+                    total_overlap_percent.append(cur_overlap_percent)
+                    total_cleaning_time.append(cur_cleaning_time)
             
             # coverage_mean = np.mean(coverage) if coverage else 0.0
             # overlap_percent_mean = np.mean(overlap_percent) if overlap_percent else 0.0
@@ -1301,10 +1302,6 @@ class DQNAgent:
             #     f"    Coverage mean: {coverage_mean*100:.2f}%\n"
             #     f"    Cleaning time mean: {cleaning_time_mean/60:.2f} min\n"
             #     f"    Overlap rate mean: {overlap_percent_mean*100:.2f}%")
-
-            total_coverage.extend(coverage)
-            total_overlap_percent.extend(overlap_percent)
-            total_cleaning_time.extend(cleaning_time)
             
             reset_seed = None
         
@@ -1317,16 +1314,12 @@ class DQNAgent:
         
         # 가독성을 위해 정렬하여 순회
         for cond_key in sorted(condition_results.keys()):
-            h_cm, w_cm, level = cond_key
+            level = cond_key
             res = condition_results[cond_key]
-            
-            # FIXME: h_m를 반환할 수 있도록 수정. 지금은 표면상 잘 뜨도록 설정함.
-            # 미터 단위 가독성 변환 (예: 300cm -> 3m)
-            h_m, w_m = h_cm / 50 , w_cm / 50
             
             # 데이터 개수 체크
             if not res['coverage']:
-                print(f" ▶ Map Condition: {h_m:.1f}mx{w_m:.1f}m | Level {level} -> No Valid Data")
+                print(f" ▶ Map Condition: Level {level} -> No Valid Data")
                 continue
                 
             # 조건별 평균(mean) 및 표준편차(std) 계산
@@ -1334,7 +1327,7 @@ class DQNAgent:
             ov_m, ov_s = np.mean(res['overlap_percent']), np.std(res['overlap_percent'])
             time_m, time_s = np.mean(res['cleaning_time']), np.std(res['cleaning_time'])
             
-            print(f" ▶ Map Condition: {h_m:.1f}mx{w_m:.1f}m | Level {level} (Total tests: {len(res['coverage'])})")
+            print(f" ▶ Map Condition: Level {level} (Total tests: {len(res['coverage'])})")
             print(f"    - Coverage:     {cov_m*100:.2f}% ± {cov_s*100:.2f}%")
             print(f"    - Overlap Rate: {ov_m:.2f}% ± {ov_s:.2f}%")
             print(f"    - Cleaning Time: {time_m:.2f} min ± {time_s:.2f} min")

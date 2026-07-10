@@ -11,7 +11,7 @@ LOCAL_VIEW_DIM = 51
 
 MAP_SAVE_DIR = 'src/path_planner/path_planner/maps'
 MAP_FILE_FORMAT = "{mode}_map_{height_m}m{width_m}m_level{level}_{map_id:02d}.npy"
-MAP_FILE_REGEX = r"(?P<mode>\w+)_map_(?P<height_m>\d+)m(?P<width_m>\d+)m_level(?P<level>\d+)_(?P<map_id>\d+)"
+MAP_FILE_REGEX = r"(?P<mode>\w+)_map_L(?P<level>\d+)_(?P<map_id>\d+)"
 
 # Map을 시각화할 때 table, chair을 구별하기 위해 설정한 값
 # 실제로 훈련 또는 validation 과정에서 map을 생성할 때는 장애물을 전부 1로 바꿈
@@ -131,13 +131,13 @@ class MapConfig:
     
     # ---- house map params ----
     
-    grid_size: float = 2.0 # cm 단위
-    map_height: float = 400.0 # cm 단위
-    map_width: float = 400.0 # cm 단위
+    grid_size: float = 2.5 # cm 단위
+    init_map_height: float = 400.0 # cm 단위
+    init_map_width: float = 400.0 # cm 단위
     
     # Map 크기를 grid 단위로 변환
-    H: int = field(init=False)
-    W: int = field(init=False)
+    init_H: int = field(init=False)
+    init_W: int = field(init=False)
 
     # 모든 size는 cm 단위
     num_tables: int = 3
@@ -145,6 +145,13 @@ class MapConfig:
     min_table_size: float = 100.0
     table_leg_size: float = 10.0
 
+    num_chairs_per_level: dict = {
+        1: 3,
+        2: 4,
+        3: 6,
+        4: 6
+    }
+    
     chairs_per_table_min: int = 2
     chairs_per_table_max: int = 4
     max_chair_size: float = 45.0
@@ -178,7 +185,7 @@ class MapConfig:
         if self.small_obs_size_max < self.small_obs_size_min:
             raise ValueError(f"small_obs_size_max({self.small_obs_size_max}) is smaller than small_obs_size_min({self.small_obs_size_min}).")
         if self.small_obs_num_per_window_max < self.small_obs_num_per_window_min:
-            raise ValueError(f"small_obs_num_per_window_max({self.small_obs_num_per_window_max}) is smaller than small_obs_size_min({self.small_obs_num_per_window_min}).")
+            raise ValueError(f"small_obs_num_per_window_max({self.small_obs_num_per_window_max}) is smaller than small_obs_num_per_window_min({self.small_obs_num_per_window_min}).")
         
         # 2. 의자 및 책상 다리 두께 검사
         if self.table_leg_size*2 >= self.min_table_size:
@@ -189,19 +196,19 @@ class MapConfig:
             raise ValueError(f"chair_leg_size({self.chair_leg_size}) is too big. It should be smaller than {self.min_chair_size/2.0}.")
         
         # 3. 맵 크기 대비 grid, window 등의 size가 적절한지 검사
-        min_map_dim = min(self.map_height, self.map_width)
+        min_map_dim = min(self.init_map_height, self.init_map_width)
         if self.grid_size > min_map_dim:
-            raise ValueError(f"grid_size({self.grid_size}) is too big. It should be smaller than {min(self.map_height, self.map_width)}.")
+            raise ValueError(f"grid_size({self.grid_size}) is too big. It should be smaller than {min(self.init_map_height, self.init_map_width)}.")
         if self.window_size > min_map_dim:
-            raise ValueError(f"window_size({self.window_size}) is too big. It should be smaller than {min(self.map_height, self.map_width)}.")
+            raise ValueError(f"window_size({self.window_size}) is too big. It should be smaller than {min(self.init_map_height, self.init_map_width)}.")
     
     def __post_init__(self):
         
         self._validate_configs() # 정상적인 config가 들어왔는지 검사
         
         # ---- cm 단위로 들어온 size 값들을 grid 단위로 변환 ----
-        self.H = self._to_grid(self.map_height)
-        self.W = self._to_grid(self.map_width)
+        self.init_H = self._to_grid(self.init_map_height)
+        self.init_W = self._to_grid(self.init_map_width)
         
         self.max_table_size = self._to_grid(self.max_table_size)
         self.min_table_size = self._to_grid(self.min_table_size)
@@ -225,7 +232,7 @@ class EnvConfig:
     # ---- environment params ----
     
     # Size 관련
-    robot_size: float = 31.0 # cm 단위
+    robot_size: float = 36.0 # cm 단위
     local_view: int = 200  # 단위: cm
     max_forward: int = 50 # 단위: cm
     
@@ -249,13 +256,13 @@ class EnvConfig:
     @property
     def grid_size(self) -> float: return self.map_cfg.grid_size
     @property
-    def map_height(self) -> float: return self.map_cfg.map_height
+    def init_map_height(self) -> float: return self.map_cfg.init_map_height
     @property
-    def map_width(self) -> float: return self.map_cfg.map_width
+    def init_map_width(self) -> float: return self.map_cfg.init_map_width
     @property
-    def H(self) -> int: return self.map_cfg.H
+    def init_H(self) -> int: return self.map_cfg.init_H
     @property
-    def W(self) -> int: return self.map_cfg.W
+    def init_W(self) -> int: return self.map_cfg.init_W
     
     def _to_grid(self, value: float) -> int: return self.map_cfg._to_grid(value)
     def _make_odd(self, value: int) -> int: return self.map_cfg._make_odd(value)
@@ -275,11 +282,11 @@ class EnvConfig:
             warnings.warn(f"It is recommended that max_no_progress_steps_final({self.max_no_progress_steps_final}) is bigger than max_no_progress_steps({self.max_no_progress_steps}).")
         
         # 3. 맵 크기 대비 grid, window, robot 등의 size가 적절한지 검사
-        min_map_dim = min(self.map_height, self.map_width)
+        min_map_dim = min(self.init_map_height, self.init_map_width)
         if self.robot_size > min_map_dim:
-            raise ValueError(f"robot_size({self.robot_size}) is too big. It should be smaller than {min(self.map_height, self.map_width)}.")
+            raise ValueError(f"robot_size({self.robot_size}) is too big. It should be smaller than {min(self.init_map_height, self.init_map_width)}.")
         if self.local_view > min_map_dim:
-            raise ValueError(f"local_view({self.local_view}) is too big. It should be smaller than {min(self.map_height, self.map_width)}.")
+            raise ValueError(f"local_view({self.local_view}) is too big. It should be smaller than {min(self.init_map_height, self.init_map_width)}.")
         
         # 4. Reward 수치 경고
         if self.uncleaned_reward < 0:
