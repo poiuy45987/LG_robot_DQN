@@ -1,4 +1,4 @@
 # LG_robot_DQN
-1. 수정 사항:
-- 초기 warmup episode: Episode 수가 적으면 적당히 heuristic으로 움직이게 함. -> 학습의 방향성 설정
-- Local view를 현재 로봇이 바라보는 방향에 맞게 회전시킴
+map_generator.py의 첫 번째 버전 저장용 branch
+다른 code에는 오류가 있을 수 있음.
+map_generator.py도 오류 검토가 되지 않은 상태이므로 오류가 있을 수 있음. 이 코드를 사용한다면 오류를 꼭 검토하길 바람.
