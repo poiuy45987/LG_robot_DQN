@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field
 import warnings
 from enum import IntEnum
+from frozendict import frozendict
 
 DEFAULT_SEED = 42
 
@@ -10,7 +11,7 @@ TRACE_MAP_MAX = 50
 LOCAL_VIEW_DIM = 51
 
 MAP_SAVE_DIR = 'src/path_planner/path_planner/maps'
-MAP_FILE_FORMAT = "{mode}_map_{height_m}m{width_m}m_level{level}_{map_id:02d}.npy"
+MAP_FILE_FORMAT = "{mode}_map_{H}x{W}_level{level}_{map_id:02d}.npy"
 MAP_FILE_REGEX = r"(?P<mode>\w+)_map_L(?P<level>\d+)_(?P<map_id>\d+)"
 
 # Map을 시각화할 때 table, chair을 구별하기 위해 설정한 값
@@ -140,17 +141,24 @@ class MapConfig:
     init_W: int = field(init=False)
 
     # 모든 size는 cm 단위
-    num_tables: int = 3
+    num_tables: int = 1
     max_table_size: float = 200.0
     min_table_size: float = 100.0
     table_leg_size: float = 10.0
 
-    num_chairs_per_level: dict = {
+    num_chairs_per_level: frozendict = frozendict({
         1: 3,
         2: 4,
         3: 6,
         4: 6
-    }
+    })
+    
+    num_small_obs_per_level: frozendict = frozendict({
+        1: 2,
+        2: 3,
+        3: 4,
+        4: 5
+    })
     
     chairs_per_table_min: int = 2
     chairs_per_table_max: int = 4
@@ -308,6 +316,7 @@ class EnvConfig:
         
         self._validate_configs() # 정상적인 config가 들어왔는지 검사
         
+        # self.robot_size = self._make_odd(self._to_grid(self.robot_size))
         self.robot_size = self._make_odd(self._to_grid(self.robot_size))
         self.local_view = self._make_odd(self._to_grid(self.local_view))
         self.max_forward = self._to_grid(self.max_forward) # 각 방향으로의 여유 grid 수의 최댓값

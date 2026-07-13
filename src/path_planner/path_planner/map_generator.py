@@ -8,7 +8,15 @@ import re
 import zipfile
 
 from path_planner.config import MapConfig, DEFAULT_SEED, MAP_SAVE_DIR, MAP_FILE_FORMAT, MAP_FILE_REGEX, GridCell
-from path_planner.utils.map_utils import BoundingBox, get_eff_size_from_obs_map, crop_obstacle_area
+from path_planner.utils.map_utils import (
+    BoundingBox, 
+    get_eff_size_from_obs_map, 
+    crop_obstacle_area, 
+    get_rect_indices_for_big_rect, 
+    get_rect_indices_for_small_rect,
+    get_leg_indices,
+    get_circle_indices
+)
 from path_planner.utils.visualizer import get_map_img, display_image
 
 @dataclass
@@ -47,313 +55,6 @@ class MapGenerator:
         # MapGenerator가 만드는 map의 크기 설정: Grid 단위
         self.init_H = self.cfg.init_H
         self.init_W = self.cfg.init_W
-    
-    def _set_map_boundary(self, eff_size: tuple[float, float]) -> tuple[int, int]:
-        """
-        더 크기가 작은 map을 생성하기 위해 벽을 세우는 method
-
-        Args:
-            eff_size (tuple[float, float]): Map에서 사용할 영역의 (가로 길이, 세로 길이)를 cm 단위로 받음.
-
-        Returns:
-            tuple[int, int]: Map에서 사용할 영역의 (가로 길이, 세로 길이)를 grid 단위로 반환
-        """
-        # 유효성 검증
-        is_valid = True
-        if eff_size[0] > self.cfg.init_map_width:
-            print(f"Warning: Active area width ({eff_size[0]:.2f} cm) is larger than the map width ({self.cfg.init_map_width:.2f} cm)")
-            is_valid = False
-        if eff_size[1] > self.cfg.init_map_height:
-            print(f"Warning: Active area height ({eff_size[1]:.2f} cm) is larger than the map height ({self.cfg.init_map_height:.2f} cm)")
-            is_valid = False
-
-        # 입력된 eff_size가 유효하면 grid 단위로 변환하여 반환
-        if is_valid:
-            eff_W = min(int(eff_size[0] // self.cfg.grid_size), self.init_W)
-            eff_H = min(int(eff_size[1] // self.cfg.grid_size), self.init_H)
-
-            self.obs[:, :] = GridCell.WALL
-            self.obs[:eff_H, :eff_W] = GridCell.BLANK
-            
-            return eff_W, eff_H
-        
-        # 입력된 eff_size가 유효하지 않으면 None 반환
-        return None, None
-
-    # 직사각형을 좀 더 정확하게 그리는 방법
-    # Grid 크기가 충분히 작을 때 유용할 것이라고 생각
-    def _get_rect_indices_for_big_rect(
-        self, cx: float, cy: float, 
-        width: float, height: float, 
-        theta: float) -> list[tuple[int, int]]:
-        """
-        Grid map에서 직사각형을 그릴 때, 색칠할 grid의 indices를 출력하는 method
-
-        Args:
-            cx, cy: 그릴 직사각형의 중심 좌표
-            width, height: 그릴 직사각형의 가로, 세로 길이
-            theta: 직사각형이 반시계 방향으로 회전한 정도(rad 단위)
-        """
-        cos_t = math.cos(theta)
-        sin_t = math.sin(theta)
-        grid_indices = []
-        
-        # 각 grid가 직사각형 영역에 속하는지 검사
-        # 검사 범위는 직사각형의 대각선 길이를 한 변의 길이로 하는 정사각형
-        r = math.sqrt(width**2 + height**2) / 2
-        x_min = max(0, int(math.floor(cx - r)))
-        x_max = min(self.init_W - 1, int(math.ceil(cx + r)))
-        y_min = max(0, int(math.floor(cy - r)))
-        y_max = min(self.init_H - 1, int(math.ceil(cy + r)))
-
-        # 각 그리드 칸의 중심점이 직사각형 내부에 있는지 검사
-        for ix in range(x_min, x_max + 1):
-            for iy in range(y_min, y_max + 1):
-                # 그리드 칸의 중심점: (ix.5, iy.5)
-                # (dx, dy): 직사각형 중심점 (cx, cy)를 원점으로 봤을 때 grid 중심점의 좌표
-                dx = (ix + 0.5) - cx
-                dy = (iy + 0.5) - cy
-                
-                # 역회전 변환 (Rotated frame -> Local axis-aligned frame)
-                nx = dx * cos_t + dy * sin_t
-                ny = -dx * sin_t + dy * cos_t
-                
-                # 범위 판정 (부동소수점 오차 방지를 위해 아주 작은 값 1e-9 추가)
-                if abs(nx) <= (width / 2) + 1e-9 and abs(ny) <= (height / 2) + 1e-9:
-                    grid_indices.append((ix, iy))
-        
-        return grid_indices
-
-    def _get_rect_indices_for_small_rect(
-        self, cx: float, cy: float, 
-        width: float, height: float, 
-        theta: float) -> list[tuple[int, int]]:
-        """
-        Grid map에서 직사각형을 그릴 때, 색칠할 grid의 indices를 출력하는 method
-
-        Args:
-            cx, cy: 그릴 직사각형의 중심 좌표
-            width, height: 그릴 직사각형의 가로, 세로 길이
-            theta: 직사각형이 반시계 방향으로 회전한 정도(rad 단위)
-        """
-        
-        # 직사각형을 그릴 grid의 시작과 끝 좌표를 int 형식으로 얻음
-        x_min = max(0, int(cx - width/2 + 0.5))
-        x_max = min(self.init_W - 1, int(cx + width/2 + 0.5))
-        y_min = max(0, int(cy - height/2 + 0.5))
-        y_max = min(self.init_H - 1, int(cy + height/2 + 0.5))
-        
-        grid_indices = [(x, y) for x in range(x_min, x_max + 1) for y in range(y_min, y_max + 1)]
-        
-        return grid_indices
-
-    def _add_table_legs(
-        self, cx: float, cy: float,
-        table_width: int, table_height: int,
-        table_leg_size: int,
-        theta: float = 0.0,   # 회전 각도 (rad)
-    ) -> bool:
-        """_summary_
-
-        Args:
-            cx, cy (int): Table의 중심 좌표
-            table_row_size (int): Table의 가로 길이
-            table_col_size (int): Table의 세로 길이
-            table_leg_size (int, optional): Table 다리의 두께. Defaults to 2.
-            theta (float, optional): Table이 반시계 방향으로 회전한 각도. Defaults to 0.0.
-
-        Returns:
-            bool: Table 배치가 성공했는지 여부
-        """
-        # cx, cy: 테이블 중심 좌표, row_size 또는 col_size가 짝수인 경우 중심 위치로부터 약간 틀어져 있음
-        # 테이블 기본 다리 좌표 (local frame)
-        
-        # 테이블의 각도가 0 rad일 때 각 leg 중심의 상대적인 좌표
-        no_rotate_leg_centers = [
-            (-table_width/2.0 + table_leg_size/2.0, -table_height/2.0 + table_leg_size/2.0),
-            ( table_width/2.0 - table_leg_size/2.0, -table_height/2.0 + table_leg_size/2.0),
-            (-table_width/2.0 + table_leg_size/2.0,  table_height/2.0 - table_leg_size/2.0),
-            ( table_width/2.0 - table_leg_size/2.0,  table_height/2.0 - table_leg_size/2.0),
-        ]
-        
-        leg_grid_indices = []
-        
-        c = math.cos(theta)
-        s = math.sin(theta)
-
-        for px, py in no_rotate_leg_centers:
-            # (px, py): Table 중심을 원점으로 했을 때, table leg의 중심 위치
-            
-            # Table이 돌아간 각도 theta에 따라 (px, py)를 회전 s변환
-            rx = c * px - s * py
-            ry = s * px + c * py
-
-            # (x, y): Table leg 중심 위치의 global coordinate
-            x = cx + rx; y = cy + ry
-            
-            # Table 다리가 차지하는 grid의 indices를 얻음
-            if table_leg_size < 10:
-                indices = self._get_rect_indices_for_small_rect(x, y, table_leg_size, table_leg_size, theta)
-            else:
-                indices = self._get_rect_indices_for_big_rect(x, y, table_leg_size, table_leg_size, theta)
-            leg_grid_indices.extend(indices)
-        
-        if not leg_grid_indices:
-            return False
-        
-        leg_grid_indices_np = np.array(leg_grid_indices)
-        
-        # 장애물과 table 다리 위치가 겹치면 table을 배치하지 않음    
-        if not np.all(self.obs[leg_grid_indices_np[:, 1], leg_grid_indices_np[:, 0]] == GridCell.BLANK):
-            return False
-        
-        # 장애물이 겹치지 않으면 table을 배치
-        self.obs[leg_grid_indices_np[:, 1], leg_grid_indices_np[:, 0]] = GridCell.TABLE
-        
-        return True
-
-    def _add_chair_legs(
-        self, cx: int, cy: int,
-        chair_width: int, chair_height: int,
-        chair_leg_size: int = 1,
-        theta: float = 0.0,   # 회전 각도 (rad)
-    ) -> bool:
-        """_summary_
-
-        Args:
-            cx, cy (int): Chair의 중심 좌표
-            chair_width (int): Chair의 가로 길이
-            chair_height (int): Chair의 세로 길이
-            chair_leg_size (int, optional): Chair 다리의 두께. Defaults to 1.
-            theta (float, optional): Chair이 반시계 방향으로 회전한 각도. Defaults to 0.0.
-
-        Returns:
-            bool: Table 배치가 성공했는지 여부
-        """
-        # cx, cy: 테이블 중심 좌표, row_size 또는 col_size가 짝수인 경우 중심 위치로부터 약간 틀어져 있음
-        # 테이블 기본 다리 좌표 (local frame)
-        
-        # 테이블의 각도가 0 rad일 때 각 leg 중심의 상대적인 좌표
-        no_rotate_leg_centers = [
-            (-chair_width/2.0 + chair_leg_size/2.0, -chair_height/2.0 + chair_leg_size/2.0),
-            ( chair_width/2.0 - chair_leg_size/2.0, -chair_height/2.0 + chair_leg_size/2.0),
-            (-chair_width/2.0 + chair_leg_size/2.0,  chair_height/2.0 - chair_leg_size/2.0),
-            ( chair_width/2.0 - chair_leg_size/2.0,  chair_height/2.0 - chair_leg_size/2.0),
-        ]
-        
-        leg_grid_indices = []
-        
-        c = math.cos(theta)
-        s = math.sin(theta)
-
-        for px, py in no_rotate_leg_centers:
-            # (px, py): Table 중심을 원점으로 했을 때, table leg의 중심 위치
-            
-            # Table이 돌아간 각도 theta에 따라 (px, py)를 회전 변환
-            rx = c * px - s * py
-            ry = s * px + c * py
-
-            # (x, y): Table leg 중심 위치의 global coordinate
-            x = cx + rx; y = cy + ry
-            
-            # Table 다리가 차지하는 grid의 indices를 얻음
-            if chair_leg_size < 10:
-                indices = self._get_rect_indices_for_small_rect(x, y, chair_leg_size, chair_leg_size, theta)
-            else:
-                indices = self._get_rect_indices_for_big_rect(x, y, chair_leg_size, chair_leg_size, theta)
-            leg_grid_indices.extend(indices)
-        
-        if not leg_grid_indices:
-            return False
-        
-        leg_grid_indices_np = np.array(leg_grid_indices)
-        
-        # 장애물과 table 다리 위치가 겹치면 table을 배치하지 않음    
-        if not np.all(self.obs[leg_grid_indices_np[:, 1], leg_grid_indices_np[:, 0]] == GridCell.BLANK):
-            return False
-        
-        # 장애물이 겹치지 않으면 table을 배치
-        self.obs[leg_grid_indices_np[:, 1], leg_grid_indices_np[:, 0]] = GridCell.CHAIR
-        return True
-
-    def _add_chairs_around_table(
-        self,
-        cx: int, cy: int, 
-        table_width: int, table_height: int,
-        num_chairs: int,
-        theta: float,
-        chair_dist_offset: int = 4,
-        #chair_size_offset: int = 2,
-        max_chair_size: int = 24,
-        min_chair_size: int = 20,
-        chair_leg_size: int = 1,
-    ):
-        
-        radius_angle_set = [
-            (0, table_width/2.0 + chair_dist_offset),
-            (math.pi/2, table_height/2.0 + chair_dist_offset),
-            (math.pi, table_width/2.0 + chair_dist_offset),
-            (3*math.pi/2, table_height/2.0 + chair_dist_offset),
-        ]
-        self.rng.shuffle(radius_angle_set)
-        radius_angle_set = radius_angle_set[:num_chairs]
-
-        for (a, r) in radius_angle_set:
-            
-            chair_size_local = max_chair_size
-            while chair_size_local >= min_chair_size:
-                # 각도/거리 노이즈
-                ang = theta + a + self.rng.normal(scale=0.1)
-                radius = r + self.rng.integers(-1, 2)
-
-                # 의자의 중심 좌표
-                x = int(round(cx + radius * math.cos(ang)))
-                y = int(round(cy + radius * math.sin(ang)))
-                
-                # 의자가 배치 가능한 경우 의자 다리를 생성
-                if self._add_chair_legs(
-                    x, y, 
-                    chair_width=chair_size_local, 
-                    chair_height=chair_size_local, 
-                    chair_leg_size=chair_leg_size, 
-                    theta=ang):
-                    break
-                # 의자 다리가 장애물과 겹치거나 맵을 넘는 경우 의자 크기를 줄여가며 재시도
-                else:
-                    chair_size_local -= 1
-
-    def _is_placeable(
-        self,
-        x_min: int, x_max: int,
-        y_min: int, y_max: int,
-    ) -> bool:
-        
-        x_min = max(0, x_min-1); x_max = min(self.init_W, x_max+1)
-        y_min = max(0, y_min-1); y_max = min(self.init_H, y_max+1)
-        if np.all(self.obs[y_min:y_max, x_min:x_max] == GridCell.BLANK):
-            return True
-        return False
-        
-    def _add_small_obstacles_in_window(
-        self,
-        x_min: int, x_max: int,
-        y_min: int, y_max: int,
-        obs_num: int, 
-        small_obs_size_max: int,
-        small_obs_size_min: int
-    ):
-        # Window에 장애물이 하나도 없는 경우에만 장애물을 배치
-        if np.all(self.obs[y_min:y_max, x_min:x_max] == GridCell.BLANK):
-            for _ in range(obs_num):
-                obs_width = self.rng.integers(small_obs_size_min, small_obs_size_max)
-                obs_height = self.rng.integers(small_obs_size_min, small_obs_size_max)
-                x = self.rng.integers(x_min, x_max-obs_width)
-                y = self.rng.integers(y_min, y_max-obs_height)
-                if self._is_placeable(
-                    x_min=x, x_max=x+obs_width,
-                    y_min=y, y_max=y+obs_height,
-                ):
-                    self.obs[y:y+obs_height, x:x+obs_width] = GridCell.MORE_OBS
   
     def generate_house_like_obstacles(self,
                                       robot_diameter: int,
@@ -378,7 +79,6 @@ class MapGenerator:
         max_chair_size = self.cfg.max_chair_size
         min_chair_size = self.cfg.min_chair_size
         chair_leg_size = self.cfg.chair_leg_size
-        chair_spread = self.cfg.chair_spread
         
         if map_size is None:
             self.obs = np.full((self.init_H, self.init_W), GridCell.BLANK, dtype=np.uint8)
@@ -387,102 +87,190 @@ class MapGenerator:
             self.obs = np.full((H, W), GridCell.BLANK, dtype=np.uint8)
         H, W = self.obs.shape
 
-        # 책상과 의자를 배치
-        table_centers = [] # 테이블 중심 좌표와 테이블 radius를 저장
+        # 책상과 의자를 세트로 배치
+        table_mask = np.zeros((H, W), dtype=np.uint8) # 책상 상판을 표시하는 mask. 책상 상판끼리 겹치면 안 됨.
+        chair_mask = np.zeros((H, W), dtype=np.uint8) # 의자 상판을 표시하는 mask. 의자 상판끼리 겹치거나 책상 다리와 겹치면 안 됨.
         max_trial = 20000
-        for table_num in range(self.cfg.num_tables):
+        for table_id in range(1, self.cfg.num_tables + 1):
+            
+            # 테이블 배치 시도
+            put_table = False
+            table_width = 0
+            table_height = 0
+            cx = 0; cy = 0 # 책상의 중심 좌표
             for _ in range(max_trial):  # 최대 20000번 시도
                 
                 # 테이블의 크기 설정
                 table_width = self.rng.integers(min_table_size, max_table_size + 1)
                 table_height = self.rng.integers(min_table_size, max_table_size + 1)
-                
-                table_radius = int(math.ceil(max(
-                    math.sqrt((table_width/2.0)**2 + (table_height/2.0)**2),
-                    math.sqrt((table_width/2.0 + max_chair_size/2.0 + chair_spread)**2 + (max_chair_size/2.0)**2),
-                    math.sqrt((table_height/2.0 + max_chair_size/2.0 + chair_spread)**2 + (max_chair_size/2.0)**2),
-                ))) + 2
-                
-                # 테이블의 중심 좌표 설정: (cx, cy)
-                if table_width >= W - table_radius:
+                table_radius = math.ceil(math.sqrt((table_width/2)**2 + (table_height/2)**2))
+                if table_radius >= (W - table_radius) or table_radius >= (H - table_radius): # 중심 좌표 설정을 위한 확인 작업
                     continue
-                if table_height >= H - table_radius:
-                    continue
+                
+                # 테이블 중심 좌표 및 돌아간 각도 설정
                 cx = int(self.rng.integers(table_radius, W - table_radius))
                 cy = int(self.rng.integers(table_radius, H - table_radius))
                 cx += (table_width % 2) / 2.0
                 cy += (table_height % 2) / 2.0
+                theta = self.rng.uniform(-math.pi/6, math.pi/6) # 테이블이 회전한 각도 결정
                 
-                ok = True # 테이블과 의자가 겹치지 않고 배치될 수 있는지 알려주는 flag
+                # Table 배치 가능성 평가
+                table_area_indices = np.array(get_rect_indices_for_big_rect(cx, cy, table_width, table_height, W, H, theta))
+                table_leg_indices = get_leg_indices(cx, cy, W, H, table_width, table_height, table_leg_size, theta)
                 
-                # 테이블이 겹치는지 여부를 테이블 중심 좌표로 대략적으로 확인
-                for (px, py, pr) in table_centers:
-                    if (cx - px)**2 + (cy - py)**2 < (table_radius + pr)**2:
-                        ok = False
-                        break # 겹치는 테이블이 있는 경우, cx, cy, table_width, table_height를 재생성
-                        
-                # 테이블 중심 좌표로 판단했을 때 테이블이 다른 장애물과 겹치지 않으면 테이블 배치를 시도
-                if ok: 
-                    
-                    theta = self.rng.uniform(-math.pi/6, math.pi/6) # 테이블이 회전한 각도 결정
-                    
-                    # 테이블을 map에 추가. 장애물이 겹치지 않은 경우 의자 배치 시도
-                    if self._add_table_legs(
-                        cx, cy, 
-                        table_width, table_height,
-                        table_leg_size=table_leg_size,
-                        theta=theta
-                    ):
-                        table_centers.append((cx, cy, table_radius)) # 테이블의 중심 좌표를 list에 추가
-                    else:
-                        ok = False
-                        continue # cx, cy, table_width, table_height를 재생성
+                if len(table_area_indices) == 0 or len(table_leg_indices) == 0:
+                    continue
                 
-                # 테이블을 실제로 배치했을 때, 다른 장애물과 겹치지 않으면 의자 배치를 시도
-                if ok:
+                area_xs, area_ys = table_area_indices[:, 0], table_area_indices[:, 1]
+                leg_xs, leg_ys = table_leg_indices[:, 0], table_leg_indices[:, 1]
+                
+                # - 조건 1: 테이블 상판이 기존 테이블 상판들과 겹치는가
+                # - 조건 2: 테이블 다리가 기존 의자 상판들과 겹치는가 (의자 위에 다리 놓기 방지)
+                # - 조건 3: 테이블 다리 자리에 이미 다른 장애물(벽 등)이 있는가
+                if table_mask[area_ys, area_xs].any() or \
+                   chair_mask[leg_ys, leg_xs].any() or \
+                   (self.obs[leg_ys, leg_xs] != GridCell.BLANK).any():
+                    continue
 
-                    # 의자 개수 결정
-                    num_chairs = int(self.rng.integers(self.cfg.chairs_per_table_min, self.cfg.chairs_per_table_max + 1))
+                put_table = True
+                table_mask[area_ys, area_xs] = table_id
+                self.obs[leg_ys, leg_xs] = GridCell.TABLE
+                break
+            
+            # 책상을 배치한 경우, 의자 배치를 시도
+            if put_table:
+                
+                chair_slots = list(range(num_chairs)) # 책상으로부터 의자의 위치를 선택하기 위한 index pool
+                chair_pos_ang_max_disturbance = math.pi/2/num_chairs # 의자 위치 선정을 위한 각도 disturbance 범위
+                
+                for chair_id in range(1, num_chairs+1):
                     
-                    # 의자  
-                    self._add_chairs_around_table(
-                        cx, cy,
-                        table_width, table_height,
-                        num_chairs=num_chairs,
-                        theta=theta,
-                        chair_dist_offset=chair_spread,
-                        max_chair_size=max_chair_size,
-                        min_chair_size=min_chair_size,
-                        chair_leg_size=chair_leg_size,
-                    )
-                    break # 의자 배치까지 완료했으면 책상 배치를 그만 시도
+                    put_chair = False
+                    for _ in range(max_trial):
                         
-        # 고밀도 환경 조성을 위해 작은 장애물을 더 배치
-        window_size = self.cfg.window_size
-        gap = int(window_size // 3)
-        small_obs_size_max = self.cfg.small_obs_size_max
-        small_obs_size_min = self.cfg.small_obs_size_min
+                        if not chair_slots:
+                            break
+                        
+                        # 책상 주변에 의자를 배치할 위치를 선택: slot을 기준으로 의자를 배치
+                        slot_idx = self.rng.integers(0, len(chair_slots))
+                        chosen_slot = chair_slots[slot_idx]
+
+                        # 선택된 slot을 기준으로 책상으로부터 의자를 배치할 방향을 선택
+                        base_angle = (2*math.pi/num_chairs)*chosen_slot
+                        ang_disturbance = self.rng.uniform(-chair_pos_ang_max_disturbance, chair_pos_ang_max_disturbance)
+                        direction_theta = base_angle+ang_disturbance
+                        
+                        # 의자 크기 선택: 의자는 좀 더 작아질 수 있음
+                        chair_size_offset = self.rng.integers(min_chair_size, max_chair_size, endpoint=True)
+                        
+                        # 책상 중심으로부터 의자 중심까지의 거리의 offset 설정: 책상 모서리 부근에서는 의자를 더 멀리 배치
+                        temp_h = table_height - chair_size_offset - 2*table_leg_size
+                        th1 = math.atan2(temp_h, table_width) if temp_h > 0 else 0
+                        temp_w = table_width - chair_size_offset - 2*table_leg_size
+                        th2 = math.atan2(table_height, temp_w) if temp_w > 0 else math.pi/2
+                        
+                        dist1 = abs(table_width/(2*math.cos(direction_theta) + 1e-6))
+                        dist2 = abs(table_height/(2*math.sin(direction_theta) + 1e-6))
+                        chair_dist_offset = min(dist1, dist2)
+                        th = math.atan2(abs(math.sin(direction_theta)), abs(math.cos(direction_theta))) # direction_theta를 0~90 deg의 각도로 mapping
+                        if th1 <= th <= th2:
+                            chair_dist_offset += chair_size_offset / math.sqrt(2)
+                        
+                        # 의자가 돌아간 각도에 disturbance 추가
+                        theta += self.rng.uniform(-math.pi/8, math.pi/8)
+                                                
+                        # 의자 배치
+                        for chair_size in range(chair_size_offset, min_chair_size-1, -1): # 결정된 의자 위치 및 의자 배향에서 의자 배치가 불가능하면 의자 크기를 점점 줄임.
+                            
+                            # 책상으로부터 의자까지의 거리에 disturbance 추가
+                            chair_pos_dist_max_disturbance = int(chair_size/2)
+                            dist_disturbance = self.rng.uniform(-chair_pos_dist_max_disturbance/4, chair_pos_dist_max_disturbance)
+                            chair_dist = chair_dist_offset + dist_disturbance
+                            
+                            # 의자의 중심 좌표 설정
+                            chair_cx = cx + chair_dist*math.cos(direction_theta)
+                            chair_cy = cy + chair_dist*math.sin(direction_theta)
+                            
+                            chair_area_indices = np.array(get_rect_indices_for_big_rect(chair_cx, chair_cy, chair_size, chair_size, W, H, theta))
+                            chair_leg_indices = get_leg_indices(chair_cx, chair_cy, W, H, chair_size, chair_size, chair_leg_size, theta)
+                            
+                            if len(chair_area_indices) == 0 or len(chair_leg_indices) == 0:
+                                continue
+                            
+                            area_xs, area_ys = chair_area_indices[:, 0], chair_area_indices[:, 1]
+                            leg_xs, leg_ys = chair_leg_indices[:, 0], chair_leg_indices[:, 1]
+                            
+                            # - 조건 1: 의자 상판이 기존 의자 상판들과 겹치는가
+                            # - 조건 2: 의자 상판에 다른 장애물이 있는가 (의자 위에 다리 놓기 방지)
+                            # - 조건 3: 의자 다리 자리에 이미 다른 장애물(벽 등)이 있는가
+                            if chair_mask[area_ys, area_xs].any() or \
+                               (self.obs[area_ys, area_xs] != GridCell.BLANK).any() or \
+                               (self.obs[leg_ys, leg_xs] != GridCell.BLANK).any():
+                                continue
+
+                            put_chair = True
+                            chair_mask[area_ys, area_xs] = chair_id
+                            self.obs[leg_ys, leg_xs] = GridCell.CHAIR
+                            break
+                        
+                        if put_chair:
+                            break
         
-        for x in range(0, W, gap):
-            for y in range(0, H, gap):
+        # 책상과 의자 배치에 실패하여 장애물이 전혀 없는 경우, 작은 장애물을 임의로 배치
+        if not self.obs.any():
+            
+            window_size = self.cfg.window_size
+            gap = window_size // 2
+            small_obs_size_max = self.cfg.small_obs_size_max
+            small_obs_size_min = self.cfg.small_obs_size_min
+            num_obs_per_window = self.cfg.num_small_obs_per_level[level]
+            
+            for x in range(0, W, gap):
+                for y in range(0, H, gap):
+                    
+                    obs_num = self.rng.integers(num_obs_per_window-1, num_obs_per_window+2) # Window당 장애물 개수는 num_obs_per_window-1 ~ num_obs_per_window+1에서 랜덤 선택
+                    
+                    # Window의 끝부분 indices
+                    x_last = min(W, x+window_size)
+                    y_last = min(H, y+window_size)
+                    
+                    obs_num = int(obs_num * (x_last-x)*(y_last-y) / (window_size**2)) # Window 크기에 비례하여 장애물 개수 재설정
+                    
+                    # Window에 장애물이 하나도 없는 경우에만 장애물을 배치
+                    if np.all(self.obs[y:y_last, x:x_last] == GridCell.BLANK):
+                        for _ in range(obs_num):
+                            obs_width = self.rng.integers(small_obs_size_min, small_obs_size_max)
+                            obs_height = self.rng.integers(small_obs_size_min, small_obs_size_max)
+                            obs_x = self.rng.integers(x, x_last-obs_width)
+                            obs_y = self.rng.integers(y, y_last-obs_height)
+                            if np.all(self.obs[obs_y:obs_y+obs_height, obs_x:obs_x+obs_width] == GridCell.BLANK):
+                                self.obs[obs_y:obs_y+obs_height, obs_x:obs_x+obs_width] = GridCell.MORE_OBS
+        
+        
+        # level이 4인 경우, 원형 장애물 추가
+        if level == 4:
+            num_circular_obstacle = 2
+            min_radius = 9; max_radius = 11
+            for circle_id in range(num_circular_obstacle):
+                for _ in range(max_trial):
+                    cx = self.rng.integers(0, W); cy = self.rng.integers(0, H)
+                    radius = self.rng.uniform(min_radius, max_radius+1)     
+                    circle_indices = np.array(get_circle_indices(cx, cy, radius, W, H))
+                    circle_xs, circle_ys = circle_indices[:, 0], circle_indices[:, 1]
+                    
+                    if np.any(self.obs[circle_ys, circle_xs]):
+                        continue
+                    
+                    self.obs[circle_ys, circle_xs] = GridCell.MORE_OBS
+                    break
                 
-                obs_num = self.rng.integers(self.cfg.small_obs_num_per_window_min, self.cfg.small_obs_num_per_window_max+1)
-                x_last = min(W, x+window_size)
-                y_last = min(H, y+window_size)
-                obs_num = int(obs_num * (x_last-x)*(y_last-y) / (window_size**2))
-                self._add_small_obstacles_in_window(
-                    x_min=x, x_max=x_last,
-                    y_min=y, y_max=y_last,
-                    obs_num=obs_num,
-                    small_obs_size_max=small_obs_size_max,
-                    small_obs_size_min=small_obs_size_min
-                )
-
         if not visualize:
             self.obs = (self.obs != 0).astype(np.uint8)
         
-        cropped_obs = crop_obstacle_area(self.obs, robot_diameter, GridCell.BLANK)
-        H, W = cropped_obs.shape
+        cropped_obs = self.obs
+        if map_size is None:
+            cropped_obs = crop_obstacle_area(self.obs, robot_diameter, GridCell.BLANK)
+            H, W = cropped_obs.shape
         
         return ObstacleMap(
             obs_map=cropped_obs,
@@ -491,13 +279,15 @@ class MapGenerator:
             W=W,
             eff_size=BoundingBox(x_min=0, x_max=W, y_min=0, y_max=H)
         )
-        
-def generate_multiple_maps(mode: str = "test", 
+
+# FIXME: 수정 필요
+def generate_multiple_maps(robot_diameter: int,
+                           mode: str = "test",
                            map_num_per_cond: int = 10,
                            seed: int = DEFAULT_SEED, 
                            visualize: bool = False, 
-                           map_size_list: list[tuple[float, float]] = [(400, 400), (400, 300), (300, 300)],
-                           level_range: tuple[int, int] = (1, 3)):
+                           map_size: tuple[int, int] | None = None,
+                           level_range: tuple[int, int] = (1, 4)):
     """
     Test map을 여러 개 얻는 method
 
@@ -506,7 +296,7 @@ def generate_multiple_maps(mode: str = "test",
         map_num_per_cond (int): Map 크기, level 등 조건별로 생성할 map 개수
         seed (int): Random seed
         visualize (bool, optional): Map 생성 후 시각화할지 여부. Defaults to False.
-        map_size_list (list[tuple[float, float]], optional): Map 크기 조건을 (가로, 세로) 형태로 cm 단위로 입력.
+        map_size (tuple[float, float], optional): Map의 pixel 단위 크기를 (H, W)로 설정. None이면 config에 정의된 map 크기로 설정 후 crop이 진행됨.
         level_range (tuple[int, int], optional): Map 난이도 조건을 (min_level, max_level) 형태로 입력. Defaults to (1, 3).
     """
     
@@ -514,11 +304,13 @@ def generate_multiple_maps(mode: str = "test",
     
     if mode == "test":
         seed += 100000  # test map은 train map과 겹치지 않도록 seed를 100000 이상으로 설정
+    cfg = MapConfig()
     rng = np.random.default_rng(seed=seed)
-    map_generator = MapGenerator(rng)
+    map_generator = MapGenerator(cfg, rng)
     
     # Map을 저장할 폴더 생성
-    map_folder_name = os.path.join(MAP_SAVE_DIR, f"{mode}")
+    map_size_name = f"{map_size[0]}x{map_size[1]}" if map_size is not None else "Cropped"
+    map_folder_name = os.path.join(MAP_SAVE_DIR, mode, map_size_name)
     png_folder_name = os.path.join(map_folder_name, "image")
     os.makedirs(png_folder_name, exist_ok=True) # map_folder_name은 상위 폴더이므로 자동 생성됨.
     
@@ -530,53 +322,58 @@ def generate_multiple_maps(mode: str = "test",
     
     # Map 생성 및 저장
     min_level, max_level = level_range
-    for width, height in map_size_list:
-        width_m = width / 100.0; height_m = height / 100.0
-        for level in range(min_level, max_level + 1):
-            for map_id in range(map_num_per_cond):
-                
-                map_file_name = MAP_FILE_FORMAT.format(
-                    mode=mode,
-                    height_m=int(height_m),
-                    width_m=int(width_m),
-                    level=level,
-                    map_id=map_id+1
-                )
-                png_file_name = map_file_name.replace(".npy", ".png")
-                
-                # Map에서 실제 청소기가 움직이고 장애물이 배치될 영역 정의.
-                eff_size = (width, height)
-                
-                # Map에 장애물 배치
-                obs_map = map_generator.generate_house_like_obstacles(level=level, eff_size=eff_size, visualize=visualize)
-                
-                # fig에 map 시각화 후 png로 저장
-                if visualize:
-                    fig.clear()
-                    map_img = get_map_img(obs_map.obs_map, fig=fig, canvas=canvas, map_name=map_file_name, visualized=visualize)
-                    fig.savefig(os.path.join(png_folder_name, png_file_name), bbox_inches='tight', dpi=300)
+    for level in range(min_level, max_level + 1):
+        for map_id in range(map_num_per_cond):
+            
+            # Map에 장애물 배치
+            obs_map = map_generator.generate_house_like_obstacles(robot_diameter=robot_diameter, 
+                                                                  level=level, 
+                                                                  map_size=map_size,
+                                                                  visualize=visualize)
+            
+            # Map file, png file 이름 설정
+            H, W = obs_map.obs_map.shape
+            map_file_name = MAP_FILE_FORMAT.format(
+                mode=mode,
+                H=H,
+                W=W,
+                level=level,
+                map_id=map_id+1
+            )
+            png_file_name = map_file_name.replace(".npy", ".png")
+            
+            # fig에 map 시각화 후 png로 저장
+            if visualize:
+                fig.clear()
+                map_img = get_map_img(obs_map.obs_map, fig=fig, canvas=canvas, map_name=map_file_name, visualized=visualize)
+                fig.savefig(os.path.join(png_folder_name, png_file_name), bbox_inches='tight', dpi=300)
+            
+            # map을 npy로 저장
+            obstacles = (obs_map.obs_map != 0).astype(np.uint8)
+            np.save(os.path.join(map_folder_name, map_file_name), obstacles)
 
-                # map을 npy로 저장
-                obstacles = (obs_map.obs_map != 0).astype(np.uint8)
-                np.save(os.path.join(map_folder_name, map_file_name), obstacles)
 
-def generate_map_by_seed_and_visualize(seed: int = DEFAULT_SEED, level: int = 1, eff_size: tuple[float, float] = None):
+def generate_map_by_seed_and_visualize(robot_diameter: int, seed: int = DEFAULT_SEED, level: int = 1, map_size: tuple[int, int] = None):
 
     rng = np.random.default_rng(seed=seed)  # 재현성을 위해 시드 설정
     map_generator = MapGenerator(rng=rng)
 
     # Map 생성
-    obs_map = map_generator.generate_house_like_obstacles(level=level, eff_size=eff_size, visualize=True)
+    obs_map = map_generator.generate_house_like_obstacles(robot_diameter=robot_diameter, 
+                                                          level=level, 
+                                                          map_size=map_size, 
+                                                          visualize=True)
     
     # Map 시각화
     fig = Figure()
     canvas = FigureCanvasAgg(fig)
     map_img = get_map_img(obs_map.obs_map, 
                           fig=fig, canvas=canvas, 
-                          map_name=f"Map size: {obs_map.eff_H} cm X {obs_map.eff_W} cm / Map seed: {seed}", 
+                          map_name=f"Map size: {obs_map.W} X {obs_map.H} / Map seed: {seed}", 
                           visualized=True)
     display_image(map_img)
-    
+
+
 def zip_map_files(zip_file_name: str = 'maps.zip', mode: str = "test"):
         
     map_folder_name = os.path.join(MAP_SAVE_DIR, f"{mode}")

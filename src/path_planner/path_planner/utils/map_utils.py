@@ -274,3 +274,159 @@ def crop_obstacle_area(obs_map: np.ndarray, robot_diameter: int, BLANK: int=0) -
     
     cropped_map = eff_obs_map[y_min:y_max+1, x_min:x_max+1]
     return cropped_map.copy()
+
+# FIXME: vectorization 필요, 나중에 numpy 형태로 변환
+def get_rect_indices_for_big_rect(
+    cx: float, cy: float, 
+    rect_width: float, rect_height: float,
+    map_width: int, map_height: int, 
+    theta: float) -> list[tuple[int, int]]:
+    """
+    Grid map에서 직사각형을 그릴 때, 색칠할 grid의 indices를 출력하는 method
+
+    Args:
+        cx, cy: 그릴 직사각형의 중심 좌표
+        width, height: 그릴 직사각형의 가로, 세로 길이
+        theta: 직사각형이 반시계 방향으로 회전한 정도(rad 단위)
+    """
+    cos_t = math.cos(theta)
+    sin_t = math.sin(theta)
+    grid_indices = []
+    
+    # 각 grid가 직사각형 영역에 속하는지 검사
+    # 검사 범위는 직사각형의 대각선 길이를 한 변의 길이로 하는 정사각형
+    r = math.sqrt(rect_width**2 + rect_height**2) / 2
+    x_min = max(0, int(math.floor(cx - r)))
+    x_max = min(map_width - 1, int(math.ceil(cx + r)))
+    y_min = max(0, int(math.floor(cy - r)))
+    y_max = min(map_height - 1, int(math.ceil(cy + r)))
+
+    # 각 그리드 칸의 중심점이 직사각형 내부에 있는지 검사
+    for ix in range(x_min, x_max + 1):
+        for iy in range(y_min, y_max + 1):
+            # 그리드 칸의 중심점: (ix.5, iy.5)
+            # (dx, dy): 직사각형 중심점 (cx, cy)를 원점으로 봤을 때 grid 중심점의 좌표
+            dx = (ix + 0.5) - cx
+            dy = (iy + 0.5) - cy
+            
+            # 역회전 변환 (Rotated frame -> Local axis-aligned frame)
+            nx = dx * cos_t + dy * sin_t
+            ny = -dx * sin_t + dy * cos_t
+            
+            # 범위 판정 (부동소수점 오차 방지를 위해 아주 작은 값 1e-9 추가)
+            if abs(nx) <= (rect_width / 2) + 1e-9 and abs(ny) <= (rect_height / 2) + 1e-9:
+                grid_indices.append((ix, iy))
+    
+    return grid_indices
+
+# FIXME: vectorization 필요
+def get_rect_indices_for_small_rect(
+    cx: float, cy: float, 
+    rect_width: float, rect_height: float,
+    map_width: int, map_height: int, 
+    theta: float) -> list[tuple[int, int]]:
+    """
+    Grid map에서 직사각형을 그릴 때, 색칠할 grid의 indices를 출력하는 method
+
+    Args:
+        cx, cy: 그릴 직사각형의 중심 좌표
+        width, height: 그릴 직사각형의 가로, 세로 길이
+        theta: 직사각형이 반시계 방향으로 회전한 정도(rad 단위)
+    """
+    
+    # 직사각형을 그릴 grid의 시작과 끝 좌표를 int 형식으로 얻음
+    x_min = max(0, int(cx - rect_width/2 + 0.5))
+    x_max = min(map_width - 1, int(cx + rect_width/2 + 0.5))
+    y_min = max(0, int(cy - rect_height/2 + 0.5))
+    y_max = min(map_height - 1, int(cy + rect_height/2 + 0.5))
+    
+    grid_indices = [(x, y) for x in range(x_min, x_max + 1) for y in range(y_min, y_max + 1)]
+    
+    return grid_indices
+
+def get_leg_indices(
+    cx: float, cy: float,
+    map_width: int, map_height: int,
+    area_width: int, area_height: int,
+    leg_size: int,
+    theta: float = 0.0,   # 회전 각도 (rad)
+) -> np.ndarray:
+    """_summary_
+
+    Args:
+        cx, cy (int): 책상 또는 의자의 중심 좌표
+        area_width (int): 책상 또는 의자의 가로 길이
+        area_height (int): 책상 또는 의자의 세로 길이
+        leg_size (int, optional): 책상 또는 의자 다리의 두께.
+        theta (float, optional): 책상 또는 의자가 반시계 방향으로 회전한 각도. Defaults to 0.0.
+
+    Returns:
+        np.ndarray: 책상 또는 의자 다리가 차지하는 grid의 indices (Shape: (N, 2))
+    """
+    # cx, cy: 테이블 중심 좌표, row_size 또는 col_size가 짝수인 경우 중심 위치로부터 약간 틀어져 있음
+    # 테이블 기본 다리 좌표 (local frame)
+    
+    # 테이블의 각도가 0 rad일 때 각 leg 중심의 상대적인 좌표
+    no_rotate_leg_centers = [
+        (-area_width/2.0 + leg_size/2.0, -area_height/2.0 + leg_size/2.0),
+        ( area_width/2.0 - leg_size/2.0, -area_height/2.0 + leg_size/2.0),
+        (-area_width/2.0 + leg_size/2.0,  area_height/2.0 - leg_size/2.0),
+        ( area_width/2.0 - leg_size/2.0,  area_height/2.0 - leg_size/2.0),
+    ]
+    
+    leg_grid_indices = []
+    
+    c = math.cos(theta)
+    s = math.sin(theta)
+
+    for px, py in no_rotate_leg_centers:
+        # (px, py): Table 중심을 원점으로 했을 때, table leg의 중심 위치
+        
+        # Table이 돌아간 각도 theta에 따라 (px, py)를 회전 s변환
+        rx = c * px - s * py
+        ry = s * px + c * py
+
+        # (x, y): Table leg 중심 위치의 global coordinate
+        x = cx + rx; y = cy + ry
+        
+        # Table 다리가 차지하는 grid의 indices를 얻음
+        if leg_size < 10:
+            indices = get_rect_indices_for_small_rect(x, y, leg_size, leg_size, 
+                                                      map_width, map_height, theta)
+        else:
+            indices = get_rect_indices_for_big_rect(x, y, leg_size, leg_size, 
+                                                    map_width, map_height, theta)
+        leg_grid_indices.extend(indices)
+    
+    leg_grid_indices_np = np.array(leg_grid_indices)
+    
+    return leg_grid_indices_np
+
+def get_circle_indices(
+    cx: float, cy: float, radius: float,
+    map_width: int, map_height: int) -> list[tuple[int, int]]:
+    
+    indices = []
+    
+    # 1. 탐색 범위를 원이 포함되는 사각형 영역(Bounding Box)으로 제한 (속도 최적화)
+    # 맵 경계를 벗어나지 않도록 클리핑(clipping) 해줍니다.
+    min_x = max(0, int(math.floor(cx - radius)))
+    max_x = min(map_width - 1, int(math.ceil(cx + radius)))
+    min_y = max(0, int(math.floor(cy - radius)))
+    max_y = min(map_height - 1, int(math.ceil(cy + radius)))
+    
+    # 반지름의 제곱을 미리 계산 (루트 연산을 피하기 위함)
+    radius_sq = radius ** 2
+    
+    # 2. 사각형 영역 내에서 원의 방정식(x^2 + y^2 <= r^2)을 만족하는 픽셀만 필터링
+    for x in range(min_x, max_x + 1):
+        for y in range(min_y, max_y + 1):
+            # 그리드 중심점(x + 0.5, y + 0.5)과 원의 중심 사이의 거리 계산
+            # (정밀도를 위해 그리드 칸의 중심을 기준으로 잡는 것이 좋습니다)
+            dx = (x + 0.5) - cx
+            dy = (y + 0.5) - cy
+            
+            if (dx ** 2 + dy ** 2) <= radius_sq:
+                indices.append((x, y))
+                
+    return indices

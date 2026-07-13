@@ -12,7 +12,6 @@ path_planner/map_layer.py
 path_planner/mujoco_map_converter.py
 path_planner/path_planner_node.py
 path_planner/redqn_network.py
-path_planner/trajectory_metrics.py
 path_planner.egg-info/PKG-INFO
 path_planner.egg-info/SOURCES.txt
 path_planner.egg-info/dependency_links.txt
