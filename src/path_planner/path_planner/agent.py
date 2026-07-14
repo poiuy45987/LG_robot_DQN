@@ -165,7 +165,7 @@ class DQNAgent:
         # Loading model
         self._load_model(args)
 
-        self.zigzag_fallback_path = None
+        # self.zigzag_fallback_path = None
         
     
     def _setup_logging(self):
@@ -466,7 +466,8 @@ class DQNAgent:
         action_masking = self._decide_action_masking(env, action_RL, mode, reset)
         # RL policy와 heuristic policy 중 무엇을 사용할지 결정
         # Heuristic action을 사용
-        if env.is_zigzag_zone() or (mode == 'train' and (warmup or self.train_cfg.use_heuristic) and action_masking):
+        # if env.is_zigzag_zone() or (mode == 'train' and (warmup or self.train_cfg.use_heuristic) and action_masking):
+        if mode == 'train' and (warmup or self.train_cfg.use_heuristic) and action_masking:
             # action_RL을 수행: next_state, reward, terminated 및 truncated 여부 등을 받음.
             # environment 내에서 trajectory의 변화는 없지만, replay buffer에는 transition data를 저장함.
             # 수행한 뒤, action을 수행하기 전의 환경으로 돌아감.
@@ -538,7 +539,8 @@ class DQNAgent:
                     parent[next_pos] = curr_pos
                     queue.append(next_pos)
                 
-                if not env.is_zigzag_zone(*next_pos) and env.map_layers.has_uncleaned_grid(*next_pos): # 새로운 grid를 밟을 수 있는 위치를 발견하면 그 위치로 이동하는 경로를 생성
+                # if not env.is_zigzag_zone(*next_pos) and env.map_layers.has_uncleaned_grid(*next_pos): # 새로운 grid를 밟을 수 있는 위치를 발견하면 그 위치로 이동하는 경로를 생성
+                if env.map_layers.has_uncleaned_grid(*next_pos): # 새로운 grid를 밟을 수 있는 위치를 발견하면 그 위치로 이동하는 경로를 생성
                     self._get_dijkstra_traj_from_parent(parent, next_pos)
                     next_pos = self.dijkstra_traj.pop(0)
                     next_dir = env.get_dir_from_next_pos(next_pos)
@@ -759,140 +761,140 @@ class DQNAgent:
         self.policy_net.train() # train mode로 전환
 
     
-    def _generate_zigzag_trajectory(self, env: CoverageEnv, start_pos: tuple[int, int]) -> list[tuple[int, int]]:
-        """
-        저밀도 zone(mode_map==0) 전체를 커버하는 boustrophedon 경로를 생성.
-        반환값: start_pos를 포함한, 인접한 칸들로만 이루어진 좌표 리스트.
-        """
-        cx0, cy0 = start_pos
-        mode_map = env.map_layers.mode_map
-        H = env.map_layers.map_info.eff_H; W = env.map_layers.map_info.eff_W
+    # def _generate_zigzag_trajectory(self, env: CoverageEnv, start_pos: tuple[int, int]) -> list[tuple[int, int]]:
+    #     """
+    #     저밀도 zone(mode_map==0) 전체를 커버하는 boustrophedon 경로를 생성.
+    #     반환값: start_pos를 포함한, 인접한 칸들로만 이루어진 좌표 리스트.
+    #     """
+    #     cx0, cy0 = start_pos
+    #     mode_map = env.map_layers.mode_map
+    #     H = env.map_layers.map_info.eff_H; W = env.map_layers.map_info.eff_W
 
-        def free(x, y):
-            return 0 <= x < W and 0 <= y < H and mode_map[y, x] == 0 and not env.is_collide(x, y)
+    #     def free(x, y):
+    #         return 0 <= x < W and 0 <= y < H and mode_map[y, x] == 0 and not env.is_collide(x, y)
 
-        # 1. Zone 영역(로봇 중심 reachable mask) BFS
-        reachable = np.zeros((H, W), dtype=np.uint8)
-        reachable[cy0, cx0] = 1
-        queue = deque([(cx0, cy0)])
-        while queue:
-            x, y = queue.popleft()
-            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                nx, ny = x + dx, y + dy
-                if free(nx, ny) and not reachable[ny, nx]:
-                    reachable[ny, nx] = 1
-                    queue.append((nx, ny))
+    #     # 1. Zone 영역(로봇 중심 reachable mask) BFS
+    #     reachable = np.zeros((H, W), dtype=np.uint8)
+    #     reachable[cy0, cx0] = 1
+    #     queue = deque([(cx0, cy0)])
+    #     while queue:
+    #         x, y = queue.popleft()
+    #         for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+    #             nx, ny = x + dx, y + dy
+    #             if free(nx, ny) and not reachable[ny, nx]:
+    #                 reachable[ny, nx] = 1
+    #                 queue.append((nx, ny))
 
-        ys, _ = np.nonzero(reachable)
-        if len(ys) == 0:
-            return [start_pos]
-        y_min, y_max = int(ys.min()), int(ys.max())
+    #     ys, _ = np.nonzero(reachable)
+    #     if len(ys) == 0:
+    #         return [start_pos]
+    #     y_min, y_max = int(ys.min()), int(ys.max())
         
-        robot_diameter = max(1, env.cfg.robot_size)
-        num_rows = int(np.ceil((y_max - y_min) / robot_diameter)) + 1
-        row_ys = [int(y) for y in np.linspace(y_min, y_max, num_rows)]
+    #     robot_diameter = max(1, env.cfg.robot_size)
+    #     num_rows = int(np.ceil((y_max - y_min) / robot_diameter)) + 1
+    #     row_ys = [int(y) for y in np.linspace(y_min, y_max, num_rows)]
         
-        def bfs_path(src, dst):
-            """reachable mask 안에an서 src -> dst 최단 경로(src 제외)를 구함"""
-            if src == dst:
-                return []
-            q = deque([src])
-            visited = {src}
-            parent = {src: None}
-            while q:
-                x, y = q.popleft()
-                if (x, y) == dst:
-                    break
-                for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                    nx, ny = x + dx, y + dy
-                    if 0 <= nx < W and 0 <= ny < H and reachable[ny, nx] and (nx, ny) not in visited:
-                        visited.add((nx, ny))
-                        parent[(nx, ny)] = (x, y)
-                        q.append((nx, ny))
-            if dst not in parent:
-                return []  # 이론상 같은 reachable 영역이면 항상 도달 가능
-            path = []
-            node = dst
-            while node != src:
-                path.append(node)
-                node = parent[node]
-            path.reverse()
-            return path
+    #     def bfs_path(src, dst):
+    #         """reachable mask 안에an서 src -> dst 최단 경로(src 제외)를 구함"""
+    #         if src == dst:
+    #             return []
+    #         q = deque([src])
+    #         visited = {src}
+    #         parent = {src: None}
+    #         while q:
+    #             x, y = q.popleft()
+    #             if (x, y) == dst:
+    #                 break
+    #             for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+    #                 nx, ny = x + dx, y + dy
+    #                 if 0 <= nx < W and 0 <= ny < H and reachable[ny, nx] and (nx, ny) not in visited:
+    #                     visited.add((nx, ny))
+    #                     parent[(nx, ny)] = (x, y)
+    #                     q.append((nx, ny))
+    #         if dst not in parent:
+    #             return []  # 이론상 같은 reachable 영역이면 항상 도달 가능
+    #         path = []
+    #         node = dst
+    #         while node != src:
+    #             path.append(node)
+    #             node = parent[node]
+    #         path.reverse()
+    #         return path
 
-        all_segments = []
-        for row_y in row_ys:
-            row_xs = sorted(int(x) for x in np.nonzero(reachable[row_y, :])[0])
-            if not row_xs:
-                continue
+    #     all_segments = []
+    #     for row_y in row_ys:
+    #         row_xs = sorted(int(x) for x in np.nonzero(reachable[row_y, :])[0])
+    #         if not row_xs:
+    #             continue
             
-            # 장애물 등으로 끊어진 x축 구간 분리
-            seg_start = row_xs[0]
-            prev = row_xs[0]
-            for x in row_xs[1:]:
-                if x != prev + 1:
-                    all_segments.append((row_y, seg_start, prev))
-                    seg_start = x
-                prev = x
-            all_segments.append((row_y, seg_start, prev))        
+    #         # 장애물 등으로 끊어진 x축 구간 분리
+    #         seg_start = row_xs[0]
+    #         prev = row_xs[0]
+    #         for x in row_xs[1:]:
+    #             if x != prev + 1:
+    #                 all_segments.append((row_y, seg_start, prev))
+    #                 seg_start = x
+    #             prev = x
+    #         all_segments.append((row_y, seg_start, prev))        
         
-        trajectory = [(cx0, cy0)]
-        current = (cx0, cy0)
+    #     trajectory = [(cx0, cy0)]
+    #     current = (cx0, cy0)
         
-        while all_segments:
-            # 현재 위치에서 각 segment의 양 끝단(a, b)까지의 단순 거리(우회 비용 대용) 계산
-            def get_closest_dist(seg):
-                y, a, b = seg
-                dist_a = abs(current[0] - a) + abs(current[1] - y)
-                dist_b = abs(current[0] - b) + abs(current[1] - y)
-                return min(dist_a, dist_b), dist_a <= dist_b
+    #     while all_segments:
+    #         # 현재 위치에서 각 segment의 양 끝단(a, b)까지의 단순 거리(우회 비용 대용) 계산
+    #         def get_closest_dist(seg):
+    #             y, a, b = seg
+    #             dist_a = abs(current[0] - a) + abs(current[1] - y)
+    #             dist_b = abs(current[0] - b) + abs(current[1] - y)
+    #             return min(dist_a, dist_b), dist_a <= dist_b
 
-            # 가장 가까운 segment를 다음 목표로 결정하고 리스트에서 제거
-            best_seg = min(all_segments, key=lambda s: get_closest_dist(s)[0])
-            all_segments.remove(best_seg)
+    #         # 가장 가까운 segment를 다음 목표로 결정하고 리스트에서 제거
+    #         best_seg = min(all_segments, key=lambda s: get_closest_dist(s)[0])
+    #         all_segments.remove(best_seg)
             
-            y, a, b = best_seg
-            _, a_is_closer = get_closest_dist(best_seg)
+    #         y, a, b = best_seg
+    #         _, a_is_closer = get_closest_dist(best_seg)
             
-            # 더 가까운 쪽 진입점(x_from)과 끝점(x_to) 결정
-            x_from, x_to = (a, b) if a_is_closer else (b, a)
-            target_start = (x_from, y)
+    #         # 더 가까운 쪽 진입점(x_from)과 끝점(x_to) 결정
+    #         x_from, x_to = (a, b) if a_is_closer else (b, a)
+    #         target_start = (x_from, y)
             
-            # 6-A. 현재 위치에서 다음 청소 구간 시작점까지 장애물을 우회하여 이동 (A*나 BFS 경로)
-            if current != target_start:
-                hop = bfs_path(current, target_start)
-                trajectory.extend(hop)
-                current = target_start
+    #         # 6-A. 현재 위치에서 다음 청소 구간 시작점까지 장애물을 우회하여 이동 (A*나 BFS 경로)
+    #         if current != target_start:
+    #             hop = bfs_path(current, target_start)
+    #             trajectory.extend(hop)
+    #             current = target_start
                 
-            # 6-B. 진입한 segment를 쭉 한 방향으로 훑으며 청소 수행
-            step = 1 if x_to >= x_from else -1
-            for x in range(x_from + step, x_to + step, step):
-                trajectory.append((x, y))
-                current = (x, y)
+    #         # 6-B. 진입한 segment를 쭉 한 방향으로 훑으며 청소 수행
+    #         step = 1 if x_to >= x_from else -1
+    #         for x in range(x_from + step, x_to + step, step):
+    #             trajectory.append((x, y))
+    #             current = (x, y)
 
-        return trajectory
+    #     return trajectory
 
-    def _get_zigzag_global_dir(self, env: CoverageEnv) -> int:
-        """
-        저밀도 zone에 진입하면 zone 전체를 커버하는 trajectory를 한 번에 생성하고,
-        이후로는 그 경로를 한 칸씩 따라가며 방향만 반환.
-        * 방향 매핑: 0: East, 1: North, 2: West, 3: South
-        """
-        cx, cy = float_to_int_coord(*env.pos)
+    # def _get_zigzag_global_dir(self, env: CoverageEnv) -> int:
+    #     """
+    #     저밀도 zone에 진입하면 zone 전체를 커버하는 trajectory를 한 번에 생성하고,
+    #     이후로는 그 경로를 한 칸씩 따라가며 방향만 반환.
+    #     * 방향 매핑: 0: East, 1: North, 2: West, 3: South
+    #     """
+    #     cx, cy = float_to_int_coord(*env.pos)
         
-        if env.cleaned_segment[cy, cx] == 1:
-            return -1
+    #     if env.cleaned_segment[cy, cx] == 1:
+    #         return -1
 
-        if not hasattr(self, 'zigzag_trajectory') or self.zigzag_trajectory is None:
-            self.zigzag_trajectory = self._generate_zigzag_trajectory(env, (cx, cy))
-            self.zigzag_trajectory.pop(0)  # 시작점(현재 위치) 제외
+    #     if not hasattr(self, 'zigzag_trajectory') or self.zigzag_trajectory is None:
+    #         self.zigzag_trajectory = self._generate_zigzag_trajectory(env, (cx, cy))
+    #         self.zigzag_trajectory.pop(0)  # 시작점(현재 위치) 제외
 
-        if not self.zigzag_trajectory:
-            return -1  # 경로를 다 따라갔으면 탈출 신호
+    #     if not self.zigzag_trajectory:
+    #         return -1  # 경로를 다 따라갔으면 탈출 신호
 
-        next_pos = self.zigzag_trajectory.pop(0)
-        dx, dy = next_pos[0] - cx, next_pos[1] - cy
-        dir_offsets = {(1, 0): 0, (0, 1): 1, (-1, 0): 2, (0, -1): 3}
-        return dir_offsets[(dx, dy)]
+    #     next_pos = self.zigzag_trajectory.pop(0)
+    #     dx, dy = next_pos[0] - cx, next_pos[1] - cy
+    #     dir_offsets = {(1, 0): 0, (0, 1): 1, (-1, 0): 2, (0, -1): 3}
+    #     return dir_offsets[(dx, dy)]
     
     
     def _test_one_map(self, env: CoverageEnv, obs: dict, mode: str = 'valid', debug: bool = False) -> tuple[float, float, float]:
@@ -905,7 +907,7 @@ class DQNAgent:
         self.dijkstra_traj = []
         
         # ────────────── [추가] 새 맵 시작 시 로컬 구역 초기화 플래그 리셋 ──────────────
-        self.zigzag_trajectory = None
+        # self.zigzag_trajectory = None
         
         # [1] 디버그 모드일 때 사용할 도화지(fig)를 미리 딱 한 번만 만듭니다.
         if debug:
@@ -935,22 +937,24 @@ class DQNAgent:
             
             # 발밑 격자가 0번 구역(Heuristic)인지 실시간 검사
             # is_zigzag_zone = env.is_zigzag_zone()
-            is_zigzag_zone = False
-            if is_zigzag_zone:
-                self.dijkstra_traj = []
-                global_dir = self._get_zigzag_global_dir(env)
-                action = None
+            # is_zigzag_zone = False
+            # if is_zigzag_zone:
+            #     self.dijkstra_traj = []
+            #     global_dir = self._get_zigzag_global_dir(env)
+            #     action = None
 
-                if global_dir == -1:
-                    is_zigzag_zone = False # 경로를 다 소진했으면 즉시 DQN 모드로 전환
-                    env.mark_current_segment()
+            #     if global_dir == -1:
+            #         is_zigzag_zone = False # 경로를 다 소진했으면 즉시 DQN 모드로 전환
+            #         env.mark_current_segment()
 
-            if not is_zigzag_zone:
-                self.zigzag_trajectory = None
-                action = self._get_action(env, processed_obs, mode=mode, reset=reset)
-                global_dir = None
-                reset = False
-            
+            # if not is_zigzag_zone:
+            #     self.zigzag_trajectory = None
+            #     action = self._get_action(env, processed_obs, mode=mode, reset=reset)
+            #     global_dir = None
+            #     reset = False
+            action = self._get_action(env, processed_obs, mode=mode, reset=reset)
+            global_dir = None
+            reset = False
             
             if debug:
                 
@@ -1054,11 +1058,11 @@ class DQNAgent:
                 reset_info = self.env.reset(seed=seed, map_config=map_config)
                 if reset_info is None: # Reset에 실패한 경우
                     continue
-                break # Reset에 성공하면 for문을 빠져나옴.
+                break # Reset에 성공한 경우
             else:
                 raise ValueError("Cannot reset environment.")
                 
-            obs, info = reset_info
+            obs, info = self.env.reset(seed=seed, map_config=map_config)
             processed_obs = self._pre_process_obs(obs, local_view_dim=LOCAL_VIEW_DIM) # Map data를 resize, Observation data를 얻음
             # ----------------------------------------------------------------------------------------
             self.zigzag_trajectory = None
@@ -1094,26 +1098,22 @@ class DQNAgent:
                 self.total_steps += 1
                 steps += 1
                 
-                # # Action 선택: Warmup 중에는 100% random, 그 이후에는 epsilon 기법 사용
-                # is_zigzag_zone = self.env.is_zigzag_zone()
-                # if is_zigzag_zone:
-                #     self.dijkstra_traj = []
-                #     global_dir = self._get_zigzag_global_dir(self.env)
-                #     action = None
+                # Action 선택: Warmup 중에는 100% random, 그 이후에는 epsilon 기법 사용
+                is_zigzag_zone = self.env.is_zigzag_zone()
+                if is_zigzag_zone:
+                    self.dijkstra_traj = []
+                    global_dir = self._get_zigzag_global_dir(self.env)
+                    action = None
                     
-                #     if global_dir == -1:
-                #         is_zigzag_zone = False
-                #         self.env.mark_current_segment()
+                    if global_dir == -1:
+                        is_zigzag_zone = False
+                        self.env.mark_current_segment()
                 
-                # if not is_zigzag_zone:
-                #     self.zigzag_trajectory = None
-                #     action = self._get_action(self.env, processed_obs, mode='train', reset=reset, warmup=warmup)
-                #     global_dir = None
-                #     reset = False
-                
-                action = self._get_action(self.env, processed_obs, mode='train', reset=reset, warmup=warmup)
-                global_dir = None
-                reset = False
+                if not is_zigzag_zone:
+                    self.zigzag_trajectory = None
+                    action = self._get_action(self.env, processed_obs, mode='train', reset=reset, warmup=warmup)
+                    global_dir = None
+                    reset = False
                 
                 next_obs, reward, terminated, truncated, info = self.env.step(action=action, global_dir=global_dir)
                 next_processed_obs = self._pre_process_obs(next_obs, local_view_dim=LOCAL_VIEW_DIM)
@@ -1131,85 +1131,84 @@ class DQNAgent:
                 cumulated_reward += reward * gamma_exp
                 gamma_exp *= self.train_cfg.gamma
                 
-                # if not is_zigzag_zone:
+                if not is_zigzag_zone:
+                    self.memory.append((processed_obs, action, reward, next_processed_obs, done)) # processed_obs의 map data는 np.uint8 형태, Memory 용량을 줄임
+                    
+                    if warmup:
+                        self.warmup_steps += 1
+                    else:
+                        self.no_warmup_steps += 1
+                        
+                    # First q_value와 cumulate reward 계산
+                    if first_q_value is None:
+                        map_tensor = torch.from_numpy(processed_obs['map']).float().to(self.device).unsqueeze(0)
+                        vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
+                        with torch.no_grad():
+                            q_values = self.policy_net(map_tensor, vec_tensor) # Shape: (1, action_space)
+                            first_q_value = q_values[0, action].item()
                 
-                self.memory.append((processed_obs, action, reward, next_processed_obs, done)) # processed_obs의 map data는 np.uint8 형태, Memory 용량을 줄임
                 
-                if warmup:
-                    self.warmup_steps += 1
-                else:
-                    self.no_warmup_steps += 1
-                    
-                # First q_value와 cumulate reward 계산
-                if first_q_value is None:
-                    map_tensor = torch.from_numpy(processed_obs['map']).float().to(self.device).unsqueeze(0)
-                    vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
-                    with torch.no_grad():
-                        q_values = self.policy_net(map_tensor, vec_tensor) # Shape: (1, action_space)
-                        first_q_value = q_values[0, action].item()
-            
-            
-                # 학습 수행
-                if not warmup and self.no_warmup_steps % self.train_cfg.policy_update == 0:
-                    batch_indices = self.train_rng.choice(len(self.memory), size=self.train_cfg.batch_size, replace=False)
-                    batch = [self.memory[i] for i in batch_indices]
-                    
-                    # batch 개별 요소의 구조: (processed_obs, action, reward, next_processed_obs, done)
-                    ms_b = torch.from_numpy(np.array([b[0]['map'] for b in batch])).float().to(self.device)     # Map state: (B, 3, 51, 51)
-                    vs_b = torch.from_numpy(np.array([b[0]['vec'] for b in batch])).float().to(self.device)     # Vector state: (B, 12)
-                    a_b = torch.LongTensor([b[1] for b in batch]).unsqueeze(1).to(self.device)                  # Action: (B, 1)
-                    r_b = torch.FloatTensor([b[2] for b in batch]).unsqueeze(1).to(self.device)                 # Reward: (B, 1)
-                    nms_b = torch.from_numpy(np.array([b[3]['map'] for b in batch])).float().to(self.device)    # Next map state: (B, 3, 51, 51)
-                    nvs_b = torch.from_numpy(np.array([b[3]['vec'] for b in batch])).float().to(self.device)    # Next vector state: (B, 12)
-                    d_b = torch.FloatTensor([b[4] for b in batch]).unsqueeze(1).to(self.device)                 # Done: (B, 1)
-                    
-                    # Q(s, a) 계산
-                    if self.train_cfg.use_noisy:
-                        self.policy_net.reset_noise()
-                    curr_q = self.policy_net(ms_b, vs_b).gather(dim=1, index=a_b) # Shape: (B, 4) -> (B, 1)
-                    
-                    # Target Q 계산
-                    with torch.no_grad():
-                        if self.train_cfg.use_noisy and self.train_cfg.target_with_noisy:
-                            self.target_net.reset_noise()
+                    # 학습 수행
+                    if not warmup and self.no_warmup_steps % self.train_cfg.policy_update == 0:
+                        batch_indices = self.train_rng.choice(len(self.memory), size=self.train_cfg.batch_size, replace=False)
+                        batch = [self.memory[i] for i in batch_indices]
+                        
+                        # batch 개별 요소의 구조: (processed_obs, action, reward, next_processed_obs, done)
+                        ms_b = torch.from_numpy(np.array([b[0]['map'] for b in batch])).float().to(self.device)     # Map state: (B, 3, 51, 51)
+                        vs_b = torch.from_numpy(np.array([b[0]['vec'] for b in batch])).float().to(self.device)     # Vector state: (B, 12)
+                        a_b = torch.LongTensor([b[1] for b in batch]).unsqueeze(1).to(self.device)                  # Action: (B, 1)
+                        r_b = torch.FloatTensor([b[2] for b in batch]).unsqueeze(1).to(self.device)                 # Reward: (B, 1)
+                        nms_b = torch.from_numpy(np.array([b[3]['map'] for b in batch])).float().to(self.device)    # Next map state: (B, 3, 51, 51)
+                        nvs_b = torch.from_numpy(np.array([b[3]['vec'] for b in batch])).float().to(self.device)    # Next vector state: (B, 12)
+                        d_b = torch.FloatTensor([b[4] for b in batch]).unsqueeze(1).to(self.device)                 # Done: (B, 1)
+                        
+                        # Q(s, a) 계산
+                        if self.train_cfg.use_noisy:
+                            self.policy_net.reset_noise()
+                        curr_q = self.policy_net(ms_b, vs_b).gather(dim=1, index=a_b) # Shape: (B, 4) -> (B, 1)
+                        
+                        # Target Q 계산
+                        with torch.no_grad():
+                            if self.train_cfg.use_noisy and self.train_cfg.target_with_noisy:
+                                self.target_net.reset_noise()
+                                
+                            if self.train_cfg.double_dqn: # Double DQN을 사용
+                                next_q_target_b = self.policy_net(nms_b, nvs_b) # 다음 state에 대한 Q-value를 얻음. Shape: (B, 4)
+                                next_a_b = next_q_target_b.max(dim=1)[1].unsqueeze(1) # Shape: (B, 1)
+                                next_q = self.target_net(nms_b, nvs_b).gather(dim=1, index=next_a_b) # Shape: (B, 1)
+                            else: 
+                                next_q = self.target_net(nms_b, nvs_b).max(dim=1)[0].unsqueeze(1) # Shape: (B, 1) (torch.max에 dimension을 지정하면 최댓값 tensor와 indices tensor를 tuple로 반환하기 때문에 [0]이 필요)
                             
-                        if self.train_cfg.double_dqn: # Double DQN을 사용
-                            next_q_target_b = self.policy_net(nms_b, nvs_b) # 다음 state에 대한 Q-value를 얻음. Shape: (B, 4)
-                            next_a_b = next_q_target_b.max(dim=1)[1].unsqueeze(1) # Shape: (B, 1)
-                            next_q = self.target_net(nms_b, nvs_b).gather(dim=1, index=next_a_b) # Shape: (B, 1)
-                        else: 
-                            next_q = self.target_net(nms_b, nvs_b).max(dim=1)[0].unsqueeze(1) # Shape: (B, 1) (torch.max에 dimension을 지정하면 최댓값 tensor와 indices tensor를 tuple로 반환하기 때문에 [0]이 필요)
+                            target_q = r_b + (1 - d_b) * self.train_cfg.gamma * next_q
                         
-                        target_q = r_b + (1 - d_b) * self.train_cfg.gamma * next_q
-                    
-                    # Loss 계산 후 parameter update
-                    loss_func = nn.HuberLoss(delta=1.0)
-                    loss = loss_func(curr_q, target_q.detach())
-                    self.optimizer.zero_grad()
-                    loss.backward()
-                    
-                    # Gradient clipping: gradient 폭주 방지
-                    torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
-                    
-                    # Weight update
-                    self.optimizer.step()
-                    
-                    # TensorBoard 또는 wandb 기록
-                    sigma_logs = self.policy_net.get_sigma_data()
-                    if self.tb_writer:
-                        self.tb_writer.add_scalar("Train/Loss", loss.item(), self.total_steps)
-                        self.tb_writer.add_scalar("Train/Q_value_mean", curr_q.mean().item(), self.total_steps)
-                    if self.wandb_run:
-                        self.wandb_run.log({"Train/Loss": loss.item(),
-                                            "Train/Q_value_mean": curr_q.mean().item(), **sigma_logs}, step=self.total_steps)
-                    if self.args.use_vessl:
-                        vessl.log(step=self.total_steps, 
-                                        payload={"Train/Loss": loss.item(), 
-                                                    "Train/Q_value_mean": curr_q.mean().item()})
+                        # Loss 계산 후 parameter update
+                        loss_func = nn.HuberLoss(delta=1.0)
+                        loss = loss_func(curr_q, target_q.detach())
+                        self.optimizer.zero_grad()
+                        loss.backward()
                         
-                # Target Network 업데이트
-                if not warmup and self.no_warmup_steps % self.train_cfg.target_update == 0:
-                    self.target_net.load_state_dict(self.policy_net.state_dict())
+                        # Gradient clipping: gradient 폭주 방지
+                        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
+                        
+                        # Weight update
+                        self.optimizer.step()
+                        
+                        # TensorBoard 또는 wandb 기록
+                        sigma_logs = self.policy_net.get_sigma_data()
+                        if self.tb_writer:
+                            self.tb_writer.add_scalar("Train/Loss", loss.item(), self.total_steps)
+                            self.tb_writer.add_scalar("Train/Q_value_mean", curr_q.mean().item(), self.total_steps)
+                        if self.wandb_run:
+                            self.wandb_run.log({"Train/Loss": loss.item(),
+                                                "Train/Q_value_mean": curr_q.mean().item(), **sigma_logs}, step=self.total_steps)
+                        if self.args.use_vessl:
+                            vessl.log(step=self.total_steps, 
+                                            payload={"Train/Loss": loss.item(), 
+                                                        "Train/Q_value_mean": curr_q.mean().item()})
+                            
+                    # Target Network 업데이트
+                    if not warmup and self.no_warmup_steps % self.train_cfg.target_update == 0:
+                        self.target_net.load_state_dict(self.policy_net.state_dict())
                     
                 # Episode 수 저장
                 if self.wandb_run:

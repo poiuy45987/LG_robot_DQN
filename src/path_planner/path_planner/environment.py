@@ -113,7 +113,7 @@ class CoverageEnv(gym.Env):
         # ----------------------------------------------------
 
         # FIXME: 우선 여기에 적었음.
-        self.cleaned_segment: np.ndarray | None = None
+        # self.cleaned_segment: np.ndarray | None = None
     
     def reset(self, *, seed: int=None, map_config: MapConfigSchema | None = None) -> tuple[dict, dict] | None:
         """
@@ -152,7 +152,7 @@ class CoverageEnv(gym.Env):
         eff_size = self.map_layers.map_info.eff_size
         self.dir = self._get_init_dir(self.pos, eff_size)
 
-        self.cleaned_segment = np.zeros((self.H, self.W), dtype=np.uint8)
+        # self.cleaned_segment = np.zeros((self.H, self.W), dtype=np.uint8)
         
         # 로봇이 (cx, cy)로 이동했을 때 로봇이 cover한 영역, coverage 수치 등을 update
         self.map_layers.update_map_layers(*self.pos)
@@ -344,29 +344,29 @@ class CoverageEnv(gym.Env):
         return self.map_layers.collides(cx, cy)
     
     
-    def mark_current_segment(self):
-        cx, cy = float_to_int_coord(*self.pos)
-        mode_map = self.map_layers.mode_map
-        H, W = mode_map.shape
+    # def mark_current_segment(self):
+    #     cx, cy = float_to_int_coord(*self.pos)
+    #     mode_map = self.map_layers.mode_map
+    #     H, W = mode_map.shape
 
-        if not (0 <= cx < W and 0 <= cy < H) or mode_map[cy, cx] != 0:
-            return
+    #     if not (0 <= cx < W and 0 <= cy < H) or mode_map[cy, cx] != 0:
+    #         return
 
-        # 이미 이 구역을 마킹 중인지 체크하기 위해 cleaned_segment 확인
-        # 만약 이미 1로 칠해진 곳이라면 굳이 BFS를 또 돌릴 필요가 없음
-        if self.cleaned_segment[cy, cx] == 1:
-            return
+    #     # 이미 이 구역을 마킹 중인지 체크하기 위해 cleaned_segment 확인
+    #     # 만약 이미 1로 칠해진 곳이라면 굳이 BFS를 또 돌릴 필요가 없음
+    #     if self.cleaned_segment[cy, cx] == 1:
+    #         return
 
-        queue = deque([(cx, cy)])
-        self.cleaned_segment[cy, cx] = 1
-        while queue:
-            x, y = queue.popleft()
-            for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                nx, ny = x + dx, y + dy
-                if 0 <= nx < W and 0 <= ny < H:
-                    if mode_map[ny, nx] == 0 and self.cleaned_segment[ny, nx] == 0:
-                        self.cleaned_segment[ny, nx] = 1
-                        queue.append((nx, ny))
+    #     queue = deque([(cx, cy)])
+    #     self.cleaned_segment[cy, cx] = 1
+    #     while queue:
+    #         x, y = queue.popleft()
+    #         for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+    #             nx, ny = x + dx, y + dy
+    #             if 0 <= nx < W and 0 <= ny < H:
+    #                 if mode_map[ny, nx] == 0 and self.cleaned_segment[ny, nx] == 0:
+    #                     self.cleaned_segment[ny, nx] = 1
+    #                     queue.append((nx, ny))
     
 
     @property
@@ -686,11 +686,11 @@ class CoverageEnv(gym.Env):
         img_array = self.get_visualized_img(img_choice)
         display_image(img_array)
     
-    def is_zigzag_zone(self, cx: float = None, cy: float = None):
-        if cx is None or cy is None:
-            cx, cy = self.pos
-        cx, cy = float_to_int_coord(cx, cy)
-        return self.map_layers.mode_map[cy, cx] == 0
+    # def is_zigzag_zone(self, cx: float = None, cy: float = None):
+    #     if cx is None or cy is None:
+    #         cx, cy = self.pos
+    #     cx, cy = float_to_int_coord(cx, cy)
+    #     return self.map_layers.mode_map[cy, cx] == 0
             
 
 if __name__ == "__main__":

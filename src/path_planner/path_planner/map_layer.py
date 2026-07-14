@@ -66,7 +66,7 @@ class MapLayers():
         self.collision_map: np.ndarray | None = None   # Obstacle dilated map: uint8 [H,W] (Dilated obstacles: 1, 빈 공간: 0)
         self.reachable: np.ndarray | None = None       # Reachable robot centers: uint8 [H,W] (Reachable center: 1, Unreachable center: 0)
         self.coverable: np.ndarray | None = None       # Coverable cells: uint8 [H,W] (Coverable grid: 1, Uncoverable grid: 0)
-        self.mode_map: np.ndarray | None = None
+        # self.mode_map: np.ndarray | None = None
         
         # Map이 결정됐을 때 변하는 map layer
         self.cleaned: np.ndarray | None = None         # 로봇이 청소한 grid를 표시하는 layer: uint8 [H,W] (Cleaned: 1, Uncleaned: 0)
@@ -119,13 +119,13 @@ class MapLayers():
             
             # Collision map과 mode map 생성
             self.collision_map = dilation_obstacles(self.obstacles, self.robot_mask)
-            self.mode_map = generate_navigation_mode_map(
-                obs=self.obstacles,
-                crop_size=self.robot_size, 
-                robot_diameter=self.robot_size, 
-                stride=self.robot_size//4, 
-                eff_size=(obs_map.eff_H, obs_map.eff_W),
-            )
+            # self.mode_map = generate_navigation_mode_map(
+            #     obs=self.obstacles,
+            #     crop_size=self.robot_size, 
+            #     robot_diameter=self.robot_size, 
+            #     stride=self.robot_size//4, 
+            #     eff_size=(obs_map.eff_H, obs_map.eff_W),
+            # )
             
         # 시작점 설정: 설정에 실패하면 None을 반환하여 다시 map을 만들도록 함.
         # 시작점 설정하면서 reachable map, coverable map 설정
