@@ -659,9 +659,13 @@ class DQNAgent:
         best_traj_img = None # 가장 성능이 좋았던 map에서의 trajectory를 보여줌
         
         # Model의 성능 평가
-        for level, (eff_H_cm, eff_W_cm) in self.map_config_combinations:
+        for level, map_sizes in self.map_config_combinations:
             
-            map_config = MapConfigSchema(level=level, eff_H_cm=eff_H_cm, eff_W_cm=eff_W_cm)
+            if map_sizes:
+                H, W = map_sizes
+            else:
+                H, W = None, None
+            map_config = MapConfigSchema(level=level, H=H, W=W)
             
             for _ in range(self.train_cfg.valid_map_num):
                 
@@ -669,7 +673,11 @@ class DQNAgent:
                 if self.train_cfg.reset_only_start_pos:
                     obs, _ = self.valid_env.reset()
                 else:
-                    obs, _ = self.valid_env.reset(map_config=map_config)
+                    reset_info = self.valid_env.reset(map_config=map_config)
+                    if reset_info:
+                        obs, _ = reset_info
+                    else:
+                        break # 다음 map_config를 이용
                     
                 for start_num in range(self.train_cfg.valid_start_point_num):
                     
