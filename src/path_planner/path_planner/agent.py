@@ -20,7 +20,7 @@ from PIL import Image
 from IPython.display import display, clear_output
 
 # 앞서 정의한 클래스들을 임포트한다고 가정 (또는 같은 파일에 위치)
-from path_planner.config import EnvConfig, TrainConfig, ANG_SEG_NUM, CLEANED_MAP_MAX, TRACE_MAP_MAX, LOCAL_VIEW_DIM
+from path_planner.config import EnvConfig, TrainConfig, LOCAL_VIEW_DIM, TRAIN_MAP_FILE_REGEX
 from path_planner.map_layer import MapConfigSchema
 from path_planner.environment import CoverageEnv, ACTION_NUM, ALL_DIR_NUM
 from path_planner.redqn_network import CNN_ReDQN
@@ -64,11 +64,15 @@ class DQNAgent:
         self.dijkstra_traj = []
         
         # map_config_generator 생성
-        levels = [1, 2, 3]
-        eff_sizes_cm = [(400, 400), (300, 400), (300, 300)]
-        self.map_config_combinations = list(product(levels, eff_sizes_cm))
-        self.map_config_generator = cycle(self.map_config_combinations)
+        self.level_range = range(1, 5)
+        self.map_sizes = []
+        window_size = self.env_cfg.map_cfg.window_size
+        for mult in range(1, 5):
+            self.map_sizes.append((window_size*mult, window_size*mult))
+        self.map_sizes.append(None)
         
+        self.map_config_combinations = list(product(self.level_range, self.map_sizes))
+        self.map_config_generator = cycle(self.map_config_combinations)
         
         # Train과 관련된 instance 변수는 mode가 train일 때만 생성
         if args.mode == 'train':
@@ -86,7 +90,43 @@ class DQNAgent:
                 self.valid_env = CoverageEnv(self.env_cfg, seed=args.seed) # 훈련용 environment와 같은 환경을 구성하기 위해서
             else:
                 self.valid_env = CoverageEnv(self.env_cfg, seed=args.seed+1000) # 훈련용 environment와 다른 환경을 구성하기 위해서
+
+            # Training에 필요한 map 얻기
+            self.train_maps = {} # Key: (폴더명, level), Value: map file path list
+            self.train_maps_keys = [] # self.train_maps의 key 모음
+            self.train_maps_keys_iterator = None # self.train_maps의 key를 순회하기 위한 iterator
+            self.curriculum_iterators = {} # 각 folder 내부 map file을 도는 iterator 생성
+            if args.use_train_maps:
+                train_map_dir = os.path.join(args.map_save_dir, 'train')
+                train_map_folders = ['40x40', '80x80', '120x120', '160x160', 'Cropped']
                 
+                # 각 map의 path를 level, map size별로 나누어서 저장
+                for folder in train_map_folders:
+                    folder_path = os.path.join(train_map_dir, folder)
+                    if os.path.exists(folder_path):
+                        # Image 폴더는 제외하고 .npy 파일들만 정확하게 수집
+                        npy_file_names = sorted([
+                            f for f in os.listdir(folder_path) 
+                            if f.endswith('.npy') and os.path.isfile(os.path.join(folder_path, f))
+                        ])
+                        
+                        for file_name in npy_file_names:
+                            full_path = os.path.join(folder_path, file_name)
+                            match = re.search(TRAIN_MAP_FILE_REGEX, file_name)
+                            gd = match.groupdict()
+                            level = gd['level']
+                            key = (folder, level)
+                            if key not in self.train_maps:
+                                self.train_maps[key] = []
+                            self.train_maps[key].append(full_path)
+                
+                # Map 순서 정렬
+                self.train_maps_keys = list(self.train_maps.keys())
+                self.train_maps_keys_iterator = cycle(self.train_maps_keys)
+                for key in self.train_maps.keys():
+                    self.train_maps[key].sort()
+                    self.curriculum_iterators[key] = cycle(self.train_maps[key])
+            
             # Training에 필요한 변수 설정
             self.total_steps = 0                        # Training을 진행한 steps 수 (Warmup 과정 포함)
             self.warmup_steps = 0                       # Buffer에 data를 채우기 위한 warmup steps 수
@@ -978,7 +1018,6 @@ class DQNAgent:
         
         assert self.args.mode == 'train'
         
-        
         # Policy network를 train mode로 설정
         self.policy_net.train()
         
@@ -999,13 +1038,27 @@ class DQNAgent:
                 seed = None
             
             # Map 설정: Level, map 크기
-            map_config = None
-            if not self.train_cfg.reset_only_start_pos:
-                level, (eff_H_cm, eff_W_cm) = next(self.map_config_generator)
-                map_config = MapConfigSchema(level=level, eff_H_cm=eff_H_cm, eff_W_cm=eff_W_cm)
-            
-            # Environment reset
-            obs, info = self.env.reset(seed=seed, map_config=map_config)
+            reset_info = None
+            for _ in range(100):
+                map_config = None
+                if not self.train_cfg.reset_only_start_pos:
+                    if self.args.use_train_maps:
+                        curr_key = next(self.train_maps_keys_iterator)
+                        map_file_path = next(self.curriculum_iterators[curr_key])
+                        map_config = MapConfigSchema(file_path=map_file_path)
+                    else:
+                        level, (H, W) = next(self.map_config_generator)
+                        map_config = MapConfigSchema(level=level, H=H, W=W)
+                
+                # Environment reset
+                reset_info = self.env.reset(seed=seed, map_config=map_config)
+                if reset_info is None: # Reset에 실패한 경우
+                    continue
+                break # Reset에 성공하면 for문을 빠져나옴.
+            else:
+                raise ValueError("Cannot reset environment.")
+                
+            obs, info = reset_info
             processed_obs = self._pre_process_obs(obs, local_view_dim=LOCAL_VIEW_DIM) # Map data를 resize, Observation data를 얻음
             # ----------------------------------------------------------------------------------------
             self.zigzag_trajectory = None
@@ -1041,22 +1094,26 @@ class DQNAgent:
                 self.total_steps += 1
                 steps += 1
                 
-                # Action 선택: Warmup 중에는 100% random, 그 이후에는 epsilon 기법 사용
-                is_zigzag_zone = self.env.is_zigzag_zone()
-                if is_zigzag_zone:
-                    self.dijkstra_traj = []
-                    global_dir = self._get_zigzag_global_dir(self.env)
-                    action = None
+                # # Action 선택: Warmup 중에는 100% random, 그 이후에는 epsilon 기법 사용
+                # is_zigzag_zone = self.env.is_zigzag_zone()
+                # if is_zigzag_zone:
+                #     self.dijkstra_traj = []
+                #     global_dir = self._get_zigzag_global_dir(self.env)
+                #     action = None
                     
-                    if global_dir == -1:
-                        is_zigzag_zone = False
-                        self.env.mark_current_segment()
+                #     if global_dir == -1:
+                #         is_zigzag_zone = False
+                #         self.env.mark_current_segment()
                 
-                if not is_zigzag_zone:
-                    self.zigzag_trajectory = None
-                    action = self._get_action(self.env, processed_obs, mode='train', reset=reset, warmup=warmup)
-                    global_dir = None
-                    reset = False
+                # if not is_zigzag_zone:
+                #     self.zigzag_trajectory = None
+                #     action = self._get_action(self.env, processed_obs, mode='train', reset=reset, warmup=warmup)
+                #     global_dir = None
+                #     reset = False
+                
+                action = self._get_action(self.env, processed_obs, mode='train', reset=reset, warmup=warmup)
+                global_dir = None
+                reset = False
                 
                 next_obs, reward, terminated, truncated, info = self.env.step(action=action, global_dir=global_dir)
                 next_processed_obs = self._pre_process_obs(next_obs, local_view_dim=LOCAL_VIEW_DIM)
@@ -1074,84 +1131,85 @@ class DQNAgent:
                 cumulated_reward += reward * gamma_exp
                 gamma_exp *= self.train_cfg.gamma
                 
-                if not is_zigzag_zone:
-                    self.memory.append((processed_obs, action, reward, next_processed_obs, done)) # processed_obs의 map data는 np.uint8 형태, Memory 용량을 줄임
+                # if not is_zigzag_zone:
+                
+                self.memory.append((processed_obs, action, reward, next_processed_obs, done)) # processed_obs의 map data는 np.uint8 형태, Memory 용량을 줄임
+                
+                if warmup:
+                    self.warmup_steps += 1
+                else:
+                    self.no_warmup_steps += 1
                     
-                    if warmup:
-                        self.warmup_steps += 1
-                    else:
-                        self.no_warmup_steps += 1
-                        
-                    # First q_value와 cumulate reward 계산
-                    if first_q_value is None:
-                        map_tensor = torch.from_numpy(processed_obs['map']).float().to(self.device).unsqueeze(0)
-                        vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
-                        with torch.no_grad():
-                            q_values = self.policy_net(map_tensor, vec_tensor) # Shape: (1, action_space)
-                            first_q_value = q_values[0, action].item()
-                
-                
-                    # 학습 수행
-                    if not warmup and self.no_warmup_steps % self.train_cfg.policy_update == 0:
-                        batch_indices = self.train_rng.choice(len(self.memory), size=self.train_cfg.batch_size, replace=False)
-                        batch = [self.memory[i] for i in batch_indices]
-                        
-                        # batch 개별 요소의 구조: (processed_obs, action, reward, next_processed_obs, done)
-                        ms_b = torch.from_numpy(np.array([b[0]['map'] for b in batch])).float().to(self.device)     # Map state: (B, 3, 51, 51)
-                        vs_b = torch.from_numpy(np.array([b[0]['vec'] for b in batch])).float().to(self.device)     # Vector state: (B, 12)
-                        a_b = torch.LongTensor([b[1] for b in batch]).unsqueeze(1).to(self.device)                  # Action: (B, 1)
-                        r_b = torch.FloatTensor([b[2] for b in batch]).unsqueeze(1).to(self.device)                 # Reward: (B, 1)
-                        nms_b = torch.from_numpy(np.array([b[3]['map'] for b in batch])).float().to(self.device)    # Next map state: (B, 3, 51, 51)
-                        nvs_b = torch.from_numpy(np.array([b[3]['vec'] for b in batch])).float().to(self.device)    # Next vector state: (B, 12)
-                        d_b = torch.FloatTensor([b[4] for b in batch]).unsqueeze(1).to(self.device)                 # Done: (B, 1)
-                        
-                        # Q(s, a) 계산
-                        if self.train_cfg.use_noisy:
-                            self.policy_net.reset_noise()
-                        curr_q = self.policy_net(ms_b, vs_b).gather(dim=1, index=a_b) # Shape: (B, 4) -> (B, 1)
-                        
-                        # Target Q 계산
-                        with torch.no_grad():
-                            if self.train_cfg.use_noisy and self.train_cfg.target_with_noisy:
-                                self.target_net.reset_noise()
-                                
-                            if self.train_cfg.double_dqn: # Double DQN을 사용
-                                next_q_target_b = self.policy_net(nms_b, nvs_b) # 다음 state에 대한 Q-value를 얻음. Shape: (B, 4)
-                                next_a_b = next_q_target_b.max(dim=1)[1].unsqueeze(1) # Shape: (B, 1)
-                                next_q = self.target_net(nms_b, nvs_b).gather(dim=1, index=next_a_b) # Shape: (B, 1)
-                            else: 
-                                next_q = self.target_net(nms_b, nvs_b).max(dim=1)[0].unsqueeze(1) # Shape: (B, 1) (torch.max에 dimension을 지정하면 최댓값 tensor와 indices tensor를 tuple로 반환하기 때문에 [0]이 필요)
+                # First q_value와 cumulate reward 계산
+                if first_q_value is None:
+                    map_tensor = torch.from_numpy(processed_obs['map']).float().to(self.device).unsqueeze(0)
+                    vec_tensor = torch.from_numpy(processed_obs['vec']).to(self.device).unsqueeze(0)
+                    with torch.no_grad():
+                        q_values = self.policy_net(map_tensor, vec_tensor) # Shape: (1, action_space)
+                        first_q_value = q_values[0, action].item()
+            
+            
+                # 학습 수행
+                if not warmup and self.no_warmup_steps % self.train_cfg.policy_update == 0:
+                    batch_indices = self.train_rng.choice(len(self.memory), size=self.train_cfg.batch_size, replace=False)
+                    batch = [self.memory[i] for i in batch_indices]
+                    
+                    # batch 개별 요소의 구조: (processed_obs, action, reward, next_processed_obs, done)
+                    ms_b = torch.from_numpy(np.array([b[0]['map'] for b in batch])).float().to(self.device)     # Map state: (B, 3, 51, 51)
+                    vs_b = torch.from_numpy(np.array([b[0]['vec'] for b in batch])).float().to(self.device)     # Vector state: (B, 12)
+                    a_b = torch.LongTensor([b[1] for b in batch]).unsqueeze(1).to(self.device)                  # Action: (B, 1)
+                    r_b = torch.FloatTensor([b[2] for b in batch]).unsqueeze(1).to(self.device)                 # Reward: (B, 1)
+                    nms_b = torch.from_numpy(np.array([b[3]['map'] for b in batch])).float().to(self.device)    # Next map state: (B, 3, 51, 51)
+                    nvs_b = torch.from_numpy(np.array([b[3]['vec'] for b in batch])).float().to(self.device)    # Next vector state: (B, 12)
+                    d_b = torch.FloatTensor([b[4] for b in batch]).unsqueeze(1).to(self.device)                 # Done: (B, 1)
+                    
+                    # Q(s, a) 계산
+                    if self.train_cfg.use_noisy:
+                        self.policy_net.reset_noise()
+                    curr_q = self.policy_net(ms_b, vs_b).gather(dim=1, index=a_b) # Shape: (B, 4) -> (B, 1)
+                    
+                    # Target Q 계산
+                    with torch.no_grad():
+                        if self.train_cfg.use_noisy and self.train_cfg.target_with_noisy:
+                            self.target_net.reset_noise()
                             
-                            target_q = r_b + (1 - d_b) * self.train_cfg.gamma * next_q
+                        if self.train_cfg.double_dqn: # Double DQN을 사용
+                            next_q_target_b = self.policy_net(nms_b, nvs_b) # 다음 state에 대한 Q-value를 얻음. Shape: (B, 4)
+                            next_a_b = next_q_target_b.max(dim=1)[1].unsqueeze(1) # Shape: (B, 1)
+                            next_q = self.target_net(nms_b, nvs_b).gather(dim=1, index=next_a_b) # Shape: (B, 1)
+                        else: 
+                            next_q = self.target_net(nms_b, nvs_b).max(dim=1)[0].unsqueeze(1) # Shape: (B, 1) (torch.max에 dimension을 지정하면 최댓값 tensor와 indices tensor를 tuple로 반환하기 때문에 [0]이 필요)
                         
-                        # Loss 계산 후 parameter update
-                        loss_func = nn.HuberLoss(delta=1.0)
-                        loss = loss_func(curr_q, target_q.detach())
-                        self.optimizer.zero_grad()
-                        loss.backward()
+                        target_q = r_b + (1 - d_b) * self.train_cfg.gamma * next_q
+                    
+                    # Loss 계산 후 parameter update
+                    loss_func = nn.HuberLoss(delta=1.0)
+                    loss = loss_func(curr_q, target_q.detach())
+                    self.optimizer.zero_grad()
+                    loss.backward()
+                    
+                    # Gradient clipping: gradient 폭주 방지
+                    torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
+                    
+                    # Weight update
+                    self.optimizer.step()
+                    
+                    # TensorBoard 또는 wandb 기록
+                    sigma_logs = self.policy_net.get_sigma_data()
+                    if self.tb_writer:
+                        self.tb_writer.add_scalar("Train/Loss", loss.item(), self.total_steps)
+                        self.tb_writer.add_scalar("Train/Q_value_mean", curr_q.mean().item(), self.total_steps)
+                    if self.wandb_run:
+                        self.wandb_run.log({"Train/Loss": loss.item(),
+                                            "Train/Q_value_mean": curr_q.mean().item(), **sigma_logs}, step=self.total_steps)
+                    if self.args.use_vessl:
+                        vessl.log(step=self.total_steps, 
+                                        payload={"Train/Loss": loss.item(), 
+                                                    "Train/Q_value_mean": curr_q.mean().item()})
                         
-                        # Gradient clipping: gradient 폭주 방지
-                        torch.nn.utils.clip_grad_norm_(self.policy_net.parameters(), max_norm=1.0)
-                        
-                        # Weight update
-                        self.optimizer.step()
-                        
-                        # TensorBoard 또는 wandb 기록
-                        sigma_logs = self.policy_net.get_sigma_data()
-                        if self.tb_writer:
-                            self.tb_writer.add_scalar("Train/Loss", loss.item(), self.total_steps)
-                            self.tb_writer.add_scalar("Train/Q_value_mean", curr_q.mean().item(), self.total_steps)
-                        if self.wandb_run:
-                            self.wandb_run.log({"Train/Loss": loss.item(),
-                                                "Train/Q_value_mean": curr_q.mean().item(), **sigma_logs}, step=self.total_steps)
-                        if self.args.use_vessl:
-                            vessl.log(step=self.total_steps, 
-                                            payload={"Train/Loss": loss.item(), 
-                                                        "Train/Q_value_mean": curr_q.mean().item()})
-                            
-                    # Target Network 업데이트
-                    if not warmup and self.no_warmup_steps % self.train_cfg.target_update == 0:
-                        self.target_net.load_state_dict(self.policy_net.state_dict())
+                # Target Network 업데이트
+                if not warmup and self.no_warmup_steps % self.train_cfg.target_update == 0:
+                    self.target_net.load_state_dict(self.policy_net.state_dict())
                     
                 # Episode 수 저장
                 if self.wandb_run:

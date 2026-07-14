@@ -11,8 +11,9 @@ TRACE_MAP_MAX = 50
 LOCAL_VIEW_DIM = 51
 
 MAP_SAVE_DIR = 'src/path_planner/path_planner/maps'
-MAP_FILE_FORMAT = "{mode}_map_{H}x{W}_level{level}_{map_id:02d}.npy"
-MAP_FILE_REGEX = r"(?P<mode>\w+)_map_L(?P<level>\d+)_(?P<map_id>\d+)"
+TRAIN_MAP_FILE_FORMAT = "{mode}_map_{H}x{W}_level{level}_{map_id:02d}.npy"
+TRAIN_MAP_FILE_REGEX = r"(?P<mode>\w+)_map_(?P<H>\d+)x(?P<W>\d+)_level(?P<level>\d+)_(?P<map_id>\d+)"
+TEST_MAP_FILE_REGEX = r"(?P<mode>\w+)_map_L(?P<level>\d+)_(?P<map_id>\d+)"
 
 # Map을 시각화할 때 table, chair을 구별하기 위해 설정한 값
 # 실제로 훈련 또는 validation 과정에서 map을 생성할 때는 장애물을 전부 1로 바꿈

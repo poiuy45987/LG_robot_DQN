@@ -1,4 +1,5 @@
 import numpy as np
+import os
 import gymnasium as gym
 from gymnasium import spaces
 from collections import deque
@@ -9,8 +10,8 @@ import argparse
 import math
 from dataclasses import dataclass
 
-from path_planner.config import EnvConfig, DEFAULT_SEED, ANG_SEG_NUM, CLEANED_MAP_MAX, TRACE_MAP_MAX, LOCAL_VIEW_DIM
-from path_planner.map_layer import MapLayers, MapConfigSchema
+from path_planner.config import EnvConfig, DEFAULT_SEED, ANG_SEG_NUM, CLEANED_MAP_MAX
+from path_planner.map_layer import MapLayers, MapConfigSchema, BoundingBox
 from path_planner.utils.visualizer import display_image, visualize_mask, draw_layer, draw_obs, draw_traj
 from path_planner.utils.map_utils import float_to_int_coord, make_robot_mask
 from path_planner.utils.trajectory_metrics import cleaning_time_minutes, overlap_percent
@@ -72,7 +73,7 @@ class CoverageEnv(gym.Env):
         # --------------------------------------------
 
         # ---- 3. Map 관련 변수 ----
-        self.H = self.cfg.H; self.W = self.cfg.W
+        self.H = self.cfg.init_H; self.W = self.cfg.init_W  # Map이 새로 reset될 때마다 초기화됨.
         self.map_layers = MapLayers(self.cfg.map_cfg, self.map_rng, self.cfg.robot_size)
         # ------------------------
         
@@ -110,42 +111,48 @@ class CoverageEnv(gym.Env):
         self.fig = Figure()
         self.canvas = FigureCanvasAgg(self.fig)
         # ----------------------------------------------------
-        
-        # FIXME: 일단 여기에 둔 변수
+
+        # FIXME: 우선 여기에 적었음.
         self.cleaned_segment: np.ndarray | None = None
     
-    def reset(self, *, seed=None, map_config: MapConfigSchema | None = None):
+    def reset(self, *, seed: int=None, map_config: MapConfigSchema | None = None) -> tuple[dict, dict] | None:
         """
 
         Args:
-            seed (_type_, optional): _description_. Defaults to None.
+            seed (int, optional): Random generator seed. Defaults to None.
             map_config (MapConfigSchema, optional): None이면 map을 새로 생성하지 않고 시작점만 초기화. Defaults to None.
 
-        Raises:
-            RuntimeError: _description_
-
         Returns:
-            _type_: _description_
+            tuple[dict, dict] | None: tuple[dict, dict]인 경우, (obs, info)의 tuple이 출력. None인 경우는 reset에 실패한 경우. Map을 바꿔야 함.
         """
         super().reset(seed=seed) # 난수 생성기 self.np_random가 생성됨. 첫 episode에는 seed 초기화가 일어남. 다음 episode부터는 seed 초기화를 수행하지 않음.(seed=None)
 
         # 새로운 map 생성 또는 시작점만 바꾸고 map 초기화
         for _ in range(100):
             self.pos = self.map_layers.reset(map_config=map_config, env_rng=self.env_rng)
+            
+            # 시작 지점이 정해지면 이후 step 진행
             if self.pos is not None:
                 break
+            
+            # map이 지정된 경우에 시작 지점을 설정하지 못한 경우, for문을 더 수행하지 않고 method를 종료. 다음 map으로 넘어가기 위해 None을 return.
+            if map_config and map_config.file_path and self.pos is None:
+                print(f"Failed to set start pos at map file {os.path.basename(map_config.file_path)}")
+                return None
+        
+        # map 스펙이 지정되고 random하게 map을 생성하는 경우, 100회의 시도 이후에도 시작점을 설정하지 못하면 reset을 종료. 다른 map_config을 받기 위해 None을 return.    
         else:
-            raise RuntimeError("Failed to reset environment after 100 attempts.")
+            print("Failed to reset environment after 100 attempts.")
+            print(f"Map config: {map_config}")
+            return None
             
         # 초기 로봇이 바라보는 방향: 벽면의 반대 방향
         self.H = self.map_layers.map_info.H
         self.W = self.map_layers.map_info.W
-        eff_H = self.map_layers.map_info.eff_H
-        eff_W = self.map_layers.map_info.eff_W
-        self.dir = self._get_init_dir(self.pos, (eff_H, eff_W))
-        
-        # FIXME:
-        self.cleaned_segment = np.zeros((self.map_layers.map_info.H, self.map_layers.map_info.W), dtype=np.uint8)
+        eff_size = self.map_layers.map_info.eff_size
+        self.dir = self._get_init_dir(self.pos, eff_size)
+
+        self.cleaned_segment = np.zeros((self.H, self.W), dtype=np.uint8)
         
         # 로봇이 (cx, cy)로 이동했을 때 로봇이 cover한 영역, coverage 수치 등을 update
         self.map_layers.update_map_layers(*self.pos)
@@ -519,7 +526,7 @@ class CoverageEnv(gym.Env):
             self.patch_stack.append(current_patch)
     
     
-    def _get_obs(self):
+    def _get_obs(self) -> dict:
         
         cx, cy = self.pos
         
@@ -581,16 +588,15 @@ class CoverageEnv(gym.Env):
         return env_history
 
 
-    def _get_init_dir(self, init_pos: tuple[int, int], eff_size: tuple[int, int]):
+    def _get_init_dir(self, init_pos: tuple[int, int], eff_size: BoundingBox):
         """
         초기 위치에서 로봇이 바라보는 방향 설정: 로봇이 붙어 있는 벽과 반대 방향을 바라보도록 설정
         """
-        eff_H, eff_W = eff_size
         wall_dists = np.array([
-            init_pos[0],               # West wall distance
-            init_pos[1],               # South wall distance
-            (eff_W-1) - self.pos[0], # East wall distance
-            (eff_H-1) - self.pos[1]  # North wall distance
+            init_pos[0] - eff_size.x_min,       # West wall distance
+            init_pos[1] - eff_size.y_min,       # South wall distance
+            (eff_size.x_max-1) - self.pos[0],   # East wall distance
+            (eff_size.y_max-1) - self.pos[1]    # North wall distance
         ])
         min_dist = wall_dists.min()
         first_candidate_dir = np.where(wall_dists == min_dist)[0] * ANG_SEG_NUM

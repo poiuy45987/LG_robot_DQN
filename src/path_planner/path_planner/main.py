@@ -45,6 +45,7 @@ def parse_args():
     # train_set_group.add_argument('--warmup_episodes', type=int, default=20, help='Warmup을 수행하는 episode 수 (Default: 20)')
     train_set_group.add_argument('--warmup_ep_steps', type=int, help='Warmup 시 episode당 step 수 (Default: 10,000)')
     train_set_group.add_argument('--warmup_tot_steps', type=int, help='Warmup을 완료하는 최소 전체 step 수 (Default: 200,000)')
+    train_set_group.add_argument('--use_train_maps', action='store_true', help='Train 시 maps 폴더에 저장된 map을 training set으로 이용')
     
     # 훈련시킬 최대 episode 수 설정
     train_set_group.add_argument('--max_episodes', type=int, help='Total episodes to train (Default: 30,000)')

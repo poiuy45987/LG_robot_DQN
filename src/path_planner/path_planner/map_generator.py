@@ -7,7 +7,15 @@ import os
 import re
 import zipfile
 
-from path_planner.config import MapConfig, DEFAULT_SEED, MAP_SAVE_DIR, MAP_FILE_FORMAT, MAP_FILE_REGEX, GridCell
+from path_planner.config import (
+    MapConfig, 
+    DEFAULT_SEED, 
+    MAP_SAVE_DIR, 
+    TRAIN_MAP_FILE_FORMAT, 
+    TRAIN_MAP_FILE_REGEX, 
+    TEST_MAP_FILE_REGEX, 
+    GridCell
+)
 from path_planner.utils.map_utils import (
     BoundingBox, 
     get_eff_size_from_obs_map, 
@@ -28,10 +36,16 @@ class ObstacleMap:
     eff_size: BoundingBox
     
     @classmethod
-    def load_from_file(cls, file_path: str):
+    def load_from_file(cls, file_path: str, mode: str = "test"):
         """파일 경로를 받아 map 파일 제목을 가지고 정보를 뽑아냄"""
         file_name = os.path.basename(file_path)
-        match = re.search(MAP_FILE_REGEX, file_name)
+        
+        match = None
+        for regex in [TRAIN_MAP_FILE_REGEX, TEST_MAP_FILE_REGEX]:
+            match = re.search(regex, file_name)
+            if match:
+                break
+            
         if not match:
             raise ValueError(f"파일명('{file_name}')이 규칙과 일치하지 않습니다.")
             
@@ -65,9 +79,10 @@ class MapGenerator:
         책상, 의자, 작은 장애물 등 집과 비슷한 형태의 map을 형성하는 method
 
         Args:
+            robot_diameter (int): 로봇의 지름 길이를 grid 수로 표현
             level (int, optional): map 난이도. 1~4까지 설정 가능. 높을수록 장애물이 많음. Defaults to 1.
+            map_size (tuple[int, int], optional): Map의 grid 크기를 (H, W)로 입력받음. None일 경우, (init_H, init_W)에 장애물 배치 후 crop. Defaults to None.
             visualize (bool, optional): Map 시각화 시 책상, 의자, 작은 장애물을 구별해서 보여줄지 여부. Defaults to False.
-
         Returns:
             ObstacleMap: Obstacle이 배치된 grid map의 numpy 배열과 관련 정보.
         """
@@ -280,7 +295,6 @@ class MapGenerator:
             eff_size=BoundingBox(x_min=0, x_max=W, y_min=0, y_max=H)
         )
 
-# FIXME: 수정 필요
 def generate_multiple_maps(robot_diameter: int,
                            mode: str = "test",
                            map_num_per_cond: int = 10,
@@ -333,7 +347,7 @@ def generate_multiple_maps(robot_diameter: int,
             
             # Map file, png file 이름 설정
             H, W = obs_map.obs_map.shape
-            map_file_name = MAP_FILE_FORMAT.format(
+            map_file_name = TRAIN_MAP_FILE_FORMAT.format(
                 mode=mode,
                 H=H,
                 W=W,
