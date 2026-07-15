@@ -308,7 +308,7 @@ def draw_traj(map_layers: MapLayers, fig: Figure, pos: tuple[float, float], traj
     
     
 def draw_obs(obs: dict, fig: Figure, stack_steps: int, local_view_dim: int, cleaned_map_max: int, 
-             ray_data_indices: tuple[int, int], coverage_idx: int, preprocessor=None):
+             preprocessor=None):
         
     fig.clear() # 이전 그림 지우기
     fig.set_size_inches(15, 12)
@@ -399,13 +399,14 @@ def draw_obs(obs: dict, fig: Figure, stack_steps: int, local_view_dim: int, clea
     ax_txt.axis('off')
     
     # text 출력
-    ray_data = obs['vec'][ray_data_indices[0]:ray_data_indices[1]]
+    ray_data = obs['loc_vec']
     ray_str = np.array2string(ray_data, separator=', ', formatter={'float_kind': lambda x: f"{x:.2f}"})
     
     vec_info_text = (f"[Observation Status]\n"
-    f"- Normlized position: ({obs['vec'][0]:.2f}, {obs['vec'][1]:.2f})\n"
+    f"- Normlized position: ({obs['glob_vec'][0]:.2f}, {obs['glob_vec'][1]:.2f})\n"
+    f"- Direction vector: ({obs['glob_vec'][2]:.2f}, {obs['glob_vec'][3]:.2f})\n"
     f"- Normalized ray: {ray_str}\n"
-    f"- Normalized coverage: {obs['vec'][coverage_idx]:.2f}\n")
+    f"- Normalized coverage: {obs['glob_vec'][4]:.2f}\n")
     ax_txt.text(0, 0.5, vec_info_text, transform=ax_txt.transAxes, fontsize=14,
                 va='top', ha='left', family='monospace')
     # ---------------------------------------------

@@ -536,16 +536,10 @@ class CoverageEnv(gym.Env):
         # ------------------------------------------
         
         # ---------------- Additional state vector ----------------
-        # 학습에 도움이 될 만한 수치적인 정보를 생성
-        # 로봇의 위치 정보: [-1, 1]의 범위로 정규화
-        x_norm = (cx/(self.W-1))*2-1
-        y_norm = (cy/(self.H-1))*2-1
-
-        # dir_onehot
+        
+        # Local information
         num_action = self.action_space.n
-        dir_onehot = np.zeros(ALL_DIR_NUM, dtype=np.float32)
-        dir_onehot[self.dir] = 1.0
-
+        
         # 각 방향에서 바라본 여유 공간: [-1, 1]이 범위로 정규화
         ray_norm = np.zeros(num_action, dtype=np.float32)
         for d in range(num_action):
@@ -554,19 +548,29 @@ class CoverageEnv(gym.Env):
         action_mask = (ray_norm != 0).astype(np.float32)
         ray_norm = (ray_norm / max(1, self.cfg.max_forward))*2-1
         
+        loc_vec = ray_norm
+        
+        # Global information
+        
+        # 로봇의 위치 정보: [-1, 1]의 범위로 정규화
+        x_norm = (cx/(self.W-1))*2-1
+        y_norm = (cy/(self.H-1))*2-1
+
+        # 로봇이 바라보는 방향
+        dir_vec = self.all_dir_vecs[self.dir]
+
         # Coverage 비율: [0, 1] 범위의 숫자를 [-1, 1] 범위로 정규화
         cov = self.coverage
         cov_norm = cov*2-1
-
-        obs_vec = np.concatenate([
+        
+        glob_vec = np.concatenate([
             np.array([x_norm, y_norm], dtype=np.float32),
-            dir_onehot,
-            ray_norm,
+            dir_vec,
             np.array([cov_norm], dtype=np.float32),
         ], axis=0).astype(np.float32)
         # ----------------------------------------------------
         
-        return {"map": total_patch, "vec": obs_vec, 'action_mask': action_mask}
+        return {"map": total_patch, "loc_vec": loc_vec, "glob_vec": glob_vec, "action_mask": action_mask}
     
     
     def _get_env_history_data(self) -> EnvHistory:
@@ -671,8 +675,6 @@ class CoverageEnv(gym.Env):
                      stack_steps=self.cfg.stack_steps, 
                      local_view_dim=self.cfg.local_view, 
                      cleaned_map_max=CLEANED_MAP_MAX,
-                     ray_data_indices=(2+ALL_DIR_NUM, 2+ALL_DIR_NUM+self.action_space.n), 
-                     coverage_idx=2+ALL_DIR_NUM+self.action_space.n,
                      preprocessor=preprocessor)
             
         self.canvas.draw()
