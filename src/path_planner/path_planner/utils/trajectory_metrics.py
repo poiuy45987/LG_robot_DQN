@@ -8,9 +8,9 @@ import math
 from typing import Sequence
 
 # Map 해상도 (grid 한변 길이; m)
-GRID_RESOLUTION_M = 0.02
+GRID_RESOLUTION_M = 0.025
 # 로봇청소기 지름 (m)
-ROBOT_DIAMETER_M = 0.32
+ROBOT_DIAMETER_M = 0.36
 
 # 선형 속도/가속도 (m/s, m/s^2)
 LINEAR_VELOCITY = 0.4

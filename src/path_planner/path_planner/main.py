@@ -36,6 +36,10 @@ def parse_args():
     parser.add_argument('--test_start_point_num', type=int, default=3, help='Test 시 한 map당 테스트해볼 start_poit 수 (Default: 3)')
     parser.add_argument('--not_use_maps_folder', action='store_true', help='Test 시, maps 폴더에 저장된 map이 아닌 random하게 생성한 map을 사용')
     
+    parser.add_argument('action_enc_dim', type=int, default=128, help='Encoded action의 dimension')
+    parser.add_argument('lstm_in_prj_dim', type=int, default=32, help='LSTM cell block의 input vector의 dimension')
+    parser.add_argument('lstm_hid_dim', type=int, default=512, help='LSTM cell block의 hidden state vector의 dimension')
+    
     # ---- Training hyperparameter 설정 ----
     
     train_set_group = parser.add_argument_group('Training setting')
@@ -46,6 +50,9 @@ def parse_args():
     train_set_group.add_argument('--warmup_ep_steps', type=int, help='Warmup 시 episode당 step 수 (Default: 10,000)')
     train_set_group.add_argument('--warmup_tot_steps', type=int, help='Warmup을 완료하는 최소 전체 step 수 (Default: 200,000)')
     train_set_group.add_argument('--use_train_maps', action='store_true', help='Train 시 maps 폴더에 저장된 map을 training set으로 이용')
+    train_set_group.add_argument('--max_step_per_eps', type=int, help='Train 시 한 map에 대해서 훈련시키는 최대 횟수')
+    train_set_group.add_argument('--max_eps_per_map_size', type=int, help='Train 시 한 map size에 대해서 훈련시키는 episode 최대 횟수')
+    train_set_group.add_argument('--path_reward_thres', type=float, help='Train 시 한 map size를 바꾸는 path reward threshold')
     
     # 훈련시킬 최대 episode 수 설정
     train_set_group.add_argument('--max_episodes', type=int, help='Total episodes to train (Default: 30,000)')

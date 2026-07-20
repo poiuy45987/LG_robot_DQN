@@ -91,6 +91,7 @@ class CoverageEnv(gym.Env):
         
         self.warmup: bool = False
         self.warmup_steps: int = 0
+        self.done: bool = False
         
         self.env_history: list[EnvHistory] = []
         # ------------------------------
@@ -164,6 +165,7 @@ class CoverageEnv(gym.Env):
         self.last_coverage = 0.0
         self.no_progress_cnt = 0
         self.env_history = [self._get_env_history_data()]
+        self.done = False
         
         # self.patch_stack reset
         self.patch_stack = deque(maxlen=self.cfg.stack_steps) # Observation 정보를 얻는 local map step 수
@@ -177,6 +179,9 @@ class CoverageEnv(gym.Env):
         
         if action is None and global_dir is None:
             raise ValueError("Either action or global_dir must be provided.")
+        
+        if self.done:
+            return self._get_obs(), 0.0, True, True, {}
             
         self.steps += 1
 
@@ -271,6 +276,9 @@ class CoverageEnv(gym.Env):
         if self.steps >= max_steps:
             truncated = True
 
+        if terminated or truncated:
+            self.done = True
+            
         info = {
             "Coverage": cur_coverage, 
             "Steps": self.steps, 
@@ -342,31 +350,6 @@ class CoverageEnv(gym.Env):
     
     def is_collide(self, cx: float, cy: float) -> bool:
         return self.map_layers.collides(cx, cy)
-    
-    
-    # def mark_current_segment(self):
-    #     cx, cy = float_to_int_coord(*self.pos)
-    #     mode_map = self.map_layers.mode_map
-    #     H, W = mode_map.shape
-
-    #     if not (0 <= cx < W and 0 <= cy < H) or mode_map[cy, cx] != 0:
-    #         return
-
-    #     # 이미 이 구역을 마킹 중인지 체크하기 위해 cleaned_segment 확인
-    #     # 만약 이미 1로 칠해진 곳이라면 굳이 BFS를 또 돌릴 필요가 없음
-    #     if self.cleaned_segment[cy, cx] == 1:
-    #         return
-
-    #     queue = deque([(cx, cy)])
-    #     self.cleaned_segment[cy, cx] = 1
-    #     while queue:
-    #         x, y = queue.popleft()
-    #         for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-    #             nx, ny = x + dx, y + dy
-    #             if 0 <= nx < W and 0 <= ny < H:
-    #                 if mode_map[ny, nx] == 0 and self.cleaned_segment[ny, nx] == 0:
-    #                     self.cleaned_segment[ny, nx] = 1
-    #                     queue.append((nx, ny))
     
 
     @property
