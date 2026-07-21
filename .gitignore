@@ -5,6 +5,7 @@ models/
 logs/
 *_checkpoints/
 mujoco_environments/
+.conda/
 
 # Python cache files
 __pycache__/
@@ -15,5 +16,8 @@ __pycache__/
 # Vessl output files
 /output/
 
-# Simulation files
+# wandb output files
+/wandb/
+
+/*.egg-info/
 lgsim.tar.gz
