@@ -1,8 +1,14 @@
 import argparse
 import os
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
-from .agent import DQNAgent
-from .config import DEFAULT_SEED, MAP_SAVE_DIR
+import torch
+torch.set_num_threads(1)
+
+from path_planner.LSTM_agent import LSTMAgent
+from path_planner.config import DEFAULT_SEED, MAP_SAVE_DIR
 
 def parse_args():
     
@@ -30,28 +36,25 @@ def parse_args():
     parser.add_argument('--pre_model_name', type=str, default=None, help='Pre-trained model file name for continued training')
     parser.add_argument('--model_name', type=str, default='model.pth', help='Model file name for saving or loading')
     parser.add_argument('--best_traj_img_name', type=str, default='best_coverage_path.png', help='Best path image file name')
-    # parser.add_argument('--buffer_file_name', type=str, default='replay_buffer_latest.npz', help='Replay buffer file name')
     parser.add_argument('--map_save_dir', type=str, default=MAP_SAVE_DIR, help='Directory for saving generated maps')
+    
     parser.add_argument('--test_map_num', type=int, default=5, help='Test 시 사용할 map 수 (Default: 5)')
     parser.add_argument('--test_start_point_num', type=int, default=3, help='Test 시 한 map당 테스트해볼 start_poit 수 (Default: 3)')
     parser.add_argument('--not_use_maps_folder', action='store_true', help='Test 시, maps 폴더에 저장된 map이 아닌 random하게 생성한 map을 사용')
     
-    parser.add_argument('action_enc_dim', type=int, default=128, help='Encoded action의 dimension')
-    parser.add_argument('lstm_in_prj_dim', type=int, default=32, help='LSTM cell block의 input vector의 dimension')
-    parser.add_argument('lstm_hid_dim', type=int, default=512, help='LSTM cell block의 hidden state vector의 dimension')
+    # Model dimension 관련 설정
+    parser.add_argument('--action_enc_dim', type=int, default=128, help='Encoded action의 dimension')
+    parser.add_argument('--lstm_in_prj_dim', type=int, default=32, help='LSTM cell block의 input vector의 dimension')
+    parser.add_argument('--lstm_hid_dim', type=int, default=512, help='LSTM cell block의 hidden state vector의 dimension')
     
     # ---- Training hyperparameter 설정 ----
     
     train_set_group = parser.add_argument_group('Training setting')
     
     # 데이터를 쌓는 warmup 과정 설정, Replay buffer 설정
-    train_set_group.add_argument('--buffer_size', type=int, help='Replay buffer size (Default: 500,000)')
-    # train_set_group.add_argument('--warmup_episodes', type=int, default=20, help='Warmup을 수행하는 episode 수 (Default: 20)')
-    train_set_group.add_argument('--warmup_ep_steps', type=int, help='Warmup 시 episode당 step 수 (Default: 10,000)')
-    train_set_group.add_argument('--warmup_tot_steps', type=int, help='Warmup을 완료하는 최소 전체 step 수 (Default: 200,000)')
     train_set_group.add_argument('--use_train_maps', action='store_true', help='Train 시 maps 폴더에 저장된 map을 training set으로 이용')
     train_set_group.add_argument('--max_step_per_eps', type=int, help='Train 시 한 map에 대해서 훈련시키는 최대 횟수')
-    train_set_group.add_argument('--max_eps_per_map_size', type=int, help='Train 시 한 map size에 대해서 훈련시키는 episode 최대 횟수')
+    train_set_group.add_argument('--max_eps_num_per_map_size', type=int, help='Train 시 한 map size에 대해서 훈련시키는 episode 최대 횟수')
     train_set_group.add_argument('--path_reward_thres', type=float, help='Train 시 한 map size를 바꾸는 path reward threshold')
     
     # 훈련시킬 최대 episode 수 설정
@@ -64,75 +67,14 @@ def parse_args():
     train_set_group.add_argument('--optimizer', choices=['sgd', 'adam'], help='Optimizer to use for training (Default: sgd)')
     train_set_group.add_argument('--lr', type=float, help='Learning rate for the optimizer (Default: 1e-4)')
     train_set_group.add_argument('--momentum', type=float, help='Momentum for SGD optimizer  (Default: 0.9)')
-    train_set_group.add_argument('--target_update', type=int, help='Target network update frequency (steps) (Default: 1,000)')
-    train_set_group.add_argument('--policy_update', type=int, help='Policy network update frequency (steps)  (Default: 20)')
     
     # Validation 주기 및 checkpoint 저장 주기 설정, Validation 설정
     train_set_group.add_argument('--valid_freq', type=int, help='Validation을 수행하는 주기 (episodes) (Default: 100)')
     train_set_group.add_argument('--ckp_freq', type=int, help='Checkpoint를 저장하는 주기 (episodes) (Default: 20)')
     train_set_group.add_argument('--valid_map_num', type=int, help='Validation 시 사용할 map 수 (Default: 5)')
     train_set_group.add_argument('--valid_start_point_num', type=int, help='Validation 시 한 map당 테스트해볼 start_poit 수 (Default: 3)')
-    
-    # Exploration 관련 설정: Episilon 기법, Softmax 기법, Noisy layer 사용
-    train_set_group.add_argument('--use_epsilon', action='store_true', help='Use epsilon-greedy strategy')
-    train_set_group.add_argument('--epsilon_start', type=float, help='Starting value of epsilon for epsilon-greedy policy (Default: 1.0)')
-    train_set_group.add_argument('--epsilon_end', type=float, help='Final value of epsilon after decay (Default: 0.1')
-    train_set_group.add_argument('--epsilon_decay', type=int, help='Number of steps to decay epsilon from start to end (Default: 200,000)')
-    
-    train_set_group.add_argument('--use_softmax', action='store_true', help='Use softmax action selection instead of epsilon-greedy')
-    train_set_group.add_argument('--softmax_temp', type=float, help='Temperature parameter for softmax action selection (Default: 1.0)')
-    
-    train_set_group.add_argument('--use_noisy', action='store_true', help='Use noisy layers in the network')
-    train_set_group.add_argument('--target_with_noisy', action='store_true', help='Use noisy layers in the target network') 
-    
-    # Action masking 설정
-    train_set_group.add_argument('--use_action_masking', action='store_true', help='Use action masking on training')
-    
-    # Heuristic action 사용 여부
-    train_set_group.add_argument('--use_heuristic', action='store_true', help='Use heuristic action in training') 
-    
-    # State pre-processing 설정
-    train_set_group.add_argument('--do_normalize', action='store_true', help='Do normalize on grid map data')
-    
-    # Q-value 관련 설정
-    train_set_group.add_argument('--gamma', type=float, help='Discount factor for future rewards (default: 0.99)')
-    
-    # Training을 하나의 map으로만 시킬지 결정
-    train_set_group.add_argument('--reset_only_start_pos', action='store_true', help='Episode가 바뀌면 map을 변경하지 않고 시작점만 변경')
-    
-    # DQN extension 설정
-    train_set_group.add_argument('--double_dqn', action='store_true', help='Double DQN을 사용할지 여부를 결정')
-    
     # -------------------------
         
-    # # ---- Map 관련 설정 ----
-    # map_set_group = parser.add_argument_group('Map setting')
-    
-    # map_set_group.add_argument('--grid_size', type=float, help='Grid size: 단위 cm (default: 4.0)')
-    # map_set_group.add_argument('--map_height', type=float, help='Map의 세로 길이: 단위 cm (default: 800.0)')
-    # map_set_group.add_argument('--map_width', type=float, help='Map의 가로 길이: 단위 cm (default: 800.0)')
-    
-    # map_set_group.add_argument('--not_use_house_map', action='store_true', help='의자와 책상이 포함된 house map을 이용할지 말지 결정')
-    
-    # map_set_group.add_argument('--num_tables', type=int, help='Table 수의 최댓값 (default: 3)')
-    # map_set_group.add_argument('--max_table_size', type=float, help='Table 한 변 길이의 최댓값: 단위 cm (default: 200.0)')
-    # map_set_group.add_argument('--min_table_size', type=float, help='Table 한 변 길이의 최솟값: 단위 cm (default: 100.0)')
-    # map_set_group.add_argument('--table_leg_size', type=float, help='Table 다리 두께: 단위 cm (default: 10.0)')
-
-    # map_set_group.add_argument('--chairs_per_table_min', type=int, help='Table 하나에 배치하는 의자의 최소 개수 (default: 2)')
-    # map_set_group.add_argument('--chairs_per_table_max', type=int, help='Table 하나에 배치하는 의자의 최대 개수 (default: 4)')
-    # map_set_group.add_argument('--max_chair_size', type=float, help='의자의 한 변 길이: 단위 cm (default: 60.0)')
-    # map_set_group.add_argument('--min_chair_size', type=float, help='의자의 한 변 길이: 단위 cm (default: 50.0)')
-    # map_set_group.add_argument('--chair_leg_size', type=float, help='의자의 다리 두께: 단위 cm (default: 5.0)')
-    # map_set_group.add_argument('--chair_spread', type=float, help='의자가 책상으로부터 떨어진 정도: 단위 cm (default: 20.0)')
-    
-    # map_set_group.add_argument('--small_obs_size_max', type=float, help='작은 장애물의 크기 최댓값: 단위 cm (default: 15.0)')
-    # map_set_group.add_argument('--small_obs_size_min', type=float, help='작은 장애물의 크기 최솟값: 단위 cm (default: 10.0)')
-    # map_set_group.add_argument('--window_size', type=float, help='작은 장애물을 배치하기 위한 window 크기: 단위 cm (default: 100.0)')
-    # map_set_group.add_argument('--small_obs_num_per_window_max', type=int, help='Window 하나에 작은 장애물을 배치하는 개수 최댓값 (default: 2)')
-    # map_set_group.add_argument('--small_obs_num_per_window_min', type=int, help='Window 하나에 작은 장애물을 배치하는 개수 최솟값 (default: 1)')
-    # -----------------------
-    
     # ---- Environment 관련 설정 ----
     
     env_set_group = parser.add_argument_group('Environment setting')
@@ -192,11 +134,11 @@ def main():
     
     # args parsing
     args = parse_args()
-    dqn_agent = DQNAgent(args)
+    lstm_agent = LSTMAgent(args)
     if args.mode == 'train':
-        dqn_agent.train()
+        lstm_agent.train()
     elif args.mode == 'test':
-        dqn_agent.test(use_maps_folder=not args.not_use_maps_folder)
+        lstm_agent.test(use_maps_folder=not args.not_use_maps_folder)
     elif args.mode == 'see_map':
         visualize_test_map(seed=args.seed)
 

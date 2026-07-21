@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import os
 import warnings
 from enum import IntEnum
 from frozendict import frozendict
@@ -10,7 +11,7 @@ CLEANED_MAP_MAX = 10
 TRACE_MAP_MAX = 50
 LOCAL_VIEW_DIM = 51
 
-MAP_SAVE_DIR = 'src/path_planner/path_planner/maps'
+MAP_SAVE_DIR = os.path.normpath('src/path_planner/path_planner/maps')
 TRAIN_MAP_FILE_FORMAT = "{mode}_map_{H}x{W}_level{level}_{map_id:02d}.npy"
 TRAIN_MAP_FILE_REGEX = r"(?P<mode>\w+)_map_(?P<H>\d+)x(?P<W>\d+)_level(?P<level>\d+)_(?P<map_id>\d+)"
 TEST_MAP_FILE_REGEX = r"(?P<mode>\w+)_map_L(?P<level>\d+)_(?P<map_id>\d+)"
@@ -250,9 +251,9 @@ class EnvConfig:
     max_forward: int = 50 # 단위: cm
     
     # Step, Termination 관련
-    max_steps: int = 100000
-    max_no_progress_steps: int = 300
-    max_no_progress_steps_final: int = 500
+    max_steps: int = 1500
+    max_no_progress_steps: int = 10
+    max_no_progress_steps_final: int = 50
     target_coverage: float = 0.95
     final_coverage_thres: float = 0.90
     stack_steps: int = 1 # Map의 observation data의 step 수

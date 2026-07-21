@@ -19,8 +19,8 @@ class LSTMPolicyNetwork(nn.Module):
         raw_actions = torch.stack([torch.cos(ang_diff_tensor), torch.sin(ang_diff_tensor)], dim=1)
         self.register_buffer('raw_actions', raw_actions) # FIXME: (cos, sin) 형태의 모든 action들을 저장. Shape: (action_num, action_dim)
         
-        self.action_dim = self.raw_actions.size(1) # Input으로 받는 각 action의 dimension (Default: [cos theta, sin theta])
-        self.action_num = self.raw_actions.size(0) # Action 선택지 수
+        self.action_dim = raw_actions.size(1) # Input으로 받는 각 action의 dimension (Default: [cos theta, sin theta])
+        self.action_num = raw_actions.size(0) # Action 선택지 수
         self.action_enc_dim = kwargs.get('action_enc_dim', 128) # Action vector를 encoding하는 dimension (Default: 128)
         
         self.local_view_dim = kwargs.get('local_view_dim', 51) # Local view map의 dimension

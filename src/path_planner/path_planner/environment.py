@@ -67,8 +67,10 @@ class CoverageEnv(gym.Env):
         # ---- 2. Observation_space, Action_space ----
         self.action_space = spaces.Discrete(ACTION_NUM, seed=seed)
         self.observation_space = spaces.Dict({
-            "map": spaces.Box(low=0, high=1, shape=(3, self.cfg.local_view, self.cfg.local_view), dtype=np.uint8),
-            "vec": spaces.Box(low=-1.0, high=1.0, shape=(2+ALL_DIR_NUM+ACTION_NUM+1,), dtype=np.float32), # 2+4+4+1
+            "map": spaces.Box(low=0.0, high=1.0, shape=(3*self.cfg.stack_steps, self.cfg.local_view, self.cfg.local_view), dtype=np.float32),
+            "loc_vec": spaces.Box(low=-1.0, high=1.0, shape=(ACTION_NUM,), dtype=np.float32),
+            "glob_vec": spaces.Box(low=-1.0, high=1.0, shape=(5,), dtype=np.float32),
+            "action_mask": spaces.Box(low=0, high=1, shape=(ACTION_NUM,), dtype=np.float32)
         })
         # --------------------------------------------
 
@@ -138,7 +140,7 @@ class CoverageEnv(gym.Env):
             
             # map이 지정된 경우에 시작 지점을 설정하지 못한 경우, for문을 더 수행하지 않고 method를 종료. 다음 map으로 넘어가기 위해 None을 return.
             if map_config and map_config.file_path and self.pos is None:
-                print(f"Failed to set start pos at map file {os.path.basename(map_config.file_path)}")
+                # print(f"Failed to set start pos at map file {os.path.basename(map_config.file_path)}")
                 return None
         
         # map 스펙이 지정되고 random하게 map을 생성하는 경우, 100회의 시도 이후에도 시작점을 설정하지 못하면 reset을 종료. 다른 map_config을 받기 위해 None을 return.    
