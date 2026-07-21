@@ -275,23 +275,49 @@ def crop_obstacle_area(obs_map: np.ndarray, robot_diameter: int, BLANK: int=0) -
     cropped_map = eff_obs_map[y_min:y_max+1, x_min:x_max+1]
     return cropped_map.copy()
 
-# FIXME: vectorization 필요, 나중에 numpy 형태로 변환
 def get_rect_indices_for_big_rect(
     cx: float, cy: float, 
     rect_width: float, rect_height: float,
     map_width: int, map_height: int, 
-    theta: float) -> list[tuple[int, int]]:
+    theta: float, allow_crop: bool=False) -> np.ndarray:
     """
     Grid map에서 직사각형을 그릴 때, 색칠할 grid의 indices를 출력하는 method
+    
 
     Args:
         cx, cy: 그릴 직사각형의 중심 좌표
-        width, height: 그릴 직사각형의 가로, 세로 길이
+        rect_width, rect_height: 그릴 직사각형의 가로, 세로 길이
+        map_width, map_height: 직사각형을 그릴 map의 가로, 세로 길이
         theta: 직사각형이 반시계 방향으로 회전한 정도(rad 단위)
+        allow_crop:
+            - False (기본값): 식탁의 일부라도 맵 밖으로 나가면 배치 불가로 보고 빈 배열 반환.
+            - True: 맵 밖으로 나가는 부분은 잘라내고(crop), 맵 안에 들어온 픽셀만 반환. 
+    
+    Returns:
+        np.ndarray:
+            - Map 상에서 직사각형이 차지하는 grid의 index를 (N, 2) 형태로 반환.
+            - x좌표: [:, 0] / y좌표: [:, 1]
+            - 직사각형이 유효하지 않은 경우 빈 배열 반환
     """
     cos_t = math.cos(theta)
     sin_t = math.sin(theta)
-    grid_indices = []
+    hw, hh = rect_width / 2.0, rect_height / 2.0
+    
+    # 직사각형이 map 내부에 완전히 들어와야 하는 경우(allow_crop=False): 4개 모서리가 맵 내부인지 사전 검사
+    if not allow_crop:
+        local_corners = np.array([
+            [-hw, -hh],
+            [ hw, -hh],
+            [ hw,  hh],
+            [-hw,  hh]
+        ])
+        world_x = cx + (local_corners[:, 0] * cos_t - local_corners[:, 1] * sin_t)
+        world_y = cy + (local_corners[:, 0] * sin_t + local_corners[:, 1] * cos_t)
+
+        # 모서리 중 하나라도 맵 밖으로 나가면 빈 array를 반환
+        if np.any(world_x < 0) or np.any(world_x >= map_width) or \
+           np.any(world_y < 0) or np.any(world_y >= map_height):
+            return np.empty((0, 2), dtype=int)
     
     # 각 grid가 직사각형 영역에 속하는지 검사
     # 검사 범위는 직사각형의 대각선 길이를 한 변의 길이로 하는 정사각형
@@ -301,38 +327,65 @@ def get_rect_indices_for_big_rect(
     y_min = max(0, int(math.floor(cy - r)))
     y_max = min(map_height - 1, int(math.ceil(cy + r)))
 
-    # 각 그리드 칸의 중심점이 직사각형 내부에 있는지 검사
-    for ix in range(x_min, x_max + 1):
-        for iy in range(y_min, y_max + 1):
-            # 그리드 칸의 중심점: (ix.5, iy.5)
-            # (dx, dy): 직사각형 중심점 (cx, cy)를 원점으로 봤을 때 grid 중심점의 좌표
-            dx = (ix + 0.5) - cx
-            dy = (iy + 0.5) - cy
-            
-            # 역회전 변환 (Rotated frame -> Local axis-aligned frame)
-            nx = dx * cos_t + dy * sin_t
-            ny = -dx * sin_t + dy * cos_t
-            
-            # 범위 판정 (부동소수점 오차 방지를 위해 아주 작은 값 1e-9 추가)
-            if abs(nx) <= (rect_width / 2) + 1e-9 and abs(ny) <= (rect_height / 2) + 1e-9:
-                grid_indices.append((ix, iy))
+    # 예외 처리: 범위를 벗어난 경우
+    if x_min > x_max or y_min > y_max:
+        return np.empty((0, 2), dtype=int)
     
-    return grid_indices
+    # 검사 범위 정사각형 범위 내의 grid 좌표 배열 생성
+    ix_vals = np.arange(x_min, x_max + 1)
+    iy_vals = np.arange(y_min, y_max + 1)
+    IX, IY = np.meshgrid(ix_vals, iy_vals, indexing='xy')
+    
+    # 그리드 칸의 중심점: (ix.5, iy.5)
+    # (dx, dy): 직사각형 중심점 (cx, cy)를 원점으로 봤을 때 grid 중심점의 좌표
+    DX = (IX + 0.5) - cx
+    DY = (IY + 0.5) - cy
+    
+    # 역회전 변환 (Rotated frame -> Local axis-aligned frame)
+    NX = DX * cos_t + DY * sin_t
+    NY = -DX * sin_t + DY * cos_t
+    
+    # NX, NY 중 직사각형에 포함되는 grid index를 고름
+    mask = (np.abs(NX) <= (rect_width / 2.0) + 1e-9) & \
+           (np.abs(NY) <= (rect_height / 2.0) + 1e-9)
+    valid_ix = IX[mask]
+    valid_iy = IY[mask]
+    
+    return np.column_stack((valid_ix, valid_iy))
 
-# FIXME: vectorization 필요
 def get_rect_indices_for_small_rect(
     cx: float, cy: float, 
     rect_width: float, rect_height: float,
     map_width: int, map_height: int, 
-    theta: float) -> list[tuple[int, int]]:
+    theta: float, allow_crop: bool=False) -> list[tuple[int, int]]:
     """
     Grid map에서 직사각형을 그릴 때, 색칠할 grid의 indices를 출력하는 method
 
     Args:
         cx, cy: 그릴 직사각형의 중심 좌표
-        width, height: 그릴 직사각형의 가로, 세로 길이
+        rect_width, rect_height: 그릴 직사각형의 가로, 세로 길이
+        map_width, map_height: 직사각형을 그릴 map의 가로, 세로 길이
         theta: 직사각형이 반시계 방향으로 회전한 정도(rad 단위)
+        allow_crop:
+            - False (기본값): 식탁의 일부라도 맵 밖으로 나가면 배치 불가로 보고 빈 배열 반환.
+            - True: 맵 밖으로 나가는 부분은 잘라내고(crop), 맵 안에 들어온 픽셀만 반환.
+    
+    Returns:
+        np.ndarray:
+            - Map 상에서 직사각형이 차지하는 grid의 index를 (N, 2) 형태로 반환.
+            - x좌표: [:, 0] / y좌표: [:, 1]
+            - 직사각형이 유효하지 않은 경우 빈 배열 반환
     """
+    # 직사각형이 map에서 잘리는지 검사
+    raw_x_min = int(cx - rect_width / 2.0 + 0.5)
+    raw_x_max = int(cx + rect_width / 2.0 + 0.5)
+    raw_y_min = int(cy - rect_height / 2.0 + 0.5)
+    raw_y_max = int(cy + rect_height / 2.0 + 0.5)
+    if not allow_crop:
+        if raw_x_min < 0 or raw_x_max >= map_width or \
+           raw_y_min < 0 or raw_y_max >= map_height:
+            return np.empty((0, 2), dtype=int)
+    
     
     # 직사각형을 그릴 grid의 시작과 끝 좌표를 int 형식으로 얻음
     x_min = max(0, int(cx - rect_width/2 + 0.5))
@@ -340,9 +393,14 @@ def get_rect_indices_for_small_rect(
     y_min = max(0, int(cy - rect_height/2 + 0.5))
     y_max = min(map_height - 1, int(cy + rect_height/2 + 0.5))
     
-    grid_indices = [(x, y) for x in range(x_min, x_max + 1) for y in range(y_min, y_max + 1)]
+    if x_min > x_max or y_min > y_max:
+        return np.empty((0, 2), dtype=int)
     
-    return grid_indices
+    ix_vals = np.arange(x_min, x_max + 1)
+    iy_vals = np.arange(y_min, y_max + 1)
+    IX, IY = np.meshgrid(ix_vals, iy_vals, indexing='xy')
+    
+    return np.column_stack((IX.ravel(), IY.ravel()))
 
 def get_leg_indices(
     cx: float, cy: float,
@@ -374,7 +432,7 @@ def get_leg_indices(
         ( area_width/2.0 - leg_size/2.0,  area_height/2.0 - leg_size/2.0),
     ]
     
-    leg_grid_indices = []
+    leg_indices_list = []
     
     c = math.cos(theta)
     s = math.sin(theta)
@@ -390,17 +448,20 @@ def get_leg_indices(
         x = cx + rx; y = cy + ry
         
         # Table 다리가 차지하는 grid의 indices를 얻음
-        if leg_size < 10:
+        if theta == 0.0 or leg_size < 10:
             indices = get_rect_indices_for_small_rect(x, y, leg_size, leg_size, 
-                                                      map_width, map_height, theta)
+                                                      map_width, map_height, theta, allow_crop=True)
         else:
             indices = get_rect_indices_for_big_rect(x, y, leg_size, leg_size, 
-                                                    map_width, map_height, theta)
-        leg_grid_indices.extend(indices)
+                                                    map_width, map_height, theta, allow_crop=True)
+        
+        if len(indices) > 0:
+            leg_indices_list.append(indices)
     
-    leg_grid_indices_np = np.array(leg_grid_indices)
+    if not leg_indices_list:
+        return np.empty((0, 2), dtype=int)
     
-    return leg_grid_indices_np
+    return np.vstack(leg_indices_list)
 
 def get_circle_indices(
     cx: float, cy: float, radius: float,

@@ -105,7 +105,7 @@ class MapGenerator:
         # 책상과 의자를 세트로 배치
         table_mask = np.zeros((H, W), dtype=np.uint8) # 책상 상판을 표시하는 mask. 책상 상판끼리 겹치면 안 됨.
         chair_mask = np.zeros((H, W), dtype=np.uint8) # 의자 상판을 표시하는 mask. 의자 상판끼리 겹치거나 책상 다리와 겹치면 안 됨.
-        max_trial = 20000
+        max_trial = 20
         for table_id in range(1, self.cfg.num_tables + 1):
             
             # 테이블 배치 시도
@@ -113,7 +113,7 @@ class MapGenerator:
             table_width = 0
             table_height = 0
             cx = 0; cy = 0 # 책상의 중심 좌표
-            for _ in range(max_trial):  # 최대 20000번 시도
+            for _ in range(max_trial):  # 최대 100번 시도
                 
                 # 테이블의 크기 설정
                 table_width = self.rng.integers(min_table_size, max_table_size + 1)
@@ -130,18 +130,20 @@ class MapGenerator:
                 theta = self.rng.uniform(-math.pi/6, math.pi/6) # 테이블이 회전한 각도 결정
                 
                 # Table 배치 가능성 평가
-                table_area_indices = np.array(get_rect_indices_for_big_rect(cx, cy, table_width, table_height, W, H, theta))
-                table_leg_indices = get_leg_indices(cx, cy, W, H, table_width, table_height, table_leg_size, theta)
+                table_area_indices = get_rect_indices_for_big_rect(cx, cy, table_width, table_height, W, H, theta, allow_crop=False)
+                if len(table_area_indices) == 0:
+                    continue
                 
-                if len(table_area_indices) == 0 or len(table_leg_indices) == 0:
+                table_leg_indices = get_leg_indices(cx, cy, W, H, table_width, table_height, table_leg_size, theta)
+                if len(table_leg_indices) == 0:
                     continue
                 
                 area_xs, area_ys = table_area_indices[:, 0], table_area_indices[:, 1]
                 leg_xs, leg_ys = table_leg_indices[:, 0], table_leg_indices[:, 1]
                 
-                # - 조건 1: 테이블 상판이 기존 테이블 상판들과 겹치는가
-                # - 조건 2: 테이블 다리가 기존 의자 상판들과 겹치는가 (의자 위에 다리 놓기 방지)
-                # - 조건 3: 테이블 다리 자리에 이미 다른 장애물(벽 등)이 있는가
+                # 조건 1: 테이블 상판이 기존 테이블 상판들과 겹치는가
+                # 조건 2: 테이블 다리가 기존 의자 상판들과 겹치는가 (의자 위에 다리 놓기 방지)
+                # 조건 3: 테이블 다리 자리에 이미 다른 장애물(벽 등)이 있는가
                 if table_mask[area_ys, area_xs].any() or \
                    chair_mask[leg_ys, leg_xs].any() or \
                    (self.obs[leg_ys, leg_xs] != GridCell.BLANK).any():
@@ -166,36 +168,35 @@ class MapGenerator:
                         if not chair_slots:
                             break
                         
-                        # 책상 주변에 의자를 배치할 위치를 선택: slot을 기준으로 의자를 배치
-                        slot_idx = self.rng.integers(0, len(chair_slots))
-                        chosen_slot = chair_slots[slot_idx]
+                        # 의자 크기 선택: 고정된 크기의 의자가 들어갈 수 있는 공간을 찾음
+                        chair_size = self.rng.integers(min_chair_size, max_chair_size, endpoint=True)
+                        
+                        for _ in range(10): # 고정된 크기의 의자 배치는 총 10번 시도
+                            
+                            # 책상 주변에 의자를 배치할 위치를 선택: slot을 기준으로 의자를 배치
+                            slot_idx = self.rng.integers(0, len(chair_slots))
+                            chosen_slot = chair_slots[slot_idx]
 
-                        # 선택된 slot을 기준으로 책상으로부터 의자를 배치할 방향을 선택
-                        base_angle = (2*math.pi/num_chairs)*chosen_slot
-                        ang_disturbance = self.rng.uniform(-chair_pos_ang_max_disturbance, chair_pos_ang_max_disturbance)
-                        direction_theta = base_angle+ang_disturbance
-                        
-                        # 의자 크기 선택: 의자는 좀 더 작아질 수 있음
-                        chair_size_offset = self.rng.integers(min_chair_size, max_chair_size, endpoint=True)
-                        
-                        # 책상 중심으로부터 의자 중심까지의 거리의 offset 설정: 책상 모서리 부근에서는 의자를 더 멀리 배치
-                        temp_h = table_height - chair_size_offset - 2*table_leg_size
-                        th1 = math.atan2(temp_h, table_width) if temp_h > 0 else 0
-                        temp_w = table_width - chair_size_offset - 2*table_leg_size
-                        th2 = math.atan2(table_height, temp_w) if temp_w > 0 else math.pi/2
-                        
-                        dist1 = abs(table_width/(2*math.cos(direction_theta) + 1e-6))
-                        dist2 = abs(table_height/(2*math.sin(direction_theta) + 1e-6))
-                        chair_dist_offset = min(dist1, dist2)
-                        th = math.atan2(abs(math.sin(direction_theta)), abs(math.cos(direction_theta))) # direction_theta를 0~90 deg의 각도로 mapping
-                        if th1 <= th <= th2:
-                            chair_dist_offset += chair_size_offset / math.sqrt(2)
-                        
-                        # 의자가 돌아간 각도에 disturbance 추가
-                        theta += self.rng.uniform(-math.pi/8, math.pi/8)
-                                                
-                        # 의자 배치
-                        for chair_size in range(chair_size_offset, min_chair_size-1, -1): # 결정된 의자 위치 및 의자 배향에서 의자 배치가 불가능하면 의자 크기를 점점 줄임.
+                            # 선택된 slot을 기준으로 책상으로부터 의자를 배치할 방향을 선택
+                            base_angle = (2*math.pi/num_chairs)*chosen_slot
+                            ang_disturbance = self.rng.uniform(-chair_pos_ang_max_disturbance, chair_pos_ang_max_disturbance)
+                            direction_theta = base_angle+ang_disturbance
+                            
+                            # 책상 중심으로부터 의자 중심까지의 거리의 offset 설정: 책상 모서리 부근에서는 의자를 더 멀리 배치
+                            temp_h = table_height - chair_size - 2*table_leg_size
+                            th1 = math.atan2(temp_h, table_width) if temp_h > 0 else 0
+                            temp_w = table_width - chair_size - 2*table_leg_size
+                            th2 = math.atan2(table_height, temp_w) if temp_w > 0 else math.pi/2
+                            
+                            dist1 = abs(table_width/(2*math.cos(direction_theta) + 1e-6))
+                            dist2 = abs(table_height/(2*math.sin(direction_theta) + 1e-6))
+                            chair_dist_offset = min(dist1, dist2)
+                            th = math.atan2(abs(math.sin(direction_theta)), abs(math.cos(direction_theta))) # direction_theta를 0~90 deg의 각도로 mapping
+                            if th1 <= th <= th2:
+                                chair_dist_offset += chair_size / math.sqrt(2)
+                            
+                            # 의자가 돌아간 각도에 disturbance 추가
+                            theta += self.rng.uniform(-math.pi/8, math.pi/8)
                             
                             # 책상으로부터 의자까지의 거리에 disturbance 추가
                             chair_pos_dist_max_disturbance = int(chair_size/2)
@@ -206,10 +207,13 @@ class MapGenerator:
                             chair_cx = cx + chair_dist*math.cos(direction_theta)
                             chair_cy = cy + chair_dist*math.sin(direction_theta)
                             
-                            chair_area_indices = np.array(get_rect_indices_for_big_rect(chair_cx, chair_cy, chair_size, chair_size, W, H, theta))
-                            chair_leg_indices = get_leg_indices(chair_cx, chair_cy, W, H, chair_size, chair_size, chair_leg_size, theta)
+                            # 의자 배치 가능성 평가: Map에서 잘리면 다시 시도
+                            chair_area_indices = get_rect_indices_for_big_rect(chair_cx, chair_cy, chair_size, chair_size, W, H, theta, allow_crop=False)
+                            if len(chair_area_indices) == 0:
+                                continue
                             
-                            if len(chair_area_indices) == 0 or len(chair_leg_indices) == 0:
+                            chair_leg_indices = get_leg_indices(chair_cx, chair_cy, W, H, chair_size, chair_size, chair_leg_size, theta)
+                            if len(chair_leg_indices) == 0:
                                 continue
                             
                             area_xs, area_ys = chair_area_indices[:, 0], chair_area_indices[:, 1]

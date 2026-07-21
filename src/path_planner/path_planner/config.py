@@ -12,8 +12,8 @@ TRACE_MAP_MAX = 50
 LOCAL_VIEW_DIM = 51
 
 MAP_SAVE_DIR = os.path.normpath('src/path_planner/path_planner/maps')
-TRAIN_MAP_FILE_FORMAT = "{mode}_map_{H}x{W}_level{level}_{map_id:02d}.npy"
-TRAIN_MAP_FILE_REGEX = r"(?P<mode>\w+)_map_(?P<H>\d+)x(?P<W>\d+)_level(?P<level>\d+)_(?P<map_id>\d+)"
+TRAIN_MAP_FILE_FORMAT = "{mode}_map_level{level}_{map_id:04d}_{H}x{W}.npy"
+TRAIN_MAP_FILE_REGEX = r"(?P<mode>\w+)_map_level(?P<level>\d+)_(?P<map_id>\d+)_(?P<H>\d+)x(?P<W>\d+)"
 TEST_MAP_FILE_REGEX = r"(?P<mode>\w+)_map_L(?P<level>\d+)_(?P<map_id>\d+)"
 
 # Map을 시각화할 때 table, chair을 구별하기 위해 설정한 값
@@ -168,8 +168,8 @@ class MapConfig:
     
     chairs_per_table_min: int = 2
     chairs_per_table_max: int = 4
-    max_chair_size: float = 45.0
-    min_chair_size: float = 40.0
+    max_chair_size: float = 55.0
+    min_chair_size: float = 45.0
     chair_leg_size: float = 5.0
     chair_spread: float = 20.0
     
