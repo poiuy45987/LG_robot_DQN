@@ -320,7 +320,7 @@ def draw_obs(obs: dict, fig: Figure, stack_steps: int, local_view_dim: int, clea
     # obs data를 얻음
     if preprocessor is not None:
         obs = preprocessor(obs, local_view_dim)
-    H, W = obs['map'][0].shape
+    H, W = obs['map'].shape[-2:]
     
     # ---- obs의 map data 그리기 ----
     
@@ -401,12 +401,16 @@ def draw_obs(obs: dict, fig: Figure, stack_steps: int, local_view_dim: int, clea
     # text 출력
     ray_data = obs['loc_vec']
     ray_str = np.array2string(ray_data, separator=', ', formatter={'float_kind': lambda x: f"{x:.2f}"})
+
+    action_mask_data = obs['action_mask']
+    action_mask_str = np.array2string(action_mask_data, separator=', ', formatter={'float_kind': lambda x: f"{int(x)}"})
     
     vec_info_text = (f"[Observation Status]\n"
     f"- Normlized position: ({obs['glob_vec'][0]:.2f}, {obs['glob_vec'][1]:.2f})\n"
     f"- Direction vector: ({obs['glob_vec'][2]:.2f}, {obs['glob_vec'][3]:.2f})\n"
     f"- Normalized ray: {ray_str}\n"
-    f"- Normalized coverage: {obs['glob_vec'][4]:.2f}\n")
+    f"- Normalized coverage: {obs['glob_vec'][4]:.2f}\n"
+    f"- Masked action: {action_mask_str}")
     ax_txt.text(0, 0.5, vec_info_text, transform=ax_txt.transAxes, fontsize=14,
                 va='top', ha='left', family='monospace')
     # ---------------------------------------------

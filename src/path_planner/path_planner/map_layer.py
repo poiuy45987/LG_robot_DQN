@@ -344,9 +344,9 @@ class MapLayers():
     def _in_bounds_center(self, cx: float, cy: float) -> bool:
         cx, cy = float_to_int_coord(cx, cy)
         cx_min = self.map_info.eff_size.x_min + self.robot_half_size
-        cx_max = self.map_info.eff_size.x_max - self.robot_half_size - 1
+        cx_max = self.map_info.eff_size.x_max - self.robot_half_size
         cy_min = self.map_info.eff_size.y_min + self.robot_half_size
-        cy_max = self.map_info.eff_size.y_max - self.robot_half_size - 1
+        cy_max = self.map_info.eff_size.y_max - self.robot_half_size
         return (cx_min <= cx <= cx_max) and (cy_min <= cy <= cy_max)
     
     

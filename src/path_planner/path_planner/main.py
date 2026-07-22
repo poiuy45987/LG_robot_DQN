@@ -54,7 +54,7 @@ def parse_args():
     # 데이터를 쌓는 warmup 과정 설정, Replay buffer 설정
     train_set_group.add_argument('--use_train_maps', action='store_true', help='Train 시 maps 폴더에 저장된 map을 training set으로 이용')
     train_set_group.add_argument('--max_step_per_eps', type=int, help='Train 시 한 map에 대해서 훈련시키는 최대 횟수')
-    train_set_group.add_argument('--max_eps_num_per_map_size', type=int, help='Train 시 한 map size에 대해서 훈련시키는 episode 최대 횟수')
+    train_set_group.add_argument('--max_eps_per_map_size', type=int, help='Train 시 한 map size에 대해서 훈련시키는 episode 최대 횟수')
     train_set_group.add_argument('--path_reward_thres', type=float, help='Train 시 한 map size를 바꾸는 path reward threshold')
     
     # 훈련시킬 최대 episode 수 설정

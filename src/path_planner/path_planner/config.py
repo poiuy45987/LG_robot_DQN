@@ -252,7 +252,7 @@ class EnvConfig:
     
     # Step, Termination 관련
     max_steps: int = 1500
-    max_no_progress_steps: int = 10
+    max_no_progress_steps: int = 30
     max_no_progress_steps_final: int = 50
     target_coverage: float = 0.95
     final_coverage_thres: float = 0.90

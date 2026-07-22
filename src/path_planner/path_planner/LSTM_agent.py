@@ -19,7 +19,7 @@ import glob
 from IPython.display import display
 
 # 앞서 정의한 클래스들을 임포트한다고 가정 (또는 같은 파일에 위치)
-from path_planner.config import EnvConfig, TrainConfig, LOCAL_VIEW_DIM, TRAIN_MAP_FILE_REGEX
+from path_planner.config import EnvConfig, TrainConfig, LOCAL_VIEW_DIM, TRAIN_MAP_FILE_REGEX, MAP_SAVE_DIR
 from path_planner.map_layer import MapConfigSchema
 from path_planner.environment import CoverageEnv, ACTION_NUM
 from path_planner.LSTM_network import LSTMPolicyNetwork
@@ -144,9 +144,9 @@ class LSTMAgent:
             if args.use_train_maps:
                 # Training에 필요한 map 얻기
                 self.train_maps = {} # Key: Map size, Value: {Key=level: Value=[map file list]}
-                self.train_map_sizes = ['40x40', '80x80', '120x120', '160x160', 'Cropped']
+                self.train_map_sizes = ['120x120', 'Cropped']
                 
-                train_map_dir = os.path.join(args.map_save_dir, 'train')
+                train_map_dir = os.path.join(self.map_save_dir, 'train')
                 
                 # 각 map의 path를 level, map size별로 나누어서 저장
                 for folder in self.train_map_sizes:
@@ -591,20 +591,20 @@ class LSTMAgent:
         
         # [1] 디버그 모드일 때 사용할 도화지(fig)를 미리 딱 한 번만 만듦
         if debug:
-            fig, axes = plt.subplots(3, 1, figsize=(18, 30))
+            fig, axes = plt.subplots(2, 1, figsize=(15, 20))
             # 초기 이미지
             init_traj_img = env.get_visualized_img(img_choice='traj')
             init_obs_img = env.get_visualized_img(img_choice='obs')
-            init_pro_obs_img = env.get_visualized_img(img_choice='obs', preprocessor=self._pre_process_obs)
+            # init_pro_obs_img = env.get_visualized_img(img_choice='obs', preprocessor=self._pre_process_obs)
             
             # 초기 빈 이미지 설치
             im_traj = axes[0].imshow(init_traj_img)
             im_obs = axes[1].imshow(init_obs_img)
-            im_pro_obs = axes[2].imshow(init_pro_obs_img)
+            # im_pro_obs = axes[2].imshow(init_pro_obs_img)
             text_traj = axes[0].text(0.5, 0, "", transform=axes[0].transAxes, ha="center", fontsize=15, color='black')
             axes[0].set_title("Trajectory", fontsize=20)
             axes[1].set_title("Observation", fontsize=20)
-            axes[2].set_title("Processed Observation", fontsize=20)
+            # axes[2].set_title("Processed Observation", fontsize=20)
             for ax in axes: ax.axis('off')
             plt.tight_layout()
             
@@ -649,16 +649,16 @@ class LSTMAgent:
                     prob_np = masked_probs.squeeze().cpu().numpy()
                     probs_str = ", ".join([f"{prob:.3f}" for prob in prob_np])
                     action_info = (f"[Selected action]: {action}\n"
-                                   f"[Q-values] [{probs_str}]")
+                                   f"[Action probs] [{probs_str}]")
                     
                     # Map 시각화
                     traj_img = env.get_visualized_img(img_choice='traj')
                     obs_img = env.get_visualized_img(img_choice='obs')
-                    pro_obs_img = env.get_visualized_img(img_choice='obs', preprocessor=self._pre_process_obs)
+                    # pro_obs_img = env.get_visualized_img(img_choice='obs', preprocessor=self._pre_process_obs)
                     
                     im_traj.set_data(traj_img)
                     im_obs.set_data(obs_img)
-                    im_pro_obs.set_data(pro_obs_img)
+                    # im_pro_obs.set_data(pro_obs_img)
                     text_traj.set_text(action_info)
                     
                     # [4] 화면 갱신 (도화지 위치는 그대로, 내용물만 부드럽게 변경)
@@ -700,6 +700,8 @@ class LSTMAgent:
         
         assert self.args.mode == 'train'
 
+        torch.autograd.set_detect_anomaly(True)
+
         # Policy network를 train mode로 설정
         self.policy_net.train()        
 
@@ -709,6 +711,8 @@ class LSTMAgent:
         except StopIteration: # 마지막 map size인 경우, 이전에 설정한 map size를 그대로 사용
             no_more_map_size = True
             curr_map_size = self.train_map_sizes[-1]
+        
+        print(f"[Initial map size] {curr_map_size}.")
         
         # Episode 동안 map을 변경하지 않음. 고정된 map에서 경로 생성 수 policy update을 반복
         for episode in range(self.start_episode, self.train_cfg.max_episodes+1):
@@ -964,6 +968,7 @@ class LSTMAgent:
                     vessl.log(step=episode, payload={"Visualization/Robot_path": vessl.Image(map_img)})
 
     def test(self, use_maps_folder: bool=True):
+
         self.policy_net.eval() # eval mode로 전환
         total_coverage = []; total_overlap_percent = []; total_cleaning_time = []
         computation_time = []
@@ -974,8 +979,8 @@ class LSTMAgent:
         # Level별 Best/Worst 경로 기록용 딕셔너리
         visualized_maps = {}
         
-        maps_folder = os.path.join(self.args.map_save_dir)  # Map을 저장한 폴더
-        maps = None                                         # Map file 이름
+        maps_folder = os.path.join(self.map_save_dir, 'test')  # Map을 저장한 폴더
+        maps = None                                            # Map file 이름
         map_num = self.args.test_map_num
         if use_maps_folder:
             if os.path.isdir(maps_folder):
@@ -997,8 +1002,12 @@ class LSTMAgent:
             # FIXME: Map folder가 없을 경우도 구현 필요
             map_path = os.path.join(maps_folder, maps[map_idx]) if use_maps_folder else None
             map_config = MapConfigSchema(file_path = map_path)
-            
-            obs, _ = self.test_env.reset(seed=reset_seed, map_config=map_config)
+
+            reset_info = self.test_env.reset(seed=reset_seed, map_config=map_config)
+            if not reset_info:
+                print(f"Can't reset map file: {maps[map_idx]}")
+                continue
+            obs, _ = reset_info
             level = self.test_env.map_layers.map_info.level
             
             # Map condition key: 현재를 level로만 분류
@@ -1025,7 +1034,7 @@ class LSTMAgent:
                 if start_idx != 0:
                     obs, _ = self.test_env.reset() # 시작 지점 초기화
                 start_time = time.time()
-                cur_coverage, cur_overlap_percent, cur_cleaning_time = self._test_one_map(self.test_env, obs, mode='test', debug=self.args.debug) # Coverage 성능을 평가
+                cur_coverage, cur_overlap_percent, cur_cleaning_time = self._test_one_map(self.test_env, obs, debug=self.args.debug) # Coverage 성능을 평가
                 end_time = time.time()
                 computation_time.append(end_time-start_time)
                 
@@ -1041,7 +1050,7 @@ class LSTMAgent:
                     
                     cand_metrics = (cur_coverage, cur_overlap_percent, cur_cleaning_time)
                     cand_img = self.test_env.get_visualized_img(img_choice='traj')
-                    cand_info = f"Map name: {map_path.basename()} | Cov: {cur_coverage*100:.1f}%, Overlap: {cur_overlap_percent:.1f}%, Time: {cur_cleaning_time:.1f}m"
+                    cand_info = f"Map name: {os.path.basename(map_path)} | Cov: {cur_coverage*100:.1f}%, Overlap: {cur_overlap_percent:.1f}%, Time: {cur_cleaning_time:.1f}m"
 
                     best_rec = visualized_maps[condition_key]['best']
                     worst_rec = visualized_maps[condition_key]['worst']
