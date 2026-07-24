@@ -100,9 +100,13 @@ class LSTMAgent:
         self.env_cfg = EnvConfig(**env_args)
         # 우선, validation 및 test를 위한 environment만 조성
         if args.mode == 'train':
-            self.test_env = CoverageEnv(self.env_cfg, seed=args.seed+100000) # 훈련용 environment와 다른 환경을 구성하기 위해서
+            self.test_env_rng = np.random.default_rng(seed=args.seed+100000)
+            self.test_map_rng = np.random.default_rng(seed=args.seed+100000)
+            self.test_env = CoverageEnv(cfg=self.env_cfg, env_rng=self.test_env_rng, map_rng=self.test_map_rng) # 훈련용 environment와 다른 환경을 구성하기 위해서. validation용
         else:
-            self.test_env =  CoverageEnv(self.env_cfg, seed=args.seed+200000)
+            self.test_env_rng = np.random.default_rng(seed=args.seed+200000)
+            self.test_map_rng = np.random.default_rng(seed=args.seed+200000)
+            self.test_env = CoverageEnv(cfg=self.env_cfg, env_rng=self.test_env_rng, map_rng=self.test_map_rng)
 
         # Policy network 조성
         # kwargs 처리
@@ -135,16 +139,20 @@ class LSTMAgent:
             
             # Training용 environment 목록: Batch size 만큼의 environment를 조성하고 training data를 한번에 생성
             num_envs = self.train_cfg.batch_size
-            env_fns = [lambda i=i: CoverageEnv(self.env_cfg, seed=args.seed + i) for i in range(num_envs)]
+            self.train_env_rngs: list[np.random.Generator] = [] 
+            self.train_map_rngs: list[np.random.Generator] = []
+            for i in range(num_envs):
+                self.train_env_rngs.append(np.random.default_rng(seed=args.seed+i))
+                self.train_map_rngs.append(np.random.default_rng(seed=args.seed+i))
+            env_fns = [lambda i=i: CoverageEnv(cfg=self.env_cfg, env_rng=self.train_env_rngs[i], map_rng=self.train_map_rngs[i]) for i in range(num_envs)]
 
             self.train_envs = CustomGymVecEnv(env_fns, autoreset_mode="Disabled")
-            self.valid_env = CoverageEnv(self.env_cfg, seed=args.seed + 100000)
 
             self.train_map_sizes = None # 이미 저장된 train map을 사용할 때와 train map을 그때그때 생성할 때 모두 사용하는 변수
             if args.use_train_maps:
                 # Training에 필요한 map 얻기
                 self.train_maps = {} # Key: Map size, Value: {Key=level: Value=[map file list]}
-                self.train_map_sizes = ['120x120', 'Cropped']
+                self.train_map_sizes = ['40x40', '80x80', '120x120', 'Cropped']
                 
                 train_map_dir = os.path.join(self.map_save_dir, 'train')
                 
@@ -337,6 +345,27 @@ class LSTMAgent:
                 self.map_size_idx = data['map_size_idx']
                 self.start_episode = data['episode'] + 1
                 self.eps_num_per_map_size = data['eps_num_per_map_size']
+
+                # seed 진행도 복원
+                for rng, state in zip(self.train_env_rngs, data['train_env_rng_states']):
+                    rng.bit_generator.state = state
+                for rng, state in zip(self.train_map_rngs, data['train_map_rng_states']):
+                    rng.bit_generator.state = state
+                self.train_rng.bit_generator.state = data['train_rng_state']
+                self.test_env_rng.bit_generator.state = data['test_env_rng_state']
+                self.test_map_rng.bit_generator.state = data['test_map_rng_state']
+ 
+                cpu_rng_state = data['torch_cpu_rng_state']
+                if isinstance(cpu_rng_state, torch.Tensor):
+                    cpu_rng_state = cpu_rng_state.to(dtype=torch.uint8, device='cpu')
+                torch.set_rng_state(cpu_rng_state)
+
+                if torch.cuda.is_available() and data.get('torch_gpu_rng_states') is not None:
+                    gpu_rngs = [
+                        s.to(dtype=torch.uint8, device='cpu') if isinstance(s, torch.Tensor) else s 
+                        for s in data['torch_gpu_rng_states']
+                    ]
+                    torch.cuda.set_rng_state_all(gpu_rngs)
                 
                 # map_size_iterator원래 형태로
                 if self.map_size_idx > 0:
@@ -406,6 +435,15 @@ class LSTMAgent:
                 'optimizer_state_dict': self.optimizer.state_dict(),
                 'map_size_idx': self.map_size_idx,
                 'eps_num_per_map_size': self.eps_num_per_map_size,
+
+                # seed 진행도 저장
+                'train_env_rng_states': [rng.bit_generator.state for rng in self.train_env_rngs],
+                'train_map_rng_states': [rng.bit_generator.state for rng in self.train_map_rngs],
+                'train_rng_state': self.train_rng.bit_generator.state,
+                'test_env_rng_state': self.test_env_rng.bit_generator.state,
+                'test_map_rng_state': self.test_map_rng.bit_generator.state,
+                'torch_cpu_rng_state': torch.get_rng_state(),
+                'torch_gpu_rng_states': torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
             })
             
         else:
@@ -478,9 +516,9 @@ class LSTMAgent:
                 
                 # Validation 환경을 초기화
                 if self.train_cfg.reset_only_start_pos:
-                    obs, _ = self.valid_env.reset()
+                    obs, _ = self.test_env.reset()
                 else:
-                    reset_info = self.valid_env.reset(map_config=map_config)
+                    reset_info = self.test_env.reset(map_config=map_config)
                     if reset_info:
                         obs, _ = reset_info
                     else:
@@ -490,8 +528,8 @@ class LSTMAgent:
                     
                     # start_num == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
                     if start_num != 0:
-                        obs, _ = self.valid_env.reset() # 시작 지점 초기화
-                    cur_coverage, cur_overlap_percent, cur_cleaning_time = self._test_one_map(self.valid_env, obs, debug=False) # Coverage 성능을 평가
+                        obs, _ = self.test_env.reset() # 시작 지점 초기화
+                    cur_coverage, cur_overlap_percent, cur_cleaning_time = self._test_one_map(self.test_env, obs, debug=False) # Coverage 성능을 평가
                     
                     coverage.append(cur_coverage)
                     overlap_percent.append(cur_overlap_percent)
@@ -508,18 +546,18 @@ class LSTMAgent:
                         if cur_overlap_percent < min_overlap_percent:
                             min_overlap_percent = cur_overlap_percent
                             min_cleaning_time = cur_cleaning_time
-                            best_traj_img = self.valid_env.get_visualized_img()
+                            best_traj_img = self.test_env.get_visualized_img()
                         
                         # Overlap 비율이 최소 overlap 비율과 크지 않을 경우, cleaning_time이 가장 빠른 trajectory를 선택
                         elif cur_overlap_percent <= min_overlap_percent + overlap_percent_gap:
                             if cur_cleaning_time < min_cleaning_time:
                                 min_cleaning_time = cur_cleaning_time
-                                best_traj_img = self.valid_env.get_visualized_img() # best trajectory의 이미지 저장
+                                best_traj_img = self.test_env.get_visualized_img() # best trajectory의 이미지 저장
 
                     # Coverage 달성도가 미달인 경우, coverage가 높은 경로를 best_traj의 후보로 고려
                     elif max_coverage < cur_coverage:
                         max_coverage = cur_coverage
-                        best_traj_img = self.valid_env.get_visualized_img()
+                        best_traj_img = self.test_env.get_visualized_img()
                     
         coverage_mean = np.mean(coverage) if coverage else 0.0
         overlap_percent_mean = np.mean(overlap_percent) if overlap_percent else 0.0
@@ -700,8 +738,6 @@ class LSTMAgent:
         
         assert self.args.mode == 'train'
 
-        torch.autograd.set_detect_anomaly(True)
-
         # Policy network를 train mode로 설정
         self.policy_net.train()        
 
@@ -720,12 +756,6 @@ class LSTMAgent:
             print(f"[Episode {episode}] Starting training...")
             eps_path_rwd_mean = 0 # Episode의 훈련 상태를 표시할 reward
             
-            # Seed: 처음 environment를 reset할 때만 
-            if episode == self.start_episode:
-                seed = self.seed
-            else:
-                seed = None
-            
             obs_list = []
             info_list = []
             
@@ -742,7 +772,7 @@ class LSTMAgent:
                         if curr_map_size != 'None':
                             H, W = curr_map_size
                         map_config = MapConfigSchema(level=level, H=H, W=W)
-                    reset_info = self.train_envs.call_at(method_name="reset", env_id=env_id, seed=seed, map_config=map_config)
+                    reset_info = self.train_envs.call_at(method_name="reset", env_id=env_id, seed=None, map_config=map_config)
                 obs, info = reset_info
                 obs_list.append(obs)
                 info_list.append(info)
@@ -761,7 +791,7 @@ class LSTMAgent:
                     obs_list = []
                     info_list = []
                     for env_id in range(self.train_envs.num_envs):
-                        obs, info = self.train_envs.call_at(method_name="reset", env_id=env_id, seed=seed, map_config=None)
+                        obs, info = self.train_envs.call_at(method_name="reset", env_id=env_id, seed=None, map_config=None)
                         obs_list.append(obs)
                         info_list.append(info)
                     processed_obs = self._pre_process_obs(obs_list, local_view_dim=LOCAL_VIEW_DIM)
@@ -789,10 +819,6 @@ class LSTMAgent:
                     h_t = h_t.detach()
                     c_t = c_t.detach()
                     
-                    # Hidden state와 cell state를 detach하여 gradient가 LSTM step을 넘어서 전달되는 것을 방지.
-                    h_t = h_t.detach()
-                    c_t = c_t.detach()
-                    
                     # Network에 통과시켜 각 action이 선택될 확률을 출력
                     loc_map_data = processed_obs["map"]
                     loc_vec_data = processed_obs["loc_vec"]
@@ -801,9 +827,18 @@ class LSTMAgent:
                     action_probs, h_t, c_t = self.policy_net(loc_map_data, loc_vec_data, glob_vec_data, h_t, c_t)
                     
                     # Action이 나올 확률을 가지고 action 선택. Action 선택 확률을 저장. 장애물에 부딪히는 action은 제외
-                    masked_probs = action_probs * action_mask # Shape: action_probs (B, action_num) / action_mask (B, action_num)
-                    masked_probs = masked_probs / (masked_probs.sum(dim=-1, keepdim=True) + 1e-8)
-                    dist = torch.distributions.Categorical(probs=masked_probs)
+                    log_probs = torch.log(action_probs + 1e-8)
+                    masked_logits = torch.where(action_mask == 1, log_probs, torch.tensor(-1e9, device=action_probs.device))
+
+                    # Debugging용 코드
+                    all_zero_per_env = (action_mask == 0).all(dim=-1)
+                    if all_zero_per_env.any():
+                        all_zero_env_indices = all_zero_per_env.nonzero(as_tuple=True)[0].tolist()
+                        print(f"Action mask가 전부 0인 environment: {all_zero_env_indices}")
+                        for i in all_zero_env_indices:
+                            self.train_envs.call_at(method_name="show_visualized_img", env_id=i, img_choice='traj')
+
+                    dist = torch.distributions.Categorical(logits=masked_logits)
                     actions_tensor = dist.sample() # Action을 확률을 기반으로 선택. Shape: (B,)
                     actions = actions_tensor.cpu().numpy() # step()을 위해 numpy 형식으로 변환
                     
@@ -816,8 +851,8 @@ class LSTMAgent:
                     processed_obs = self._pre_process_obs(next_obs_list, local_view_dim=LOCAL_VIEW_DIM)
                     
                     # 확률 미분 계산을 위해 log probability를 저장
-                    log_prob = dist.log_prob(actions_tensor) # 각 action이 선택될 확률의 log probability. Shape: (B,)
-                    saved_log_probs.append(log_prob)
+                    selected_log_probs = dist.log_prob(actions_tensor)
+                    saved_log_probs.append(selected_log_probs)
                     prob_masks.append(torch.as_tensor(curr_act_prob, device=self.device, dtype=torch.float32))
                     
                     # 각 환경별 종료 여부 판단
@@ -858,10 +893,12 @@ class LSTMAgent:
                 # loss 계산 및 parameter update
                 log_probs_tensor = torch.stack(saved_log_probs) # Shape: (T, B) (T: time steps)
                 prob_masks_tensor = torch.stack(prob_masks) # Shape: (T, B)
+                steps_tensor = prob_masks_tensor.sum(dim=0) # Shape: (B,)
                 # log probability를 합하여 전체 경로의 probability 계산 
                 # (완료된 environment에서 얻은 probability는 계수 0을 곱하여 gradient 전달이 안 되도록 함.)
-                sum_log_probs = (log_probs_tensor * prob_masks_tensor).sum(dim=0) # Shape: (B,) 
-                policy_loss = -(sum_log_probs * advantage) # 음수를 붙여서 path_reward가 증가하는 방향으로 update 되도록 함.
+                sum_log_probs = (log_probs_tensor * prob_masks_tensor).sum(dim=0) # Shape: (B,)
+                mean_log_probs = sum_log_probs / (steps_tensor + 1e-8) # Shape: (B,)
+                policy_loss = -(mean_log_probs * advantage) # 음수를 붙여서 path_reward가 증가하는 방향으로 update 되도록 함.
                 
                 loss = policy_loss.mean() # Batch 평균 loss
                 self.optimizer.zero_grad() # Gradient 초기화
@@ -972,7 +1009,6 @@ class LSTMAgent:
         self.policy_net.eval() # eval mode로 전환
         total_coverage = []; total_overlap_percent = []; total_cleaning_time = []
         computation_time = []
-        reset_seed = self.seed
         
         condition_results = {} # Map condition 별로 test 결과를 저장하기 위한 dictionary
         
@@ -1003,7 +1039,7 @@ class LSTMAgent:
             map_path = os.path.join(maps_folder, maps[map_idx]) if use_maps_folder else None
             map_config = MapConfigSchema(file_path = map_path)
 
-            reset_info = self.test_env.reset(seed=reset_seed, map_config=map_config)
+            reset_info = self.test_env.reset(seed=None, map_config=map_config)
             if not reset_info:
                 print(f"Can't reset map file: {maps[map_idx]}")
                 continue
@@ -1070,8 +1106,6 @@ class LSTMAgent:
             #     f"    Coverage mean: {coverage_mean*100:.2f}%\n"
             #     f"    Cleaning time mean: {cleaning_time_mean/60:.2f} min\n"
             #     f"    Overlap rate mean: {overlap_percent_mean*100:.2f}%")
-            
-            reset_seed = None
         
         # =========================================================================
         # 맵 조건(난이도)별 최종 평균 및 표준편차 출력부

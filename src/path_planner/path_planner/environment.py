@@ -55,17 +55,21 @@ def get_args():
 class CoverageEnv(gym.Env):
     metadata = {"render_modes": []}
     
-    def __init__(self, cfg: EnvConfig = EnvConfig(), seed: int = DEFAULT_SEED):
+    def __init__(self, 
+                 cfg: EnvConfig = EnvConfig(), 
+                 env_rng: np.random.Generator = np.random.default_rng(DEFAULT_SEED), 
+                 map_rng: np.random.Generator = np.random.default_rng(DEFAULT_SEED)):
         super().__init__()
         
         # ---- 1. Map 및 로봇 관련 설정 설정 및 난수 생성기 ----
-        self.cfg = cfg  # 로봇 크기, map의 설정 등에 관한 정보가 담겨 있음.
-        self.env_rng = np.random.default_rng(seed)
-        self.map_rng = np.random.default_rng(seed)
+        self.cfg = cfg  # 로봇 크기, map의 설정 등에 관한 정보가 담겨 있음. 
+        self.env_rng = env_rng
+        self.map_rng = map_rng
+        self.np_random = self.env_rng
         # -------------------------------------------------
         
         # ---- 2. Observation_space, Action_space ----
-        self.action_space = spaces.Discrete(ACTION_NUM, seed=seed)
+        self.action_space = spaces.Discrete(ACTION_NUM, seed=self.env_rng)
         self.observation_space = spaces.Dict({
             "map": spaces.Box(low=0.0, high=1.0, shape=(3*self.cfg.stack_steps, self.cfg.local_view, self.cfg.local_view), dtype=np.float32),
             "loc_vec": spaces.Box(low=-1.0, high=1.0, shape=(ACTION_NUM,), dtype=np.float32),
@@ -115,7 +119,6 @@ class CoverageEnv(gym.Env):
         self.canvas = FigureCanvasAgg(self.fig)
         # ----------------------------------------------------
 
-        # FIXME: 우선 여기에 적었음.
         # self.cleaned_segment: np.ndarray | None = None
     
     def reset(self, *, seed: int=None, map_config: MapConfigSchema | None = None) -> tuple[dict, dict] | None:
@@ -128,7 +131,7 @@ class CoverageEnv(gym.Env):
         Returns:
             tuple[dict, dict] | None: tuple[dict, dict]인 경우, (obs, info)의 tuple이 출력. None인 경우는 reset에 실패한 경우. Map을 바꿔야 함.
         """
-        super().reset(seed=seed) # 난수 생성기 self.np_random가 생성됨. 첫 episode에는 seed 초기화가 일어남. 다음 episode부터는 seed 초기화를 수행하지 않음.(seed=None)
+        super().reset(seed=seed) # 난수 생성기 self.np_random이 해당 seed로 초기화됨.
 
         # 새로운 map 생성 또는 시작점만 바꾸고 map 초기화
         for _ in range(100):
@@ -685,7 +688,7 @@ if __name__ == "__main__":
     # environment가 잘 생성되었는지 테스트하는 코드
     args = get_args()
     cfg = EnvConfig()
-    env = CoverageEnv(cfg, seed=42)
+    env = CoverageEnv(cfg)
 
     # 0. Robot visualize
     if args.robot:

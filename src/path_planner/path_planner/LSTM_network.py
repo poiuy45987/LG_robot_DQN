@@ -85,7 +85,7 @@ class LSTMPolicyNetwork(nn.Module):
         #     nn.Linear(256, self.action_enc_dim)
         # )
 
-    def forward(self, loc_map_data, loc_vec_data, glob_vec_data, h_t, c_t):
+    def forward(self, loc_map_data, loc_vec_data, glob_vec_data, h_t, c_t) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         loc_map_data: 
         local_view: (batch_size, 1, H, W) - Polar rotated local view
