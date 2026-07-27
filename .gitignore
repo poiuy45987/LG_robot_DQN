@@ -17,7 +17,7 @@ __pycache__/
 /output/
 
 # wandb output files
-/wandb/
+wandb/
 
-/*.egg-info/
+*.egg-info/
 lgsim.tar.gz

@@ -19,7 +19,7 @@ import glob
 from IPython.display import display
 
 # 앞서 정의한 클래스들을 임포트한다고 가정 (또는 같은 파일에 위치)
-from path_planner.config import EnvConfig, TrainConfig, LOCAL_VIEW_DIM, TRAIN_MAP_FILE_REGEX, MAP_SAVE_DIR
+from path_planner.config import EnvConfig, TrainConfig, LOCAL_VIEW_DIM, TRAIN_MAP_FILE_REGEX, MAP_SAVE_DIR, TEST_MAP_FILE_REGEX
 from path_planner.map_layer import MapConfigSchema
 from path_planner.environment import CoverageEnv, ACTION_NUM
 from path_planner.LSTM_network import LSTMPolicyNetwork
@@ -228,6 +228,42 @@ class LSTMAgent:
                 self.optimizer = optim.Adam(self.policy_net.parameters(), lr=self.train_cfg.lr)
             else:
                 raise ValueError(f"Unsupported optimizer type: {self.train_cfg.optimizer}")
+
+        elif args.mode == 'test':
+
+            # Test map 저장
+            self.test_maps: dict[int, list[str]] = {}
+            if not args.not_use_maps_folder:
+                test_map_dir = os.path.join(args.map_save_dir, 'test')
+                
+                if os.path.exists(test_map_dir):
+
+                    npy_file_names = sorted([
+                        f for f in os.listdir(test_map_dir) 
+                        if f.endswith('.npy') and os.path.isfile(os.path.join(test_map_dir, f))
+                    ])
+
+                    if len(npy_file_names) > 0:
+                        print(f"There are {len(npy_file_names)} map files for testing.")
+                    else:
+                        print(f"There is no test map is folder: {test_map_dir}")
+                        
+                    for file_name in npy_file_names:
+                        full_path = os.path.join(test_map_dir, file_name)
+                        match = re.search(TEST_MAP_FILE_REGEX, file_name)
+                        gd = match.groupdict()
+                        level = gd['level']
+                        if level not in self.test_maps.keys():
+                            self.test_maps[level] = []
+                        self.test_maps[level].append(full_path)
+                
+                    # Map 순서 정렬
+                    for key in self.test_maps.keys():
+                        self.test_maps[key].sort()
+
+                else:
+                    print(f"There is no test maps folder: {test_map_dir}")
+
             
         # Loading model
         self._load_model(args)
@@ -388,7 +424,7 @@ class LSTMAgent:
                 img = cv2.imread(best_traj_img_path) # BGR image
                 self.best_traj_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) # BGR -> RGB 변환
                 
-        elif args.mode == 'test':
+        else:
             
             test_model = os.path.join(model_dir, args.model_name)
             if not os.path.exists(test_model):
@@ -516,9 +552,9 @@ class LSTMAgent:
                 
                 # Validation 환경을 초기화
                 if self.train_cfg.reset_only_start_pos:
-                    obs, _ = self.test_env.reset()
+                    obs, _ = self.test_env.reset(mode='test')
                 else:
-                    reset_info = self.test_env.reset(map_config=map_config)
+                    reset_info = self.test_env.reset(mode='test', map_config=map_config)
                     if reset_info:
                         obs, _ = reset_info
                     else:
@@ -528,7 +564,7 @@ class LSTMAgent:
                     
                     # start_num == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
                     if start_num != 0:
-                        obs, _ = self.test_env.reset() # 시작 지점 초기화
+                        obs, _ = self.test_env.reset(mode='test') # 시작 지점 초기화
                     cur_coverage, cur_overlap_percent, cur_cleaning_time = self._test_one_map(self.test_env, obs, debug=False) # Coverage 성능을 평가
                     
                     coverage.append(cur_coverage)
@@ -1004,108 +1040,108 @@ class LSTMAgent:
                 if self.args.use_vessl:
                     vessl.log(step=episode, payload={"Visualization/Robot_path": vessl.Image(map_img)})
 
-    def test(self, use_maps_folder: bool=True):
+    def test(self):
 
         self.policy_net.eval() # eval mode로 전환
         total_coverage = []; total_overlap_percent = []; total_cleaning_time = []
         computation_time = []
         
-        condition_results = {} # Map condition 별로 test 결과를 저장하기 위한 dictionary
+        condition_results: dict[int, dict[str, list[float]]] = {} # Map condition 별로 test 결과를 저장하기 위한 dictionary
         
         # Level별 Best/Worst 경로 기록용 딕셔너리
-        visualized_maps = {}
-        
-        maps_folder = os.path.join(self.map_save_dir, 'test')  # Map을 저장한 폴더
-        maps = None                                            # Map file 이름
-        map_num = self.args.test_map_num
-        if use_maps_folder:
-            if os.path.isdir(maps_folder):
-                maps = sorted([f for f in os.listdir(maps_folder) if f.endswith('.npy')])
-                if len(maps) > 0:
-                    print(f"There is {len(maps)} map files for testing.")
-                    map_num = len(maps)
-                    use_maps_folder = True
-                else:
-                    print("There is no map file in the maps folder. Test will be conducted with random maps.")
-                    use_maps_folder = False
-            else:
-                print("There is no maps folder. Test will be conducted with random maps.")
-                use_maps_folder = False
+        visualized_maps: dict[int, dict[str, list[tuple[tuple[float, float, float], np.ndarray, str]]]] = {}
+
+        map_num_per_level = self.args.test_map_num_per_level
+
+        print(f"Use {map_num_per_level} maps per level for test.")
         
         # 각 map에 대해서 test
-        for map_idx in range(map_num):
-             
-            # FIXME: Map folder가 없을 경우도 구현 필요
-            map_path = os.path.join(maps_folder, maps[map_idx]) if use_maps_folder else None
-            map_config = MapConfigSchema(file_path = map_path)
+        for level in self.test_maps.keys():
 
-            reset_info = self.test_env.reset(seed=None, map_config=map_config)
-            if not reset_info:
-                print(f"Can't reset map file: {maps[map_idx]}")
-                continue
-            obs, _ = reset_info
-            level = self.test_env.map_layers.map_info.level
-            
-            # Map condition key: 현재를 level로만 분류
-            condition_key = level
-            if condition_key not in condition_results:
-                condition_results[condition_key] = {
-                    'coverage': [],
-                    'overlap_percent': [],
-                    'cleaning_time': []
-                }
+            level_records = [] # Level의 모든 결과를 저장하기 위한 list
+            for map_idx in range(map_num_per_level):
                 
-                # Level별 시각화 구조체 초기화
-                visualized_maps[condition_key] = {
-                    'best': None,   # (metrics, img, info_str)
-                    'worst': None
-                }
+                if not self.args.not_use_maps_folder:
+                    map_path = self.test_maps[level][map_idx]
+                    map_config = MapConfigSchema(file_path = map_path)
+
+                reset_info = self.test_env.reset(seed=None, mode='test', map_config=map_config)
+                if not reset_info:
+                    print(f"Can't reset map file: {os.path.basename(self.test_maps[level][map_idx])}")
+                    continue
+                obs, _ = reset_info
+
+                # 각 map별 result와 각 level에서 좋은 경로와 나쁜 경로를 저장할 dictionary 초기화
+                if level not in condition_results:
+                    condition_results[level] = {
+                        'coverage': [],
+                        'overlap_percent': [],
+                        'cleaning_time': []
+                    }
                 
-            coverage = []; overlap_percent = []; cleaning_time = []
-            
-            # 여러 starting point에서 model 성능을 test
-            for start_idx in range(self.args.test_start_point_num):
-            
-                # start_idx == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
-                if start_idx != 0:
-                    obs, _ = self.test_env.reset() # 시작 지점 초기화
-                start_time = time.time()
-                cur_coverage, cur_overlap_percent, cur_cleaning_time = self._test_one_map(self.test_env, obs, debug=self.args.debug) # Coverage 성능을 평가
-                end_time = time.time()
-                computation_time.append(end_time-start_time)
+                # 여러 starting point에서 model 성능을 test
+                for start_idx in range(self.args.test_start_point_num):
                 
-                # Reachable grid의 수가 전체 grid 수의 절반을 넘는 경우에만 저장
-                if self.test_env.map_layers.coverable.sum() >= self.test_env.H * self.test_env.W * 0.5:
-                    condition_results[condition_key]['coverage'].append(cur_coverage)
-                    condition_results[condition_key]['overlap_percent'].append(cur_overlap_percent)
-                    condition_results[condition_key]['cleaning_time'].append(cur_cleaning_time)
+                    # start_idx == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
+                    if start_idx != 0:
+                        obs, _ = self.test_env.reset(mode='test') # 시작 지점 초기화
+                    start_time = time.time()
+                    cur_coverage, cur_overlap_percent, cur_cleaning_time = self._test_one_map(self.test_env, obs, debug=self.args.debug) # Coverage 성능을 평가
+                    end_time = time.time()
+                    computation_time.append(end_time-start_time)
                     
-                    total_coverage.append(cur_coverage)
-                    total_overlap_percent.append(cur_overlap_percent)
-                    total_cleaning_time.append(cur_cleaning_time)
-                    
-                    cand_metrics = (cur_coverage, cur_overlap_percent, cur_cleaning_time)
-                    cand_img = self.test_env.get_visualized_img(img_choice='traj')
-                    cand_info = f"Map name: {os.path.basename(map_path)} | Cov: {cur_coverage*100:.1f}%, Overlap: {cur_overlap_percent:.1f}%, Time: {cur_cleaning_time:.1f}m"
+                    # Reachable grid의 수가 전체 grid 수의 절반을 넘는 경우에만 저장
+                    if self.test_env.map_layers.coverable.sum() >= self.test_env.H * self.test_env.W * 0.5:
+                        condition_results[level]['coverage'].append(cur_coverage)
+                        condition_results[level]['overlap_percent'].append(cur_overlap_percent)
+                        condition_results[level]['cleaning_time'].append(cur_cleaning_time)
+                        
+                        total_coverage.append(cur_coverage)
+                        total_overlap_percent.append(cur_overlap_percent)
+                        total_cleaning_time.append(cur_cleaning_time)
+                        
+                        cand_metrics = (cur_coverage, cur_overlap_percent, cur_cleaning_time)
+                        cand_img = self.test_env.get_visualized_img(img_choice='traj')
+                        cand_info = f"Map name: {os.path.basename(map_path)} | Cov: {cur_coverage*100:.1f}%, Overlap: {cur_overlap_percent:.1f}%, Time: {cur_cleaning_time:.1f}m"
 
-                    best_rec = visualized_maps[condition_key]['best']
-                    worst_rec = visualized_maps[condition_key]['worst']
+                        level_records.append((cand_metrics, cand_img, cand_info))
 
-                    # 1) Best 경로 갱신 확인
-                    if best_rec is None or is_better_path(cand_metrics, best_rec[0]):
-                        visualized_maps[condition_key]['best'] = (cand_metrics, cand_img, cand_info)
+            if len(level_records) > 0:
+                # 1) is_better_path 기준으로 정렬 (Best -> Worst)
+                import functools
+                
+                def compare_paths(item1, item2):
+                    metrics1 = item1[0]
+                    metrics2 = item2[0]
+                    if is_better_path(metrics1, metrics2):
+                        return -1  # item1이 더 우수함 (앞으로)
+                    elif is_better_path(metrics2, metrics1):
+                        return 1   # item2가 더 우수함 (뒤로)
+                    return 0
 
-                    # 2) Worst 경로 갱신 확인 (is_better_path의 반대)
-                    if worst_rec is None or is_better_path(worst_rec[0], cand_metrics):
-                        visualized_maps[condition_key]['worst'] = (cand_metrics, cand_img, cand_info)
-            # coverage_mean = np.mean(coverage) if coverage else 0.0
-            # overlap_percent_mean = np.mean(overlap_percent) if overlap_percent else 0.0
-            # cleaning_time_mean = np.mean(cleaning_time) if cleaning_time else 0.0
-            
-            # print(f"[Test result for {map_name}]\n"
-            #     f"    Coverage mean: {coverage_mean*100:.2f}%\n"
-            #     f"    Cleaning time mean: {cleaning_time_mean/60:.2f} min\n"
-            #     f"    Overlap rate mean: {overlap_percent_mean*100:.2f}%")
+                sorted_records = sorted(level_records, key=functools.cmp_to_key(compare_paths))
+                total_cnt = len(sorted_records)
+                num_sample = self.args.vis_test_map_num
+
+                # 2) Best 상위 N개
+                bests = sorted_records[:min(num_sample, total_cnt)]
+                
+                # 3) Worst 하위 N개 (가장 나쁜 것부터 역순 추출)
+                worsts = sorted_records[-min(num_sample, total_cnt):][::-1]
+
+                # 4) Median 중간 N개 (중앙 지점 기준 대칭 추출)
+                mid_idx = total_cnt // 2
+                half_k = num_sample // 2
+                start_m = max(0, mid_idx - half_k)
+                end_m = min(total_cnt, start_m + num_sample)
+                medians = sorted_records[start_m:end_m]
+
+                # 결과 저장
+                visualized_maps[level] = {
+                    'best': bests,      # [(metrics, img, info), ...]
+                    'median': medians,  # [(metrics, img, info), ...]
+                    'worst': worsts     # [(metrics, img, info), ...]
+                }
         
         # =========================================================================
         # 맵 조건(난이도)별 최종 평균 및 표준편차 출력부
@@ -1134,15 +1170,22 @@ class LSTMAgent:
             print(f"    - Cleaning Time: {time_m:.2f} min ± {time_s:.2f} min")
             print("-" * 50)
 
-            # Level별 Best/Worst 결과 시각화
+            # Level별 Best, median, worst 결과 시각화
             vis_data = visualized_maps[level]
-            if vis_data['best'] and vis_data['worst']:
-                print(f"[Best Path]  {vis_data['best'][2]}")
-                print(f"[Worst Path] {vis_data['worst'][2]}")
+            categories = [
+                ('best', '[Best Paths]'),
+                ('median', '[Median Paths]'),
+                ('worst', '[Worst Paths]')
+            ]
+            
+            for cat_key, cat_label in categories:
+                records = vis_data.get(cat_key, [])
+                if records:
+                    print(f"\n  {cat_label} (Top {len(records)})")
+                    for idx, (metrics, img, info_str) in enumerate(records, 1):
+                        print(f"    #{idx} - {info_str}")
+                        display_image(img)
                 
-                # 이미지 출력 함수 호출 (환경 내부 지원 기능에 맞게 선택)
-                display_image(vis_data['best'][1])
-                display_image(vis_data['worst'][1])
             print("-" * 50)
             
         # 전체 총합 결과 (기존 코드 유지)

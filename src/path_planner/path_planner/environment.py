@@ -121,7 +121,7 @@ class CoverageEnv(gym.Env):
 
         # self.cleaned_segment: np.ndarray | None = None
     
-    def reset(self, *, seed: int=None, map_config: MapConfigSchema | None = None) -> tuple[dict, dict] | None:
+    def reset(self, *, seed: int=None, mode: str='train', map_config: MapConfigSchema | None = None) -> tuple[dict, dict] | None:
         """
 
         Args:
@@ -135,7 +135,7 @@ class CoverageEnv(gym.Env):
 
         # 새로운 map 생성 또는 시작점만 바꾸고 map 초기화
         for _ in range(100):
-            self.pos = self.map_layers.reset(map_config=map_config, env_rng=self.env_rng)
+            self.pos = self.map_layers.reset(map_config=map_config, mode=mode, env_rng=self.env_rng)
             
             # 시작 지점이 정해지면 이후 step 진행
             if self.pos is not None:
@@ -156,7 +156,7 @@ class CoverageEnv(gym.Env):
         self.H = self.map_layers.map_info.H
         self.W = self.map_layers.map_info.W
         eff_size = self.map_layers.map_info.eff_size
-        self.dir = self._get_init_dir(self.pos, eff_size)
+        self.dir = self._get_init_dir(self.pos, eff_size, mode)
 
         # self.cleaned_segment = np.zeros((self.H, self.W), dtype=np.uint8)
         
@@ -580,20 +580,35 @@ class CoverageEnv(gym.Env):
         return env_history
 
 
-    def _get_init_dir(self, init_pos: tuple[int, int], eff_size: BoundingBox):
+    def _get_init_dir(self, init_pos: tuple[int, int], eff_size: BoundingBox, mode: str='train'):
         """
         초기 위치에서 로봇이 바라보는 방향 설정: 로봇이 붙어 있는 벽과 반대 방향을 바라보도록 설정
         """
         wall_dists = np.array([
-            init_pos[0] - eff_size.x_min,       # West wall distance
-            init_pos[1] - eff_size.y_min,       # South wall distance
-            (eff_size.x_max-1) - self.pos[0],   # East wall distance
-            (eff_size.y_max-1) - self.pos[1]    # North wall distance
+            (eff_size.y_max-1) - init_pos[1],    # 0: North wall distance
+            init_pos[1] - eff_size.y_min,       # 1: South wall distance
+            init_pos[0] - eff_size.x_min,       # 2: West wall distance
+            (eff_size.x_max-1) - init_pos[0],   # 3: East wall distance
         ])
-        min_dist = wall_dists.min()
-        first_candidate_dir = np.where(wall_dists == min_dist)[0] * ANG_SEG_NUM
         
-        return int(self.env_rng.choice(first_candidate_dir)) # 초기 방향 설정 (가장 가까운 벽의 반대 방향)
+        # 각 벽(North, South, West, East)에 가까울 때 '바라봐야 할 반대 방향' 세그먼트 인덱스
+        # 예시 (0: East, 1: North, 2: West, 3: South 기준):
+        # - North 벽(0번)에 붙음 -> South(3번) 바라봄
+        # - South 벽(1번)에 붙음 -> North(1번) 바라봄
+        # - West 벽(2번)에 붙음  -> East(0번) 바라봄
+        # - East 벽(3번)에 붙음  -> West(2번) 바라봄
+        opposite_dir_map = np.array([3, 1, 0, 2]) # 사용하는 환경 각도 정의에 맞춰 수치 조정
+        
+        min_dist = wall_dists.min()
+        closest_wall_indices = np.where(wall_dists == min_dist)[0]
+        
+        # 가장 가까운 벽들의 '반대 방향' 세그먼트들 추출
+        first_candidate_dir = opposite_dir_map[closest_wall_indices] * ANG_SEG_NUM
+
+        if mode == 'train':
+            return int(self.env_rng.choice(first_candidate_dir))
+        else:
+            return int(first_candidate_dir[0])
 
 
     def _get_all_dir_indices(self, dir: int = None) -> np.ndarray:

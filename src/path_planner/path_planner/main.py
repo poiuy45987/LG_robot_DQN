@@ -21,7 +21,7 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=DEFAULT_SEED, help=f'Set seed: (Default: {DEFAULT_SEED})')
     
     # Mode 설정, tensorboard와 wandb의 사용 여부를 결정
-    parser.add_argument('--mode', choices=['train', 'test', 'see_map'], default='train', help='Mode: train, test, see_map')
+    parser.add_argument('--mode', choices=['train', 'test', 'see_weight'], default='train', help='Mode: train, test, see_map')
     parser.add_argument('--use_wandb', action='store_true', help='wandb 사용')
     parser.add_argument('--use_tb', action='store_true', help='tb 사용')
     parser.add_argument('--use_vessl', action='store_true', help='vessl 사용')
@@ -38,9 +38,10 @@ def parse_args():
     parser.add_argument('--best_traj_img_name', type=str, default='best_coverage_path.png', help='Best path image file name')
     parser.add_argument('--map_save_dir', type=str, default=MAP_SAVE_DIR, help='Directory for saving generated maps')
     
-    parser.add_argument('--test_map_num', type=int, default=5, help='Test 시 사용할 map 수 (Default: 5)')
+    parser.add_argument('--test_map_num_per_level', type=int, default=25, help='Test 시 map level별로 사용할 map 수 (Default: 25)')
     parser.add_argument('--test_start_point_num', type=int, default=3, help='Test 시 한 map당 테스트해볼 start_poit 수 (Default: 3)')
     parser.add_argument('--not_use_maps_folder', action='store_true', help='Test 시, maps 폴더에 저장된 map이 아닌 random하게 생성한 map을 사용')
+    parser.add_argument('--vis_test_map_num', type=int, default=3, help='Test 시, level별로 성능이 좋은 map, 중간인 map, 안 좋은 map을 몇 개씩 보여줄지 결정 (Default: 3)')
     
     # Model dimension 관련 설정
     parser.add_argument('--action_enc_dim', type=int, default=128, help='Encoded action의 dimension')
@@ -138,9 +139,118 @@ def main():
     if args.mode == 'train':
         lstm_agent.train()
     elif args.mode == 'test':
-        lstm_agent.test(use_maps_folder=not args.not_use_maps_folder)
-    elif args.mode == 'see_map':
-        visualize_test_map(seed=args.seed)
+        lstm_agent.test()
+    elif args.mode == 'see_weight':
+        import numpy as np
+        import matplotlib.pyplot as plt
+        import torch.nn as nn
+        
+        model = lstm_agent.policy_net
+        cmps_weight = model.cmps_net.weight.detach().cpu().numpy()
+
+        map_dim = model.map_feat_dim
+        vec_dim = model.vec_feat_dim
+        lstm_dim = model.lstm_hid_dim
+
+        # =========================================================================
+        # 1. cmps_net 가중치 지분율 시각화 (Total Weight Share - Sum 기준)
+        # =========================================================================
+        w_map = cmps_weight[:, :map_dim]
+        w_vec = cmps_weight[:, map_dim : map_dim + vec_dim]
+        w_lstm = cmps_weight[:, map_dim + vec_dim :]
+
+        # 각 파트별 가중치 절대값의 '총합' (진짜 지분율)
+        imp_map = np.abs(w_map).sum()
+        imp_vec = np.abs(w_vec).sum()
+        imp_lstm = np.abs(w_lstm).sum()
+
+        total = imp_map + imp_vec + imp_lstm
+        ratios = [(imp_map / total) * 100, (imp_vec / total) * 100, (imp_lstm / total) * 100]
+        labels = [f'Map Feat\n({map_dim}d)', f'Vector Feat\n({vec_dim}d)', f'LSTM State\n({lstm_dim}d)']
+
+        fig1, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5), gridspec_kw={'width_ratios': [2, 1]})
+
+        # [왼쪽] cmps_net Weight Matrix 전체 히트맵
+        im = ax1.imshow(cmps_weight, cmap='seismic', aspect='auto', vmin=-np.max(np.abs(cmps_weight)), vmax=np.max(np.abs(cmps_weight)))
+        ax1.set_title("cmps_net Weight Matrix Heatmap", fontsize=12, fontweight='bold')
+        ax1.set_xlabel("Input Feature Dimensions (Map | Vector | LSTM)")
+        ax1.set_ylabel("Output Dimension (action_enc_dim)")
+
+        # 그룹별 경계선(구분선) 그리기
+        ax1.axvline(x=map_dim - 0.5, color='black', linestyle='--', linewidth=1.5)
+        ax1.axvline(x=map_dim + vec_dim - 0.5, color='black', linestyle='--', linewidth=1.5)
+
+        cbar = fig1.colorbar(im, ax=ax1)
+        cbar.set_label('Weight Value')
+
+        # [오른쪽] 그룹별 총 지분율 Bar Chart
+        colors = ['#4C72B0', '#55A868', '#C44E52']
+        bars = ax2.bar(labels, ratios, color=colors, alpha=0.85, width=0.5)
+        ax2.set_title("Feature Group Importance Ratio (%)", fontsize=12, fontweight='bold')
+        ax2.set_ylabel("Total Weight Share Ratio (%)")
+        ax2.set_ylim(0, max(ratios) * 1.2)
+
+        for bar, pct in zip(bars, ratios):
+            yval = bar.get_height()
+            ax2.text(bar.get_x() + bar.get_width()/2.0, yval + 1.0, f'{pct:.1f}%', ha='center', va='bottom', fontweight='bold')
+
+        plt.tight_layout()
+        plt.show()
+
+        
+        # =========================================================================
+        # 3. 최초 입력 3개 Map/Channel별 가중치(Weight) 비중 분석
+        # =========================================================================
+        # map_enc의 첫 번째 Conv2d 레이어 찾기
+        first_conv = None
+        for layer in model.map_enc:
+            if isinstance(layer, nn.Conv2d):
+                first_conv = layer
+                break
+
+        # w_first Shape: (32, 3, 3, 3) -> (out_channels, in_channels, K_h, K_w)
+        w_first = first_conv.weight.detach().cpu().numpy()
+        in_channels = w_first.shape[1]  # 보통 3 (또는 3 * stack_steps)
+
+        # 입력 채널별 가중치 절대값 합(Sum) 및 평균(Mean) 계산
+        ch_sums = [np.abs(w_first[:, c, :, :]).sum() for c in range(in_channels)]
+        ch_means = [np.abs(w_first[:, c, :, :]).mean() for c in range(in_channels)]
+
+        total_ch_sum = sum(ch_sums)
+        ch_ratios = [(s / total_ch_sum) * 100 for s in ch_sums]
+
+        # 입력 채널 라벨 설정 (필요시 이름 수정)
+        ch_labels = [f'Input Ch {i+1}' for i in range(in_channels)]
+
+        print("=" * 60)
+        print("📊 [First Conv2d Layer - Input Channel Weight Analysis]")
+        print("=" * 60)
+        for i in range(in_channels):
+            print(f"  - {ch_labels[i]} : Total Share = {ch_ratios[i]:5.2f}% | Mean |W| = {ch_means[i]:.6f}")
+        print("=" * 60)
+
+        # 시각화 (입력 채널별 가중치 비율 Bar Chart)
+        fig3, (ax6, ax7) = plt.subplots(1, 2, figsize=(11, 4))
+        ch_colors = ['#4C72B0', '#55A868', '#C44E52']
+
+        # [좌] 입력 채널별 총 가중치 지분율 (%)
+        bars6 = ax6.bar(ch_labels, ch_ratios, color=ch_colors[:in_channels], alpha=0.85, width=0.4)
+        ax6.set_title("Input Map Channels Weight Share Ratio (%)", fontsize=11, fontweight='bold')
+        ax6.set_ylabel("Weight Share (%)")
+        ax6.set_ylim(0, max(ch_ratios) * 1.25)
+        for bar, pct in zip(bars6, ch_ratios):
+            ax6.text(bar.get_x() + bar.get_width()/2.0, bar.get_height() + 1.0, f'{pct:.1f}%', ha='center', va='bottom', fontweight='bold')
+
+        # [우] 입력 채널별 커널 파라미터 평균 크기
+        bars7 = ax7.bar(ch_labels, ch_means, color=ch_colors[:in_channels], alpha=0.85, width=0.4)
+        ax7.set_title("Input Map Channels Mean |Weight|", fontsize=11, fontweight='bold')
+        ax7.set_ylabel("Mean Magnitude")
+        ax7.set_ylim(0, max(ch_means) * 1.25)
+        for bar, val in zip(bars7, ch_means):
+            ax7.text(bar.get_x() + bar.get_width()/2.0, bar.get_height() + 0.0005, f'{val:.4f}', ha='center', va='bottom', fontweight='bold')
+
+        plt.tight_layout()
+        plt.show()
 
 if __name__ == "__main__":
     main()
