@@ -69,10 +69,10 @@ class CoverageEnv(gym.Env):
         # -------------------------------------------------
         
         # ---- 2. Observation_space, Action_space ----
-        self.action_space = spaces.Discrete(ACTION_NUM, seed=self.env_rng)
-        self.observation_space = spaces.Dict({
+        self.action_space: spaces.Discrete = spaces.Discrete(ACTION_NUM, seed=self.env_rng)
+        self.observation_space: spaces.Dict = spaces.Dict({
             "map": spaces.Box(low=0.0, high=1.0, shape=(3*self.cfg.stack_steps, self.cfg.local_view, self.cfg.local_view), dtype=np.float32),
-            "loc_vec": spaces.Box(low=-1.0, high=1.0, shape=(ACTION_NUM,), dtype=np.float32),
+            "loc_vec": spaces.Box(low=-1.0, high=1.0, shape=(ACTION_NUM*2,), dtype=np.float32),
             "glob_vec": spaces.Box(low=-1.0, high=1.0, shape=(5,), dtype=np.float32),
             "action_mask": spaces.Box(low=0, high=1, shape=(ACTION_NUM,), dtype=np.float32)
         })
@@ -422,24 +422,49 @@ class CoverageEnv(gym.Env):
                 (line_y >= -0.5) & (line_y < self.H - 0.5)
         
         if not np.any(valid): # 해당 방향으로 한칸만 이동해도 로봇의 중심이 map을 벗어나는 경우
-            return 0.0
+            return 0.0, self.cfg.max_forward
         
         # 4. 실수 좌표를 가장 가까운 정수 격자 인덱스로 변환 (반올림)
         line_x_idx, line_y_idx = float_to_int_coord(line_x[valid], line_y[valid])
         
-        # 5. collision_map에서 해당 경로의 장애물 여부를 한 번에 추출
-        # Advanced Indexing 사용
-        line_values = self.map_layers.collision_map[line_y_idx, line_x_idx]
-        
-        # 6. 첫 번째 장애물 위치 찾기
-        hit_indices = np.where(line_values == 1)[0]
-        
+        # 5. 충돌 검사 (장애물 탐색)
+        line_collisions = self.map_layers.collision_map[line_y_idx, line_x_idx]
+        hit_indices = np.where(line_collisions == 1)[0]
+
         if len(hit_indices) > 0:
-            # 첫 번째 충돌 지점까지의 거리 (steps 배열에서의 인덱스 활용)
-            return float(hit_indices[0])
+            first_hit_idx = hit_indices[0] # 첫 장애물 인덱스
+            dist_to_obstacle = float(first_hit_idx) # 장애물 직전까지의 이동 가능 거리 (격자 단위)
+            
+            # 💡 [핵심 1] 장애물 부딪히기 "직전"까지만 경로를 자름!
+            line_x_idx = line_x_idx[:first_hit_idx]
+            line_y_idx = line_y_idx[:first_hit_idx]
         else:
-            # 장애물이 없으면 맵 끝까지 간 거리를 반환
-            return float(len(line_x_idx))
+            dist_to_obstacle = float(len(line_x_idx))
+
+        # 장애물에 바로 막혀서 전진 불가능한 경우
+        if len(line_x_idx) == 0:
+            return dist_to_obstacle, self.cfg.max_forward
+
+        # 7. 새로운 grid를 cover할 수 있는 로봇 중심 위치까지의 거리 측정
+        robot_off_x, robot_off_y = self.map_layers.robot_mask_offsets[:, 0], self.map_layers.robot_mask_offsets[:, 1]
+        cover_x = (line_x_idx[:, None] + robot_off_x[None, :])
+        cover_y = (line_y_idx[:, None] + robot_off_y[None, :])
+
+        valid_coords = (cover_x >= 0) & (cover_x < self.W) & (cover_y >= 0) & (cover_y < self.H)
+        safe_x = np.clip(cover_x, 0, self.W - 1)
+        safe_y = np.clip(cover_y, 0, self.H - 1)
+
+        is_uncleaned_cell = (self.map_layers.uncleaned[safe_y, safe_x] == 1) & valid_coords
+        line_uncovered = np.any(is_uncleaned_cell, axis=1)
+        new_cover_indices = np.where(line_uncovered)[0]
+
+        if len(new_cover_indices) > 0:
+            first_cover_idx = new_cover_indices[0] + 1
+            dist_to_new_cover = float(first_cover_idx)
+        else:
+            dist_to_new_cover = self.cfg.max_forward
+
+        return dist_to_obstacle, dist_to_new_cover
     
     
     def _get_processed_patch(self, cx: float = None, cy: float = None, raw_patch: np.ndarray | None = None) -> np.ndarray:
@@ -529,12 +554,15 @@ class CoverageEnv(gym.Env):
         num_action = self.action_space.n
         
         # 각 방향에서 바라본 여유 공간: [-1, 1]이 범위로 정규화
-        ray_norm = np.zeros(num_action, dtype=np.float32)
+        obs_dist = np.zeros(num_action, dtype=np.float32)
+        new_uncover_dist = np.zeros(num_action, dtype=np.float32)
         for d in range(num_action):
-            ray_norm[d] = self._ray_distance_forward(cx, cy, d)
+            obs_dist[d], new_uncover_dist[d] = self._ray_distance_forward(cx, cy, d)
         # 여유 공간을 보고 충돌할 수 있는 action을 제외하기 위한 action_mask를 생성
-        action_mask = (ray_norm != 0).astype(np.float32)
-        ray_norm = (ray_norm / max(1, self.cfg.max_forward))*2-1
+        action_mask = (obs_dist != 0).astype(np.float32)
+        uncover_score = float(self.cfg.max_forward) - new_uncover_dist
+        ray_raw = np.concatenate([obs_dist, uncover_score])
+        ray_norm = (ray_raw / max(1, self.cfg.max_forward))*2-1
         
         loc_vec = ray_norm
         

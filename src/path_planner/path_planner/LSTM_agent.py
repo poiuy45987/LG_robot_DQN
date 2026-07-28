@@ -118,7 +118,7 @@ class LSTMAgent:
             'locel_view_dim': LOCAL_VIEW_DIM,
             'stack_steps': self.env_cfg.stack_steps,
             'map_feat_dim': 512,
-            'loc_vec_in_dim': ACTION_NUM,
+            'loc_vec_in_dim': ACTION_NUM*2,
             'vec_feat_dim': 64,
             'lstm_in_dim': 5,
             'lstm_in_prj_dim': args.lstm_in_prj_dim,
@@ -152,7 +152,7 @@ class LSTMAgent:
             if args.use_train_maps:
                 # Training에 필요한 map 얻기
                 self.train_maps = {} # Key: Map size, Value: {Key=level: Value=[map file list]}
-                self.train_map_sizes = ['40x40', '80x80', '120x120', 'Cropped']
+                self.train_map_sizes = ['40x40', '80x80', 'Cropped']
                 
                 train_map_dir = os.path.join(self.map_save_dir, 'train')
                 

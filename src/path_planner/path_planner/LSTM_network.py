@@ -27,7 +27,7 @@ class LSTMPolicyNetwork(nn.Module):
         self.stack_steps = kwargs.get('stack_steps', 1) # State에서 local view map의 layer 수
         self.map_feat_dim = kwargs.get('map_feat_dim', 512) # Local view map의 feature dimension
         self.loc_vec_in_dim = kwargs.get('loc_vec_in_dim', 16) # Additional state vector의 dimension
-        self.vec_feat_dim = kwargs.get('vec_feat_dim', 64) # Additional state vector의 feature dimension
+        self.vec_feat_dim = kwargs.get('vec_feat_dim', 128) # Additional state vector의 feature dimension
         
         self.lstm_in_dim = kwargs.get('lstm_in_dim', 5) # LSTM cell block에 들어가는 raw input vector (Default: [x, y, cos theta, sin theta, coverage])
         self.lstm_in_prj_dim = kwargs.get('lstm_in_prj_dim', 32) # LSTM cell block에 직접 들어가는 input vector (Default: 32)
@@ -59,9 +59,9 @@ class LSTMPolicyNetwork(nn.Module):
         
         # Additional state vector feature extractor
         self.vec_enc = nn.Sequential(
-            nn.Linear(self.loc_vec_in_dim, 32),
+            nn.Linear(self.loc_vec_in_dim, 64),
             nn.ReLU(),
-            nn.Linear(32, self.vec_feat_dim),
+            nn.Linear(64, self.vec_feat_dim),
         )
         
         # 3. LSTM: Input projection + LSTM cell block
@@ -71,7 +71,8 @@ class LSTMPolicyNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(32, self.lstm_in_prj_dim)
         )
-        
+
+        nn.LSTM
         self.lstm = nn.LSTMCell(input_size=self.lstm_in_prj_dim, hidden_size=self.lstm_hid_dim)
         
         # 4. Compress network: Encoded action의 차원과 일치시키기 위해 feature를 compresse하는 network

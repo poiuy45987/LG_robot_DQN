@@ -68,6 +68,7 @@ def parse_args():
     train_set_group.add_argument('--optimizer', choices=['sgd', 'adam'], help='Optimizer to use for training (Default: sgd)')
     train_set_group.add_argument('--lr', type=float, help='Learning rate for the optimizer (Default: 1e-4)')
     train_set_group.add_argument('--momentum', type=float, help='Momentum for SGD optimizer  (Default: 0.9)')
+    train_set_group.add_argument('--detach_period', default=20, type=int, help='LSTM detaching period (Default: 20)')
     
     # Validation 주기 및 checkpoint 저장 주기 설정, Validation 설정
     train_set_group.add_argument('--valid_freq', type=int, help='Validation을 수행하는 주기 (episodes) (Default: 100)')
