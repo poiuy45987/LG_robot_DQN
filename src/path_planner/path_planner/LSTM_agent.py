@@ -3,6 +3,7 @@ import torch
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
+from torch.optim.lr_scheduler import CosineAnnealingLR
 import wandb
 import vessl
 import numpy as np
@@ -228,6 +229,8 @@ class LSTMAgent:
                 self.optimizer = optim.Adam(self.policy_net.parameters(), lr=self.train_cfg.lr)
             else:
                 raise ValueError(f"Unsupported optimizer type: {self.train_cfg.optimizer}")
+
+            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=self.train_cfg.scheduler_max_step, eta_min=1e-6)
 
         elif args.mode == 'test':
 
@@ -849,11 +852,13 @@ class LSTMAgent:
                 curr_act_prob = np.ones(batch_size, dtype=bool) # 현재 아직 완료되지 않은 environment
 
                 # LSTM network에 통과시키면서 action을 얻으면서 경로 생성. Action 확률을 저장.
+                num_steps_in_map = 0
                 while not done:
 
                     # Hidden state와 cell state를 detach하여 gradient가 LSTM step을 넘어서 전달되는 것을 방지.
-                    h_t = h_t.detach()
-                    c_t = c_t.detach()
+                    if num_steps_in_map % self.train_cfg.detach_period == 0:
+                        h_t = h_t.detach()
+                        c_t = c_t.detach()
                     
                     # Network에 통과시켜 각 action이 선택될 확률을 출력
                     loc_map_data = processed_obs["map"]
@@ -895,6 +900,8 @@ class LSTMAgent:
                     dones = terminateds | truncateds # Shape: (B,)
                     done = dones.all()
                     curr_act_prob = curr_act_prob & ~dones # 이미 종료된 environment는 0으로 표시 -> Gradient 계산 시 probability가 영향을 주지 않도록 함.
+
+                    num_steps_in_map += 1
 
                 ##############################################################
                 # [PATH REWARD FUNCTION]
@@ -980,7 +987,7 @@ class LSTMAgent:
                 
                 # wandb가 초기화되어 있다면 기록
                 if self.args.use_wandb: # 혹은 관련 조건문
-                    wandb.log(log_dict)
+                    self.wandb_run.log(log_dict, step=self.total_steps)
                 
                 # 훈련되고 있음을 확인하기 위해 steps 현황을 출력
                 # print(f"[Step {self.total_steps+1:04d}] Path reward (Mean): {log_dict['train/path_reward_mean']:.3f}")
@@ -1039,6 +1046,8 @@ class LSTMAgent:
                     self.wandb_run.log({"Visualization/Robot_path": wandb.Image(map_img)}, step=self.total_steps)
                 if self.args.use_vessl:
                     vessl.log(step=episode, payload={"Visualization/Robot_path": vessl.Image(map_img)})
+
+            self.scheduler.step()
 
     def test(self):
 

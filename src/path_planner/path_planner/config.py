@@ -45,6 +45,8 @@ class TrainConfig: # Training과 관련된 설정들
     momentum: float = 0.9
     target_update: int = 1000
     policy_update: int = 20
+    detach_period: int = 20
+    scheduler_max_step: int = 500
     
     # --- Validation 및 Checkpoint ---
     valid_freq: int = 100
