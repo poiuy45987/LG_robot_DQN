@@ -71,7 +71,7 @@ class CoverageEnv(gym.Env):
         # ---- 2. Observation_space, Action_space ----
         self.action_space: spaces.Discrete = spaces.Discrete(ACTION_NUM, seed=self.env_rng)
         self.observation_space: spaces.Dict = spaces.Dict({
-            "map": spaces.Box(low=0.0, high=1.0, shape=(3*self.cfg.stack_steps, self.cfg.local_view, self.cfg.local_view), dtype=np.float32),
+            "map": spaces.Box(low=0.0, high=1.0, shape=(4*self.cfg.stack_steps, self.cfg.local_view, self.cfg.local_view), dtype=np.float32),
             "loc_vec": spaces.Box(low=-1.0, high=1.0, shape=(ACTION_NUM*2,), dtype=np.float32),
             "glob_vec": spaces.Box(low=-1.0, high=1.0, shape=(5,), dtype=np.float32),
             "action_mask": spaces.Box(low=0, high=1, shape=(ACTION_NUM,), dtype=np.float32)
@@ -261,6 +261,7 @@ class CoverageEnv(gym.Env):
             self.no_progress_cnt += 1
         
         if collision:
+            print("Collide!")
             terminated = True
         elif cur_coverage >= self.cfg.target_coverage:
             terminated = True

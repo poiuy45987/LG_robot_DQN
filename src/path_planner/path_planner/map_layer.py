@@ -71,6 +71,7 @@ class MapLayers():
         # Map이 결정됐을 때 변하는 map layer
         self.cleaned: np.ndarray | None = None         # 로봇이 청소한 grid를 표시하는 layer: uint8 [H,W] (Cleaned: 1, Uncleaned: 0)
         self.uncleaned: np.ndarray | None = None       # 로봇이 청소하지 않은 grid를 표시하는 layer: uint8 [H,W] (Uncleaned: 1, Cleaned: 0)
+        self.frontier: np.ndarray | None = None        # 탐색 대상 경계선 레이어: uint8 [H,W] (Frontier: 1, 기타: 0)
         # self.trace: np.ndarray | None = None           # 로봇의 중심이 지나간 잔상을 표시하는 layer: uint8 [H,W] (방문한 수를 표시)
         
         self.map_info: MapInfo | None = None           # Map 정보
@@ -133,9 +134,10 @@ class MapLayers():
         if pos is None:
             return None
         
-        # Cleaned layer, Uncleaned layer, Trace layer 초기화
+        # Cleaned layer, Uncleaned layer, Frontier layer, Trace layer 초기화
         self.cleaned = np.zeros((self.map_info.H, self.map_info.W), dtype=np.uint8)
-        self.uncleaned = (self.coverable == 1).astype(np.uint8) 
+        self.uncleaned = (self.coverable == 1).astype(np.uint8)
+        self.frontier = np.zeros((self.map_info.H, self.map_info.W), dtype=np.uint8)
         # self.trace = np.zeros((self.map_info.H, self.map_info.W), dtype=np.uint8)
         # self.active_trace_indices = None
         
@@ -150,9 +152,9 @@ class MapLayers():
         return pos
     
     
-    def update_map_layers(self, cx: float, cy: float) -> tuple[bool, float]:
+    def update_map_layers(self, cx: float, cy: float) -> tuple[bool, float, float]:
         
-        collided, new_cleaned_degree, revisit_degree, new_cleaned_num, new_cleaned_grid_indices_curr_step = self._update_cleaned_map_and_uncleaned_map(cx, cy)
+        collided, new_cleaned_degree, revisit_degree, new_cleaned_num, new_cleaned_grid_indices_curr_step = self._update_cleaned_uncleaned_frontier_map(cx, cy)
         # trace_map_data = self._update_trace(cx, cy)
         curr_step_diff = MapHistory(new_cleaned_cell_num=new_cleaned_num,
                                     new_covered_cells=new_cleaned_grid_indices_curr_step,
@@ -181,13 +183,13 @@ class MapLayers():
     
     def get_raw_patch(self, cx: float, cy: float, crop_radius: int) -> np.ndarray:
         
-        full_layer = np.stack([self.collision_map, self.cleaned, self.uncleaned], axis=0)
-        current_patch = crop_raw_patch(full_layer, cx, cy, crop_radius, value=[1, 0, 0])
+        full_layer = np.stack([self.collision_map, self.cleaned, self.uncleaned, self.frontier], axis=0)
+        current_patch = crop_raw_patch(full_layer, cx, cy, crop_radius, value=[1, 0, 0, 0])
         
         return current_patch
        
-    
-    def one_step_back(self, crop_radius: int, stack_steps_num: int = 1):
+    # FIXME: Frontier layer는 수정하지 않음.
+    def one_step_back(self, crop_radius: int, stack_steps_num: int = 1) -> np.ndarray:
         """
         한 step 이전의 map 상태로 변환
 
@@ -243,7 +245,7 @@ class MapLayers():
         # crop을 얻고 self.patch_stack에 추가
         cx, cy = past_traj_data.pos
         full_layer = np.stack([self.collision_map, past_cleaned, past_uncleaned], axis=0)
-        past_patch = crop_raw_patch(full_layer, cx, cy, crop_radius, value=[1, 0, 0])
+        past_patch = crop_raw_patch(full_layer, cx, cy, crop_radius, value=[1, 0, 0, 0])
         
         return past_patch
     
@@ -386,7 +388,7 @@ class MapLayers():
         return xs, ys
     
     
-    def _update_cleaned_map_and_uncleaned_map(self, cx: float, cy: float) -> tuple[bool, float, float, int, np.ndarray]:
+    def _update_cleaned_uncleaned_frontier_map(self, cx: float, cy: float) -> tuple[bool, float, float, int, np.ndarray]:
         """
         로봇 중심이 (cx, cy)일 때 cleaned_map, uncleaned_map을 update하는 method
 
@@ -444,15 +446,53 @@ class MapLayers():
         
         # 4. new_xs_curr_step, new_ys_curr_step 보정: cleaned_map 값이 255 이상이면 더 이상 더해지지 않음. 255인 grid를 제외
         under_cleaned_max_mask = self.cleaned[new_ys_curr_step, new_xs_curr_step] < 255 # cleaned_map의 grid가 CLEANED_MAP_MAX 미만인 indices만 선별
-        new_xs_curr_step = new_xs_curr_step[under_cleaned_max_mask]
-        new_ys_curr_step = new_ys_curr_step[under_cleaned_max_mask]
-        new_cleaned_grid_indices_curr_step = np.column_stack((new_xs_curr_step, new_ys_curr_step)) # Shape: (N, 2)
+        new_xs_curr_step_masked = new_xs_curr_step[under_cleaned_max_mask]
+        new_ys_curr_step_masked = new_ys_curr_step[under_cleaned_max_mask]
+        new_cleaned_grid_indices_curr_step = np.column_stack((new_xs_curr_step_masked, new_ys_curr_step_masked)) # Shape: (N, 2)
         
         # 5. cleaned_map, uncleaned_map update
-        self.cleaned[new_ys_curr_step, new_xs_curr_step] += 1 # cleaned_map 업데이트
+        self.cleaned[new_ys_curr_step_masked, new_xs_curr_step_masked] += 1 # cleaned_map 업데이트
         self.uncleaned[ys, xs] = 0 # uncleand_map 업데이트
         self._prev_xs = xs.copy(); self._prev_ys = ys.copy()
-        
+
+        # 6. Frontier map update
+        if len(new_xs_curr_step) and len(new_ys_curr_step) > 0:
+
+            # 1) 현재 cover하고 있는 영역의 frontier 지우기.
+            self.frontier[ys, xs] = 0 
+
+            # 2) Cover된 영역의 경계의 indices 뽑기
+            offsets = np.array([
+                [-1,-1], [-1,0], [-1,1],
+                [ 0,-1], [ 0,0], [ 0,1],
+                [ 1,-1], [ 1,0], [ 1,1]
+            ], dtype=np.int32)
+            cover_cell_indices = np.column_stack((xs, ys)) # Shape: (N, 2)
+            roi_coords = np.unique((cover_cell_indices[:, None, :] + offsets[None, :, :]).reshape(-1, 2), axis=0) # Cover된 영역을 dilation 시켰을 때의 indices
+            valid_mask = (roi_coords[:, 0] >= 0) & (roi_coords[:, 0] < self.map_info.W) & \
+                         (roi_coords[:, 1] >= 0) & (roi_coords[:, 1] < self.map_info.H) # 경계 indices가 valid한 indices인지 검사
+            roi_coords = roi_coords[valid_mask]
+            rx, ry = roi_coords[:, 0], roi_coords[:, 1] # Cover 영역의 dilation된 영역의 indices
+            is_coverable = (self.coverable[ry, rx] == 1)
+            is_uncleaned = (self.cleaned[ry, rx] == 0)
+            adjacent_cleaned = (
+                (self.cleaned[np.clip(ry-1, 0, self.map_info.H-1), rx] > 0) |
+                (self.cleaned[np.clip(ry+1, 0, self.map_info.H-1), rx] > 0) |
+                (self.cleaned[ry, np.clip(rx-1, 0, self.map_info.W-1)] > 0) |
+                (self.cleaned[ry, np.clip(rx+1, 0, self.map_info.W-1)] > 0)
+            )
+            raw_frontier_mask = is_coverable & is_uncleaned & adjacent_cleaned # Coverable 가능하고, 아직 청소가 안 됐으며, 주위에 cleaned grid가 있는 indices만 남김
+            rx, ry = rx[raw_frontier_mask], ry[raw_frontier_mask]
+
+            # 3) 경계 indices에 frontier 추가. 3*3 kernel로 dilation.
+            if np.any(raw_frontier_mask):
+                raw_frontier_patch = np.zeros((self.map_info.H, self.map_info.W), dtype=bool)
+                raw_frontier_patch[ry, rx] = True
+                kernel = np.ones((3, 3), dtype=np.uint8)
+                dilated_frontier = cv2.dilate(raw_frontier_patch.astype(np.uint8), kernel, iterations=1).astype(bool)
+                valid_dilated = dilated_frontier & (self.coverable == 1) & (self.cleaned == 0)
+                self.frontier[valid_dilated] = 1
+
         return False, new_cleaned_degree, revisit_degree, new_cleaned_num, new_cleaned_grid_indices_curr_step
     
     

@@ -47,7 +47,7 @@ class LSTMPolicyNetwork(nn.Module):
         next_dim = get_next_layer_dim(next_dim, kernel_size=3, stride=2, padding=0) # 51 -> 25
         final_dim = get_next_layer_dim(next_dim, kernel_size=3, stride=2, padding=0) # 25 -> 12
         self.map_enc = nn.Sequential(
-            nn.Conv2d(3*self.stack_steps, 32, kernel_size=3, stride=1, padding=1), # 51 -> 51
+            nn.Conv2d(4*self.stack_steps, 32, kernel_size=3, stride=1, padding=1), # 51 -> 51
             nn.ReLU(),
             nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=0), # 51 -> 25
             nn.ReLU(),

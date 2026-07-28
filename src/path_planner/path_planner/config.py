@@ -37,7 +37,7 @@ class TrainConfig: # Training과 관련된 설정들
     use_train_maps: bool = False
     max_step_per_eps: int = 20
     max_eps_per_map_size: int = 100
-    path_reward_thres: float = 0.8
+    path_reward_thres: float = 0.85
     
     # --- Optimizer 및 Update 주기 ---
     optimizer: str = 'sgd' # 'sgd' or 'adam'

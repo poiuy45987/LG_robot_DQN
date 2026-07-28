@@ -194,20 +194,19 @@ class LSTMAgent:
             for folder in self.train_map_sizes:
                 self.train_maps_level_iterator[folder] = cycle(range(1, 5)) # 각 map size마다 level iterator를 생성
                 
-            valid_map_sizes = []
-            window_size = self.env_cfg.map_cfg.window_size
-            for mult in range(1, 5):
-                map_size = (window_size*mult, window_size*mult)
-                valid_map_sizes.append(map_size)
-            valid_map_sizes.append('None')
-            valid_levels = range(1, 5)
-            self.valid_map_cfgs = list(product(valid_levels, valid_map_sizes))
+            # valid_map_sizes = []
+            # window_size = self.env_cfg.map_cfg.window_size
+            # for mult in range(1, 5):
+            #     map_size = (window_size*mult, window_size*mult)
+            #     valid_map_sizes.append(map_size)
+            # valid_map_sizes.append('None')
+            # valid_levels = range(1, 5)
+            # self.valid_map_cfgs = list(product(valid_levels, valid_map_sizes))
                     
             # Training에 필요한 변수 설정
             self.total_steps = 0            # Training을 진행한 steps 수 (Warmup 과정 포함)
             self.start_episode = 1
             self.eps_num_per_map_size = 0   # 주어진 map size에서 training한 episode 개수
-            self.map_size_idx = 0           # 현재 훈련시키고 있는 map size의 index를 저장하는 변수
             
             # Validation에 필요한 변수 설정
             self.max_coverage_mean = 0.0                # Validation을 수행했을 때 가장 높았던 coverage
@@ -378,10 +377,16 @@ class LSTMAgent:
                     self.optimizer.load_state_dict(data['optimizer_state_dict']) # Optimizer도 checkpoint와 똑같이 유지
                 except KeyError as e:
                     print(f"Optimizer state mismatch. Skipping: {e}")
+
+                # Scheduler loading
+                try:
+                    self.scheduler.load_state_dict(data['scheduler_state_dict']) # Optimizer도 checkpoint와 똑같이 유지
+                except KeyError as e:
+                    print(f"Scheduler state mismatch. Skipping: {e}")
               
                 # 추가적인 변수 loading
                 self.total_steps = data['total_steps']
-                self.map_size_idx = data['map_size_idx']
+                self.train_maps_sizes_idx = data['train_maps_sizes_idx']
                 self.start_episode = data['episode'] + 1
                 self.eps_num_per_map_size = data['eps_num_per_map_size']
 
@@ -407,8 +412,8 @@ class LSTMAgent:
                     torch.cuda.set_rng_state_all(gpu_rngs)
                 
                 # map_size_iterator원래 형태로
-                if self.map_size_idx > 0:
-                    for _ in range(self.map_size_idx-1):
+                if self.train_maps_sizes_idx > 0:
+                    for _ in range(self.train_maps_sizes_idx-1):
                         try:
                             next(self.train_maps_sizes_iterator)
                         except StopIteration: # 마지막 map size인 경우, 이전에 설정한 map size를 그대로 사용
@@ -472,7 +477,8 @@ class LSTMAgent:
                 'episode': episode,
                 'total_steps': self.total_steps,
                 'optimizer_state_dict': self.optimizer.state_dict(),
-                'map_size_idx': self.map_size_idx,
+                'scheduler_state_dict': self.scheduler.state_dict(),
+                'train_maps_sizes_idx': self.train_maps_sizes_idx,
                 'eps_num_per_map_size': self.eps_num_per_map_size,
 
                 # seed 진행도 저장
@@ -542,13 +548,25 @@ class LSTMAgent:
         coverage_mean = 0.0; overlap_percent_mean = 0.0; cleaning_time_mean = 0.0
         best_traj_img = None # 가장 성능이 좋았던 map에서의 trajectory를 보여줌
         
-        # Model의 성능 평가
-        for level, map_sizes in self.valid_map_cfgs:
-            
-            if map_sizes != 'None':
-                H, W = map_sizes
+        # 현재 훈련 중인 map size를 얻음.
+        map_size = self.train_map_sizes[self.train_maps_sizes_idx]
+        if self.args.use_train_maps:
+            if map_size == "Cropped":
+                H = None; W = None
             else:
-                H, W = None, None
+                H, W = map(int, map_size.split('x'))
+        else:
+            if map_size is None:
+                H = None; W = None
+            else:
+                H, W = map_size
+
+        map_size_str = f"{H}x{W}" if H is not None else "random"
+        print(f"Validation on {map_size_str} map size")
+        
+        # Model의 성능 평가
+        for level in range(1, 5):
+
             map_config = MapConfigSchema(level=level, H=H, W=W)
             
             for _ in range(self.train_cfg.valid_map_num):
@@ -926,8 +944,12 @@ class LSTMAgent:
                 cov_thres = 0.9 # Coverage를 주로 고려하는 coverage 수치 임계값
                 above_cov_thres_mask = (cov_tensor >= cov_thres).float()
                 cov_reward = torch.clamp(cov_tensor, min=0.0, max=cov_thres) * (cov_rwd_max/cov_thres) # Coverage가 cov_thres 미만일 때는 coverage만 reward에 적용. 만점은 cov_rwd_max 
-                overlap_reward = (1.0 - overlap_tensor) * (1.0 - cov_rwd_max) # Overlap은 coverage가 cov_thres 이상일 때만 고려. 만점은 1.0 - cov_rwd_max
-                time_penalty = torch.clamp((time_tensor - 1.0) * 0.05, min=0.0, max=0.1) # 직진 경로 시간과 비교해서 얼마나 차이나는지에 따라 penalty 부여. 직진보다 세 배 더 걸릴 때 최대 감점.
+
+                overlap_scale = 1.0 - (overlap_tensor ** 2)
+                overlap_scale = torch.clamp(overlap_scale, min=-1.0)
+                overlap_reward = overlap_scale * (1.0 - cov_rwd_max) # Overlap은 coverage가 cov_thres 이상일 때만 고려. 만점은 1.0 - cov_rwd_max
+                
+                time_penalty = torch.clamp((time_tensor - 1.0) * 0.25, min=0.0, max=0.1) # 직진 경로 시간과 비교해서 얼마나 차이나는지에 따라 penalty 부여. 직진보다 다섯 배 더 걸릴 때 최대 감점.
                 path_reward = cov_reward + (overlap_reward - time_penalty) * above_cov_thres_mask
                 
                 advantage = (path_reward - path_reward.mean()).detach() # Shape: (B,)
@@ -964,6 +986,7 @@ class LSTMAgent:
                     "train/grad_norm_raw": grad_norm_before.item() if isinstance(grad_norm_before, torch.Tensor) else grad_norm_before,
                     "train/entropy_mean": mean_entropy.item(), # 💡 수집된 평균 엔트로피
                     "train/map_steps_mean": total_steps.mean(),
+                    "train/learning_rate": self.optimizer.param_groups[0]['lr'],
                     
                     # Reward 지표 (Mean, Max, Min)
                     "train/path_reward_mean": path_reward_mean,
@@ -1019,7 +1042,7 @@ class LSTMAgent:
                     no_more_map_size = True
                 else:
                     print(f"[Map Scale Up] Successfully changed map size to {curr_map_size}.")
-                    self.map_size_idx += 1
+                    self.train_maps_sizes_idx += 1
                     self.eps_num_per_map_size = 0
             
             # 한 map에 대해서 훈련이 끝나면 checkpoint 저장 및 validation 수행

@@ -166,11 +166,11 @@ def visualize_mask(robot_mask: np.ndarray):
 def draw_layer(map_layers: MapLayers, fig: Figure, pos: tuple[float, float], last_coverage: float):
     
     fig.clear() # 이전 그림 지우기
-    fig.set_size_inches(8, 8)
+    fig.set_size_inches(12, 8)
 
-    axes = fig.subplots(2, 3)
+    axes = fig.subplots(2, 4)
 
-    # obstacles rmfjg
+    # obstacles
     axes[0, 0].imshow(map_layers.obstacles, cmap='gray_r', origin='lower')
     axes[0, 0].set_title("Original Obstacles")
 
@@ -199,6 +199,12 @@ def draw_layer(map_layers: MapLayers, fig: Figure, pos: tuple[float, float], las
     # coverable
     axes[1, 2].imshow(map_layers.coverable, cmap='gray', origin='lower')
     axes[1, 2].set_title(f"Coverable map")
+
+    # Frontier
+    axes[0, 3].imshow(map_layers.frontier, cmap='gray_r', origin='lower')
+    axes[0, 3].set_title(f"Frontier map")
+
+    axes[1, 3].axis('off')
     
     fig.tight_layout()
     
@@ -221,6 +227,7 @@ def draw_traj(map_layers: MapLayers, fig: Figure, pos: tuple[float, float], traj
     traj_map[map_layers.obstacles == 1] = 1 # Obstacle 표시
     traj_map[map_layers.cleaned > 0] = 2   # Cleaned 영역 표시
     traj_map[agent_layer == 1] = 3    # 현재 로봇 위치 표시
+    frontier_map = np.where(map_layers.frontier > 0, 1, 0)
     
     # 색깔 설정
     color_bg = [1, 1, 1]                    # 흰색 (Index 0)
@@ -231,10 +238,14 @@ def draw_traj(map_layers: MapLayers, fig: Figure, pos: tuple[float, float], traj
     color_traj = [0.1216, 0.4667, 0.7059]   # 연한 파랑
     color_start = 'purple'
     color_end = 'green'
+    color_frontier = [1.0, 0.5, 0.0, 0.2]
     
     custom_cmap = ListedColormap([color_bg, color_obs, color_cleaned, color_robot, color_uncoverable])
+    frontier_cmap = ListedColormap([[0, 0, 0, 0], color_frontier])
     
     ax1.imshow(traj_map, cmap=custom_cmap, origin='lower', vmin=0, vmax=4)
+    ax1.imshow(frontier_map, cmap=frontier_cmap, origin='lower', vmin=0, vmax=1, zorder=3)
+
     # 로봇이 움직인 궤적 표시
     if len(traj_arr) > 1:
         ax1.plot(traj_arr[:, 0], traj_arr[:, 1], color=color_traj, linewidth=1.5, alpha=0.8, zorder=5)
@@ -315,7 +326,7 @@ def draw_obs(obs: dict, fig: Figure, stack_steps: int, local_view_dim: int, clea
     
     # 그림을 그릴 창을 4행 3열로 나눔. 첫 번째 행의 높이는 두 번째 행보다 2배 높게 설정.
     height_ratios = [4]*stack_steps + [1]
-    gs = GridSpec(stack_steps+1, 3, figure=fig, height_ratios=height_ratios)
+    gs = GridSpec(stack_steps+1, 4, figure=fig, height_ratios=height_ratios)
     
     # obs data를 얻음
     if preprocessor is not None:
@@ -329,11 +340,12 @@ def draw_obs(obs: dict, fig: Figure, stack_steps: int, local_view_dim: int, clea
         ax1 = fig.add_subplot(gs[i, 0])
         ax2 = fig.add_subplot(gs[i, 1])
         ax3 = fig.add_subplot(gs[i, 2])
-        axes = [ax1, ax2, ax3]
+        ax4 = fig.add_subplot(gs[i, 3])
+        axes = [ax1, ax2, ax3, ax4]
             
         # collision_map
         img0 = axes[0].imshow(obs['map'][3*i], cmap='gray_r', origin='lower')
-        axes[0].plot(H//2, W//2, 'r.')
+        axes[0].plot(0, 0, 'r.')
         axes[0].set_title(f"Collision_map local view(Last {stack_steps-i-1} steps ago)")
         legend_elements0 = [
             Patch(facecolor='black', edgecolor='black', label='Obstacles'),
@@ -350,7 +362,7 @@ def draw_obs(obs: dict, fig: Figure, stack_steps: int, local_view_dim: int, clea
         cleaned_map = (obs['map'][3*i+1]*cleaned_map_max).astype(np.float32).copy()
         cleaned_map[cleaned_map == 0] = np.nan
         img1 = axes[1].imshow(cleaned_map, cmap='viridis', origin='lower', vmin=0, vmax=cleaned_map_max)
-        axes[1].plot(H//2, W//2, 'r.') # 로봇 위치를 빨간 점으로 표시
+        axes[1].plot(0, 0, 'r.') # 로봇 위치를 빨간 점으로 표시
         axes[1].set_title(f"Cleaned map local view(Last {stack_steps-i-1} steps ago)")
         cbar = fig.colorbar(img1, ax=axes[1], 
                                 orientation='horizontal',
@@ -379,7 +391,7 @@ def draw_obs(obs: dict, fig: Figure, stack_steps: int, local_view_dim: int, clea
         
         # collision_map
         img2 = axes[2].imshow(obs['map'][3*i+2], cmap='gray_r', origin='lower')
-        axes[2].plot(H//2, W//2, 'r.')
+        axes[2].plot(0, 0, 'r.')
         axes[2].set_title(f"Uncleaned map local view(Last {stack_steps-i-1} steps ago)")
         legend_elements0 = [
             Patch(facecolor='black', edgecolor='black', label='Obstacles'),
@@ -388,6 +400,20 @@ def draw_obs(obs: dict, fig: Figure, stack_steps: int, local_view_dim: int, clea
         axes[2].legend(handles=legend_elements0, loc='upper left', bbox_to_anchor=(0, -0.1))
         # 그래프 위치를 맞추기 위한 가상의 colorbar
         cbar_fake0 = fig.colorbar(img2, ax=axes[2], orientation='horizontal', 
+                                    pad=0.1, shrink=0.8, aspect=30, fraction=0.05)
+        cbar_fake0.ax.set_visible(False)
+
+        # Frontier
+        img3 = axes[3].imshow(obs['map'][3*i+3], cmap='gray_r', origin='lower')
+        axes[3].plot(0, 0, 'r.')
+        axes[3].set_title(f"Frontier map local view(Last {stack_steps-i-1} steps ago)")
+        legend_elements0 = [
+            Patch(facecolor='black', edgecolor='black', label='Frontier'),
+            Patch(facecolor='white', edgecolor='black', label='Free space'),
+        ]
+        axes[3].legend(handles=legend_elements0, loc='upper left', bbox_to_anchor=(0, -0.1))
+        # 그래프 위치를 맞추기 위한 가상의 colorbar
+        cbar_fake0 = fig.colorbar(img3, ax=axes[3], orientation='horizontal', 
                                     pad=0.1, shrink=0.8, aspect=30, fraction=0.05)
         cbar_fake0.ax.set_visible(False)
     # -----------------------------
