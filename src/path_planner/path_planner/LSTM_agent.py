@@ -153,7 +153,7 @@ class LSTMAgent:
             if args.use_train_maps:
                 # Training에 필요한 map 얻기
                 self.train_maps = {} # Key: Map size, Value: {Key=level: Value=[map file list]}
-                self.train_map_sizes = ['40x40', '80x80', 'Cropped']
+                self.train_map_sizes = ['80x80', 'Cropped']
                 
                 train_map_dir = os.path.join(self.map_save_dir, 'train')
                 
@@ -543,13 +543,14 @@ class LSTMAgent:
         
         self.policy_net.eval() # eval mode로 전환
         coverage = []; overlap_percent = []; cleaning_time = []
+        path_reward = []
         max_coverage = 0.0; min_overlap_percent = float('inf'); min_cleaning_time = float('inf')
         coverage_threshold = 0.90; overlap_percent_gap = 0.10
         coverage_mean = 0.0; overlap_percent_mean = 0.0; cleaning_time_mean = 0.0
         best_traj_img = None # 가장 성능이 좋았던 map에서의 trajectory를 보여줌
         
-        # 현재 훈련 중인 map size를 얻음.
-        map_size = self.train_map_sizes[self.train_maps_sizes_idx]
+        # 현재 훈련 중인 map size를 얻음. FIXME
+        map_size = "Cropped"
         if self.args.use_train_maps:
             if map_size == "Cropped":
                 H = None; W = None
@@ -587,10 +588,29 @@ class LSTMAgent:
                     if start_num != 0:
                         obs, _ = self.test_env.reset(mode='test') # 시작 지점 초기화
                     cur_coverage, cur_overlap_percent, cur_cleaning_time = self._test_one_map(self.test_env, obs, debug=False) # Coverage 성능을 평가
+
+                    ##### Reward 계산 #####
+                    total_steps = self.test_env.steps
+                    straight_cleaning_time = total_steps * GRID_RESOLUTION_M / LINEAR_VELOCITY / 60.0
+                    cleaning_time_rel = cur_cleaning_time / (straight_cleaning_time + 1e-8) # 경로 길이에 대한 cleaning time
+
+                    cov_rwd_max = 0.5 # Coverage reward의 max 수치
+                    cov_thres = 0.9 # Coverage를 주로 고려하는 coverage 수치 임계값
+                    above_cov_thres_mask = 1.0 if cur_coverage >= cov_thres else 0.0
+                    cov_reward = min(max(cur_coverage, 0.0), cov_thres) * (cov_rwd_max / cov_thres) # Coverage가 cov_thres 미만일 때는 coverage만 reward에 적용. 만점은 cov_rwd_max 
+    
+                    overlap_scale = 1.0 - ((cur_overlap_percent/100.0) ** 2)
+                    overlap_scale = max(overlap_scale, -1.0)
+                    overlap_reward = overlap_scale * (1.0 - cov_rwd_max) # Overlap은 coverage가 cov_thres 이상일 때만 고려. 만점은 1.0 - cov_rwd_max
                     
+                    time_penalty = min(max((cleaning_time_rel - 1.0) * 0.025, 0.0), 0.1) # 직진 경로 시간과 비교해서 얼마나 차이나는지에 따라 penalty 부여. 직진보다 다섯 배 더 걸릴 때 최대 감점.
+                    cur_path_reward = cov_reward + (overlap_reward - time_penalty) * above_cov_thres_mask
+                    #######################
+
                     coverage.append(cur_coverage)
                     overlap_percent.append(cur_overlap_percent)
                     cleaning_time.append(cur_cleaning_time)
+                    path_reward.append(cur_path_reward)
 
                     # Coverage를 어느 정도 달성한 경우, overlap_percent과 cleaning_time을 중심으로 best_traj의 후보로 고려
                     if cur_coverage >= coverage_threshold:
@@ -619,6 +639,7 @@ class LSTMAgent:
         coverage_mean = np.mean(coverage) if coverage else 0.0
         overlap_percent_mean = np.mean(overlap_percent) if overlap_percent else 0.0
         cleaning_time_mean = np.mean(cleaning_time) if cleaning_time else 0.0
+        path_reward_mean = np.mean(path_reward) if path_reward else 0.0
         
         # 이전 model의 종합적 성능(Coverage, Overlap rate, Cleaning time 모두 고려)보다 더 좋으면 model을 저장
         if coverage_mean >= coverage_threshold: # Coverage가 일정 수준 이상인 경우: Overlap, Cleaning time을 고려
@@ -655,6 +676,7 @@ class LSTMAgent:
             self.wandb_run.log({'Validation/Coverage_mean': coverage_mean,
                                 'Validation/Overlap Rate Mean': overlap_percent_mean,
                                 'Validation/Cleaning Time Mean': cleaning_time_mean,
+                                'Validation/Path Reward Mean': path_reward_mean,
                                 'Validation/Best_path': wandb.Image(best_traj_img)}, step=self.total_steps)
         if self.args.use_vessl:
             vessl.log(step=episode, payload={'Validation/Coverage_mean': coverage_mean,
@@ -666,9 +688,12 @@ class LSTMAgent:
         print(f"[Validation] Episode {episode}: \n"
               f"\tCoverage Mean = {coverage_mean*100:.2f}%\n"
               f"\tOverlap Rate Mean = {overlap_percent_mean:.2f}%\n"
-              f"\tCleaning Time Mean = {cleaning_time_mean:.2f} min")
+              f"\tCleaning Time Mean = {cleaning_time_mean:.2f} min\n"
+              f"\tPath Reward Mean = {path_reward_mean:.2f}")
             
         self.policy_net.train() # train mode로 전환
+
+        return path_reward_mean
     
     def _test_one_map(self, env: CoverageEnv, obs: dict, debug: bool = False) -> tuple[float, float, float]:
         
@@ -987,6 +1012,7 @@ class LSTMAgent:
                     "train/entropy_mean": mean_entropy.item(), # 💡 수집된 평균 엔트로피
                     "train/map_steps_mean": total_steps.mean(),
                     "train/learning_rate": self.optimizer.param_groups[0]['lr'],
+                    "train/total_steps": self.total_steps,
                     
                     # Reward 지표 (Mean, Max, Min)
                     "train/path_reward_mean": path_reward_mean,
@@ -1032,18 +1058,7 @@ class LSTMAgent:
                 elif self.eps_num_per_map_size > self.train_cfg.max_eps_per_map_size:
                     change_map_size = True
                     print(f"[Map Scale Up] Reached maximum episodes ({self.eps_num_per_map_size}) for map size {curr_map_size}.")
-                
-            if change_map_size:
-                try:
-                    curr_map_size = next(self.train_maps_sizes_iterator)
-                except StopIteration: # 마지막 map size인 경우, 이전에 설정한 map size를 그대로 사용
-                    print("[Map Scale Up] No more map sizes available. Maintaining the current size.")
-                    curr_map_size = self.train_map_sizes[-1]
-                    no_more_map_size = True
-                else:
-                    print(f"[Map Scale Up] Successfully changed map size to {curr_map_size}.")
-                    self.train_maps_sizes_idx += 1
-                    self.eps_num_per_map_size = 0
+            
             
             # 한 map에 대해서 훈련이 끝나면 checkpoint 저장 및 validation 수행
 
@@ -1058,7 +1073,24 @@ class LSTMAgent:
             # Validation 수행
             if episode % self.train_cfg.valid_freq == 0:
                 print("Validation...")
-                self._validation(episode)
+                valid_path_reward_mean = self._validation(episode)
+                if valid_path_reward_mean >= self.train_cfg.path_reward_thres:
+                    change_map_size = True
+                    print(f"[Map Scale Up] Achieved path reward {path_reward_mean:.3f} at map size {curr_map_size} on validation. "
+                          f"Exceeded the threshold {self.train_cfg.path_reward_thres}.")
+
+                
+            if change_map_size:
+                try:
+                    curr_map_size = next(self.train_maps_sizes_iterator)
+                except StopIteration: # 마지막 map size인 경우, 이전에 설정한 map size를 그대로 사용
+                    print("[Map Scale Up] No more map sizes available. Maintaining the current size.")
+                    curr_map_size = self.train_map_sizes[-1]
+                    no_more_map_size = True
+                else:
+                    print(f"[Map Scale Up] Successfully changed map size to {curr_map_size}.")
+                    self.train_maps_sizes_idx += 1
+                    self.eps_num_per_map_size = 0
             
             # Map 기록 저장
             if episode % 5 == 0:

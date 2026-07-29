@@ -254,8 +254,8 @@ class EnvConfig:
     
     # Step, Termination 관련
     max_steps: int = 1500
-    max_no_progress_steps: int = 30
-    max_no_progress_steps_final: int = 50
+    max_no_progress_steps: int = 60
+    max_no_progress_steps_final: int = 100
     target_coverage: float = 0.95
     final_coverage_thres: float = 0.90
     stack_steps: int = 1 # Map의 observation data의 step 수
