@@ -1,3 +1,10 @@
+from __future__ import annotations
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence, Callable
+    from gymnasium import Env
+
 import re
 import torch
 import torch.nn.functional as F
@@ -12,15 +19,14 @@ import cv2
 import time
 import os
 from dataclasses import asdict
-from itertools import product, cycle
+from itertools import cycle
 from gymnasium.vector import SyncVectorEnv
-import math
 
 import glob
 from IPython.display import display
 
 # 앞서 정의한 클래스들을 임포트한다고 가정 (또는 같은 파일에 위치)
-from path_planner.config import EnvConfig, TrainConfig, LOCAL_VIEW_DIM, TRAIN_MAP_FILE_REGEX, MAP_SAVE_DIR, TEST_MAP_FILE_REGEX
+from path_planner.config import EnvConfig, TrainConfig, LOCAL_VIEW_DIM, TRAIN_MAP_FILE_REGEX, TEST_MAP_FILE_REGEX
 from path_planner.map_layer import MapConfigSchema
 from path_planner.environment import CoverageEnv, ACTION_NUM
 from path_planner.LSTM_network import LSTMPolicyNetwork
@@ -30,39 +36,54 @@ from path_planner.utils.trajectory_metrics import GRID_RESOLUTION_M, LINEAR_VELO
 
 class CustomGymVecEnv(SyncVectorEnv):
     """
-    Gym 내장 병렬 클래스를 그대로 상속받되, 
-    우리가 원했던 '특정 환경만 골라 리셋하는 기능' 딱 하나만 추가합니다.
+    Environment 여러 개를 한번에 다룰 때 사용하는 class
+    SyncVectorEnv 버전
     """
     
-    def __init__(self, env_fns, **kwargs):
-        # SyncVectorEnv는 multiprocessing 관련 옵션(worker, shared_memory 등)을 받지 않으므로
-        # env_fns만 부모 클래스에 전달합니다.
+    def __init__(self, env_fns: Iterator[Callable[[], Env]] | Sequence[Callable[[], Env]], **kwargs):
         super().__init__(env_fns, **kwargs)
 
-    # 특정 환경(env_id)에서만 메소드를 실행할 때 사용하는 함수
-    def call_at(self, method_name: str = "reset", env_id: int = 0, *args, **kwargs):
-        # 1. 대상 환경 객체에 직접 접근
+    def call_at(self, method_name: str="reset", env_id: int=0, *args, **kwargs):
+        """
+        특정 environment에만 개별적으로 method를 수행
+
+        Args:
+            method_name (str, optional): 개별 environment에서 불러온 method 이름. Defaults to "reset".
+            env_id (int, optional): Method를 사용할 environment의 index. Defaults to 0.
+
+        Returns:
+            _type_: _description_
+        """
         target_env = self.envs[env_id]
-
-        # 2. 메소드/속성 가져오기
         attr = getattr(target_env, method_name)
-
-        # 3. 실행 후 결과 반환 (호출 가능하면 함수 실행, 변수면 그대로 반환)
         if callable(attr):
             return attr(*args, **kwargs)
         return attr
     
     def step(self, actions):
+        """
+        Step 함수 실행
+        SyncVectorEnv에 정의된 step method는 환경 일부가 terminated or truncated 되었을 때 환경 reset을 수행할 것을 강요함.
+        reset을 외부에서 직접 해주기 위해 이러한 기능을 제거한 step 함수를 새로 작성.
+        """
         self._autoreset_envs.fill(False)
         return super().step(actions)
 
 
-# 경로의 품질 비교 함수
-def is_better_path(cand, ref):
+def is_better_path(cand: tuple[float, float, float], ref: tuple[float, float, float]) -> bool:
     """
-    cand(후보): (cov, overlap, time)
-    ref(기준):  (cov, overlap, time)
-    cand가 ref보다 우수한경우 True 반환
+    Path metric을 비교하는 함수
+    1. Coverage가 90% 미만인 경우: Coverage가 높을수록 좋은 path
+    2. Coverage가 90% 이상인 경우:
+        1) Overlap 차이가 10%p 이상인 경우: Overlap 수치가 더 적은 path가 더 좋은 path
+        2) Overlap 차이가 10%p 미만인 경우: 청소 시간이 더 적게 든 path가 더 좋은 path
+
+    Args:
+        cand (tuple[float, float, float]): 비교할 path의 (cov, overlap, time)
+        ref (tuple[float, float, float]): 기준 path의 (cov, overlap, time)
+
+    Returns:
+        bool: cand의 path가 ref의 path보다 우수한 경우 True 반환
     """
     cov_c, ov_c, t_c = cand
     cov_r, ov_r, t_r = ref
@@ -99,7 +120,7 @@ class LSTMAgent:
             if k in EnvConfig.__dataclass_fields__ and v is not None
         }
         self.env_cfg = EnvConfig(**env_args)
-        # 우선, validation 및 test를 위한 environment만 조성
+        # Validation 및 test를 위한 environment 조성
         if args.mode == 'train':
             self.test_env_rng = np.random.default_rng(seed=args.seed+100000)
             self.test_map_rng = np.random.default_rng(seed=args.seed+100000)
@@ -110,7 +131,6 @@ class LSTMAgent:
             self.test_env = CoverageEnv(cfg=self.env_cfg, env_rng=self.test_env_rng, map_rng=self.test_map_rng)
 
         # Policy network 조성
-        # kwargs 처리
         ang_diff_diridx = self.test_env.ang_diff_diridx
         if ang_diff_diridx is None:
             raise ValueError("PolicyNetwork를 초기화하려면 'ang_diff_diridx' 인자가 반드시 필요합니다")
@@ -153,7 +173,7 @@ class LSTMAgent:
             if args.use_train_maps:
                 # Training에 필요한 map 얻기
                 self.train_maps = {} # Key: Map size, Value: {Key=level: Value=[map file list]}
-                self.train_map_sizes = ['80x80', 'Cropped']
+                self.train_map_sizes = ['40x40', '80x80', 'Cropped']
                 
                 train_map_dir = os.path.join(self.map_save_dir, 'train')
                 
@@ -193,15 +213,6 @@ class LSTMAgent:
             self.train_maps_level_iterator = {} # Map의 level을 고루 변화시킬 때 사용하는 iterator
             for folder in self.train_map_sizes:
                 self.train_maps_level_iterator[folder] = cycle(range(1, 5)) # 각 map size마다 level iterator를 생성
-                
-            # valid_map_sizes = []
-            # window_size = self.env_cfg.map_cfg.window_size
-            # for mult in range(1, 5):
-            #     map_size = (window_size*mult, window_size*mult)
-            #     valid_map_sizes.append(map_size)
-            # valid_map_sizes.append('None')
-            # valid_levels = range(1, 5)
-            # self.valid_map_cfgs = list(product(valid_levels, valid_map_sizes))
                     
             # Training에 필요한 변수 설정
             self.total_steps = 0            # Training을 진행한 steps 수 (Warmup 과정 포함)
@@ -213,7 +224,6 @@ class LSTMAgent:
             self.min_overlap_percent_mean = float('inf')   # Validation을 수행했을 때 가장 낮았던 overlap rate
             self.min_cleaning_time_mean = float('inf')  # Validation을 수행했을 때 가장 낮았던 cleaning time    
             self.best_traj_img = None                   # Validation을 수행했을 때 가장 coverage를 잘 했던 trajectory를 img로 저장 (RGB image)
-            # self.num_heuristic = 0                      # Heuristic action이 선택된 횟수
             
             # Training을 위한 난수 생성기의 seed 설정
             self.train_rng = np.random.default_rng(seed=args.seed)
@@ -236,7 +246,7 @@ class LSTMAgent:
             # Test map 저장
             self.test_maps: dict[int, list[str]] = {}
             if not args.not_use_maps_folder:
-                test_map_dir = os.path.join(args.map_save_dir, 'test')
+                test_map_dir = os.path.join(args.map_save_dir, args.test_map_folder_name)
                 
                 if os.path.exists(test_map_dir):
 
@@ -266,16 +276,13 @@ class LSTMAgent:
                 else:
                     print(f"There is no test maps folder: {test_map_dir}")
 
-            
         # Loading model
         self._load_model(args)
-        
-    
+         
     def _setup_logging(self):
         """
         Training process를 지켜 볼 tool 설정: tb, wandb, vessl
         """
-        
         import pytz
         import datetime
         
@@ -283,10 +290,9 @@ class LSTMAgent:
         kst = pytz.timezone('Asia/Seoul')
         current_time = datetime.datetime.now(kst).strftime("%y%m%d_%H%M")
         
-        # FIXME
         # Training 조건을 구별하기 위해 표시할 hyperparmeter 설정
         params_list_for_log = [
-            'batch_size', 'lr', 'optimizer', 'momentum', 'action_enc_dim', 'lstm_in_prj_dim', 'lstm_hid_dim'    
+            'batch_size', 'lr', 'min_lr', 'scheduler_max_step', 'optimizer', 'momentum', 'action_enc_dim', 'lstm_in_prj_dim', 'lstm_hid_dim', 'detach_period'    
         ]
         train_cfg_dict = asdict(self.train_cfg)
         params_config = {k: v for k, v in train_cfg_dict.items() if k in params_list_for_log}
@@ -318,8 +324,7 @@ class LSTMAgent:
                 # name=f"{current_time}_{args.model_name}_training"                  
             )
         # ---------------------------------------------------------
-        
-
+    
     def _load_model(self, args):
         """
         Train:     
@@ -441,7 +446,6 @@ class LSTMAgent:
             self.policy_net.load_state_dict(checkpoint['model_state_dict'])
             print(f"Test model loaded: {test_model}")
     
-
     def _save_model(self, mode='model', info=None):
         
         model_dir = self.args.model_dir # Model이 담긴 폴더명: .../models
@@ -537,8 +541,7 @@ class LSTMAgent:
             "glob_vec": glob_vecs,        # Shape: (B, glob_vec_dim)
             "action_mask": action_masks   # Shape: (B, action_num)
         }
-        
-    
+           
     def _validation(self, episode: int):
         
         self.policy_net.eval() # eval mode로 전환
@@ -1123,8 +1126,9 @@ class LSTMAgent:
         for level in self.test_maps.keys():
 
             level_records = [] # Level의 모든 결과를 저장하기 위한 list
-            for map_idx in range(map_num_per_level):
-                
+            for map_idx in range(min(map_num_per_level, len(self.test_maps[level]))):
+
+                # FIXME: map folder를 사용 안 할 경우도 추가
                 if not self.args.not_use_maps_folder:
                     map_path = self.test_maps[level][map_idx]
                     map_config = MapConfigSchema(file_path = map_path)
@@ -1229,9 +1233,9 @@ class LSTMAgent:
             time_m, time_s = np.mean(res['cleaning_time']), np.std(res['cleaning_time'])
             
             print(f" ▶ Map Condition: Level {level} (Total tests: {len(res['coverage'])})")
-            print(f"    - Coverage:     {cov_m*100:.2f}% ± {cov_s*100:.2f}%")
-            print(f"    - Overlap Rate: {ov_m:.2f}% ± {ov_s:.2f}%")
-            print(f"    - Cleaning Time: {time_m:.2f} min ± {time_s:.2f} min")
+            print(f"    - Coverage(%):     {cov_m*100:.2f} ± {cov_s*100:.2f}")
+            print(f"    - Overlap Rate(%): {ov_m:.2f} ± {ov_s:.2f}")
+            print(f"    - Cleaning Time(min): {time_m:.2f} ± {time_s:.2f}")
             print("-" * 50)
 
             # Level별 Best, median, worst 결과 시각화
@@ -1264,3 +1268,114 @@ class LSTMAgent:
             f"    Overlap rate mean: {total_overlap_percent_mean:.2f}%\n"
             f"    Average computation time per map: {np.mean(computation_time):.2f} s")
         print("="*60)
+
+    def see_weight(self):
+
+        import torch.nn as nn
+
+        model = self.policy_net
+        cmps_weight = model.cmps_net.weight.detach().cpu().numpy()
+
+        map_dim = model.map_feat_dim
+        vec_dim = model.vec_feat_dim
+        lstm_dim = model.lstm_hid_dim
+
+        # =========================================================================
+        # 1. cmps_net 가중치 지분율 시각화 (Total Weight Share - Sum 기준)
+        # =========================================================================
+        w_map = cmps_weight[:, :map_dim]
+        w_vec = cmps_weight[:, map_dim : map_dim + vec_dim]
+        w_lstm = cmps_weight[:, map_dim + vec_dim :]
+
+        # 각 파트별 가중치 절대값의 '총합' (진짜 지분율)
+        imp_map = np.abs(w_map).sum()
+        imp_vec = np.abs(w_vec).sum()
+        imp_lstm = np.abs(w_lstm).sum()
+
+        total = imp_map + imp_vec + imp_lstm
+        ratios = [(imp_map / total) * 100, (imp_vec / total) * 100, (imp_lstm / total) * 100]
+        labels = [f'Map Feat\n({map_dim}d)', f'Vector Feat\n({vec_dim}d)', f'LSTM State\n({lstm_dim}d)']
+
+        fig1, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5), gridspec_kw={'width_ratios': [2, 1]})
+
+        # [왼쪽] cmps_net Weight Matrix 전체 히트맵
+        im = ax1.imshow(cmps_weight, cmap='seismic', aspect='auto', vmin=-np.max(np.abs(cmps_weight)), vmax=np.max(np.abs(cmps_weight)))
+        ax1.set_title("cmps_net Weight Matrix Heatmap", fontsize=12, fontweight='bold')
+        ax1.set_xlabel("Input Feature Dimensions (Map | Vector | LSTM)")
+        ax1.set_ylabel("Output Dimension (action_enc_dim)")
+
+        # 그룹별 경계선(구분선) 그리기
+        ax1.axvline(x=map_dim - 0.5, color='black', linestyle='--', linewidth=1.5)
+        ax1.axvline(x=map_dim + vec_dim - 0.5, color='black', linestyle='--', linewidth=1.5)
+
+        cbar = fig1.colorbar(im, ax=ax1)
+        cbar.set_label('Weight Value')
+
+        # [오른쪽] 그룹별 총 지분율 Bar Chart
+        colors = ['#4C72B0', '#55A868', '#C44E52']
+        bars = ax2.bar(labels, ratios, color=colors, alpha=0.85, width=0.5)
+        ax2.set_title("Feature Group Importance Ratio (%)", fontsize=12, fontweight='bold')
+        ax2.set_ylabel("Total Weight Share Ratio (%)")
+        ax2.set_ylim(0, max(ratios) * 1.2)
+
+        for bar, pct in zip(bars, ratios):
+            yval = bar.get_height()
+            ax2.text(bar.get_x() + bar.get_width()/2.0, yval + 1.0, f'{pct:.1f}%', ha='center', va='bottom', fontweight='bold')
+
+        plt.tight_layout()
+        plt.show()
+
+        
+        # =========================================================================
+        # 2. 최초 입력 3개 Map/Channel별 가중치(Weight) 비중 분석
+        # =========================================================================
+        # map_enc의 첫 번째 Conv2d 레이어 찾기
+        first_conv = None
+        for layer in model.map_enc:
+            if isinstance(layer, nn.Conv2d):
+                first_conv = layer
+                break
+
+        # w_first Shape: (32, 3, 3, 3) -> (out_channels, in_channels, K_h, K_w)
+        w_first = first_conv.weight.detach().cpu().numpy()
+        in_channels = w_first.shape[1]  # 보통 3 (또는 3 * stack_steps)
+
+        # 입력 채널별 가중치 절대값 합(Sum) 및 평균(Mean) 계산
+        ch_sums = [np.abs(w_first[:, c, :, :]).sum() for c in range(in_channels)]
+        ch_means = [np.abs(w_first[:, c, :, :]).mean() for c in range(in_channels)]
+
+        total_ch_sum = sum(ch_sums)
+        ch_ratios = [(s / total_ch_sum) * 100 for s in ch_sums]
+
+        # 입력 채널 라벨 설정 (필요시 이름 수정)
+        ch_labels = [f'Input Ch {i+1}' for i in range(in_channels)]
+
+        print("=" * 60)
+        print("📊 [First Conv2d Layer - Input Channel Weight Analysis]")
+        print("=" * 60)
+        for i in range(in_channels):
+            print(f"  - {ch_labels[i]} : Total Share = {ch_ratios[i]:5.2f}% | Mean |W| = {ch_means[i]:.6f}")
+        print("=" * 60)
+
+        # 시각화 (입력 채널별 가중치 비율 Bar Chart)
+        fig3, (ax6, ax7) = plt.subplots(1, 2, figsize=(11, 4))
+        ch_colors = ['#4C72B0', '#55A868', '#C44E52']
+
+        # [좌] 입력 채널별 총 가중치 지분율 (%)
+        bars6 = ax6.bar(ch_labels, ch_ratios, color=ch_colors[:in_channels], alpha=0.85, width=0.4)
+        ax6.set_title("Input Map Channels Weight Share Ratio (%)", fontsize=11, fontweight='bold')
+        ax6.set_ylabel("Weight Share (%)")
+        ax6.set_ylim(0, max(ch_ratios) * 1.25)
+        for bar, pct in zip(bars6, ch_ratios):
+            ax6.text(bar.get_x() + bar.get_width()/2.0, bar.get_height() + 1.0, f'{pct:.1f}%', ha='center', va='bottom', fontweight='bold')
+
+        # [우] 입력 채널별 커널 파라미터 평균 크기
+        bars7 = ax7.bar(ch_labels, ch_means, color=ch_colors[:in_channels], alpha=0.85, width=0.4)
+        ax7.set_title("Input Map Channels Mean |Weight|", fontsize=11, fontweight='bold')
+        ax7.set_ylabel("Mean Magnitude")
+        ax7.set_ylim(0, max(ch_means) * 1.25)
+        for bar, val in zip(bars7, ch_means):
+            ax7.text(bar.get_x() + bar.get_width()/2.0, bar.get_height() + 0.0005, f'{val:.4f}', ha='center', va='bottom', fontweight='bold')
+
+        plt.tight_layout()
+        plt.show()

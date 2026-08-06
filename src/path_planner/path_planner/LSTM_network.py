@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.distributions import Categorical
 
 def get_next_layer_dim(input_dim: int, kernel_size: int, stride: int, padding: int) -> int:
     """2D convolution layer의 output dimension 계산"""
@@ -17,7 +16,7 @@ class LSTMPolicyNetwork(nn.Module):
             raise ValueError("PolicyNetwork를 초기화하려면 'ang_diff_diridx' 인자가 반드시 필요합니다")
         ang_diff_tensor = torch.tensor(ang_diff_diridx, dtype=torch.float32)
         raw_actions = torch.stack([torch.cos(ang_diff_tensor), torch.sin(ang_diff_tensor)], dim=1)
-        self.register_buffer('raw_actions', raw_actions) # FIXME: (cos, sin) 형태의 모든 action들을 저장. Shape: (action_num, action_dim)
+        self.register_buffer('raw_actions', raw_actions) # (cos, sin) 형태의 모든 action들을 저장. Shape: (action_num, action_dim)
         
         self.action_dim = raw_actions.size(1) # Input으로 받는 각 action의 dimension (Default: [cos theta, sin theta])
         self.action_num = raw_actions.size(0) # Action 선택지 수
@@ -72,10 +71,9 @@ class LSTMPolicyNetwork(nn.Module):
             nn.Linear(32, self.lstm_in_prj_dim)
         )
 
-        nn.LSTM
         self.lstm = nn.LSTMCell(input_size=self.lstm_in_prj_dim, hidden_size=self.lstm_hid_dim)
         
-        # 4. Compress network: Encoded action의 차원과 일치시키기 위해 feature를 compresse하는 network
+        # 4. Compress network: Encoded action의 차원과 일치시키기 위해 feature를 compress하는 network
         total_feat_dim = self.map_feat_dim + self.vec_feat_dim + self.lstm_hid_dim
         self.cmps_net = nn.Linear(total_feat_dim, self.action_enc_dim)
         # self.cmps_net = nn.Sequential(

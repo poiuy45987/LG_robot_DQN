@@ -12,6 +12,9 @@ TRACE_MAP_MAX = 50
 LOCAL_VIEW_DIM = 51
 
 MAP_SAVE_DIR = os.path.normpath('src/path_planner/path_planner/maps')
+MODEL_SAVE_DIR = os.path.normpath('src/path_planner/path_planner/models')
+TB_SAVE_DIR = os.path.normpath('src/path_planner/path_planner/models')
+
 TRAIN_MAP_FILE_FORMAT = "{mode}_map_level{level}_{map_id:04d}_{H}x{W}.npy"
 TRAIN_MAP_FILE_REGEX = r"(?P<mode>\w+)_map_level(?P<level>\d+)_(?P<map_id>\d+)_(?P<H>\d+)x(?P<W>\d+)"
 TEST_MAP_FILE_REGEX = r"(?P<mode>\w+)_map_L(?P<level>\d+)_(?P<map_id>\d+)"
@@ -29,9 +32,6 @@ class GridCell(IntEnum):
 class TrainConfig: # Training과 관련된 설정들
     
     # --- Training 설정 및 Warmup ---
-    buffer_size: int = 500000
-    warmup_ep_steps: int = 10000
-    warmup_tot_steps: int = 200000
     max_episodes: int = 30000
     batch_size: int = 64
     use_train_maps: bool = False
@@ -43,8 +43,7 @@ class TrainConfig: # Training과 관련된 설정들
     optimizer: str = 'sgd' # 'sgd' or 'adam'
     lr: float = 1e-4
     momentum: float = 0.9
-    target_update: int = 1000
-    policy_update: int = 20
+    min_lr: float = 1e-6
     detach_period: int = 20
     scheduler_max_step: int = 500
     
@@ -54,79 +53,20 @@ class TrainConfig: # Training과 관련된 설정들
     valid_map_num: int = 5
     valid_start_point_num: int = 3
     
-    # --- Exploration 관련 ---
-    use_epsilon: bool = False
-    epsilon_start: float = 1.0
-    epsilon_end: float = 0.1
-    epsilon_decay: int = 2000000
-    
-    use_softmax: bool = False
-    softmax_temp: float = 1.0
-    
-    use_noisy: bool = False
-    target_with_noisy: bool = False
-    
-    # --- Action masking ---
-    use_action_masking: bool = False
-    
-    # --- Heuristic action ---
-    use_heuristic: bool = False
-    
-    # --- State pre-processing 및 Q-value ---
-    do_normalize: bool = False
-    gamma: float = 0.99
-    
-    # --- Map 설정 ---
-    reset_only_start_pos: bool = False
-    
-    # --- DQN extension 선택 여부 ---
-    double_dqn: bool = False
-    
     def _validate_configs(self):
-        
-        # Training episode와 step 수, buffer 관련 설정
-        if self.buffer_size <= self.batch_size:
-            raise ValueError(f"buffer_size({self.buffer_size}) should be bigger than batch_size({self.batch_size}).")
-        if self.buffer_size <= self.warmup_tot_steps:
-            raise ValueError(f"buffer_size({self.buffer_size}) should be bigger than warmup_tot_steps({self.warmup_tot_steps}).")
+
+        if self.max_episodes < self.max_eps_per_map_size:
+            warnings.warn(f"It is recommended that max_episodes({self.max_episodes}) is bigger than max_eps_per_map_size({self.max_eps_per_map_size}).")
+        if self.path_reward_thres < 0.5:
+            warnings.warn(f"It is recommended that path_reward_thres({self.path_reward_thres}) is bigger than 0.5.")
+        if self.path_reward_thres > 1.0:
+            warnings.warn(f"It is recommended that path_reward_thres({self.path_reward_thres}) is smaller than 1.0.")
         
         # Optimizer 관련 설정
         if self.lr <= 0:
             raise ValueError(f"lr({self.lr}) is negative. It should be posivie value.")
-        if self.target_update <= self.policy_update:
-            warnings.warn(f"target_update({self.target_update}) is shorter than policy_update({self.policy_update})."
-                          f"This may lead to unstable training.")
-            
-        # Exploration 관련 설정
-        if self.use_epsilon: # epsilon 관련 설정 검토
-            if self.epsilon_start < self.epsilon_end:
-                raise ValueError(f"epsilon_start({self.epsilon_start}) should be bigger than epsilon_end({self.epsilon_end}).")
-            if self.epsilon_start > 1.0:
-                raise ValueError(f"epsilon_start({self.epsilon_start}) should not be bigger than 1.")
-            if self.epsilon_end >= 1.0:
-                raise ValueError(f"epsilon_end({self.epsilon_end}) should be smaller than 1.")
-        
-        if self.use_noisy: # Noisy linear layer를 사용하는 경우, epsilon 기법와 softmax 기법을 끄는 것이 권장됨.
-            if self.use_epsilon:
-                warnings.warn(f"If noisy linear layer is used, it is recommend not to use epsilon strategy.")
-            if self.use_softmax:
-                warnings.warn(f"If noisy linear layer is used, it is recommend not to use softmax strategy.")
-        else: # Noisy linear layer를 사용하지 않는 경우, target_with_noisy를 꺼야함.
-            if self.target_with_noisy:
-                raise ValueError(f"Noisy linear layer is not used.(use_noisy=False)"
-                                 f"target_with_noisy should be False.")
-            
-        # gamma 설정
-        if self.gamma >= 1.0:
-            raise ValueError(f"gamma({self.gamma}) should be smaller than 1.")
-        
-        # 하나의 map에 대해서 훈련할 경우 설정 검토
-        if self.reset_only_start_pos and self.valid_map_num > 1:
-            warnings.warn(
-                f"Training is configured for a single map (reset_only_start_pos=True), "
-                f"but validation is set to {self.valid_map_num} maps. "
-                f"Consider setting valid_map_num to 1 for consistency."
-            )
+        if self.min_lr > self.lr:
+            raise ValueError(f"Initial lr({self.lr}) is smaller than min_lr({self.min_lr}).")
         
     def __post_init__(self):
         
