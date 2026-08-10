@@ -5,14 +5,13 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence, Callable
     from gymnasium import Env
 
+import shutil
 import re
 import torch
 import torch.nn.functional as F
 import torch.optim as optim
-from torch.utils.tensorboard import SummaryWriter
 from torch.optim.lr_scheduler import CosineAnnealingLR
 import wandb
-import vessl
 import numpy as np
 import matplotlib.pyplot as plt
 import cv2
@@ -21,12 +20,14 @@ import os
 from dataclasses import asdict
 from itertools import cycle
 from gymnasium.vector import SyncVectorEnv
+from tqdm import tqdm
 
 import glob
 from IPython.display import display
 
 # 앞서 정의한 클래스들을 임포트한다고 가정 (또는 같은 파일에 위치)
 from path_planner.config import EnvConfig, TrainConfig, LOCAL_VIEW_DIM, TRAIN_MAP_FILE_REGEX, TEST_MAP_FILE_REGEX
+from path_planner.map_generator import generate_multiple_maps
 from path_planner.map_layer import MapConfigSchema
 from path_planner.environment import CoverageEnv, ACTION_NUM
 from path_planner.LSTM_network import LSTMPolicyNetwork
@@ -130,6 +131,50 @@ class LSTMAgent:
             self.test_map_rng = np.random.default_rng(seed=args.seed+200000)
             self.test_env = CoverageEnv(cfg=self.env_cfg, env_rng=self.test_env_rng, map_rng=self.test_map_rng)
 
+
+        # Train map 및 validation map 생성
+        if args.mode == 'train':
+            self.train_map_sizes = ["40x40", "80x80", "Cropped"]
+            if args.use_train_maps: # Train maps 생성
+                self._check_and_generate_train_valid_maps(mode="train")
+            self._check_and_generate_train_valid_maps(mode="valid") # Validation maps 생성
+
+        # Test maps이 존재하는지 검토 후 저장
+        elif args.mode == 'test':
+
+            self.test_maps: dict[int, list[str]] = {}
+
+            print(f"Checking if test maps are exist...")
+
+            # Test map directory 검사
+            test_maps_dir = os.path.join(args.map_save_dir, args.test_map_folder_name)
+            if not os.path.isdir(test_maps_dir):
+                raise FileNotFoundError(f"Test map directory '{test_maps_dir}' was not found. Please make sure the test maps are prepared before evaluation.")
+
+            # Test map files 검사
+            test_map_npy_files_name = sorted([
+                f for f in os.listdir(test_maps_dir) 
+                if f.endswith('.npy') and os.path.isfile(os.path.join(test_maps_dir, f))
+            ])
+            if len(test_map_npy_files_name) > 0:
+                print(f"  There are {len(test_map_npy_files_name)} map files for testing.")
+            else:
+                raise FileNotFoundError(f"There is no test map is folder: {test_maps_dir}")
+                
+            for file_name in test_map_npy_files_name:
+                full_path = os.path.join(test_maps_dir, file_name)
+                match = re.search(TEST_MAP_FILE_REGEX, file_name)
+                gd = match.groupdict()
+                level = gd['level']
+                if level not in self.test_maps.keys():
+                    self.test_maps[level] = []
+                self.test_maps[level].append(full_path)
+        
+            # Map 순서 정렬
+            for key in self.test_maps.keys():
+                self.test_maps[key].sort()
+
+
         # Policy network 조성
         ang_diff_diridx = self.test_env.ang_diff_diridx
         if ang_diff_diridx is None:
@@ -147,6 +192,7 @@ class LSTMAgent:
             'ang_diff_diridx': ang_diff_diridx,
         }
         self.policy_net = LSTMPolicyNetwork(**network_config).to(self.device)
+
         
         # Train과 관련된 instance 변수는 mode가 train일 때만 생성
         if args.mode == 'train':
@@ -169,44 +215,21 @@ class LSTMAgent:
 
             self.train_envs = CustomGymVecEnv(env_fns, autoreset_mode="Disabled")
 
-            self.train_map_sizes = None # 이미 저장된 train map을 사용할 때와 train map을 그때그때 생성할 때 모두 사용하는 변수
             if args.use_train_maps:
                 # Training에 필요한 map 얻기
-                self.train_maps = {} # Key: Map size, Value: {Key=level: Value=[map file list]}
-                self.train_map_sizes = ['40x40', '80x80', 'Cropped']
+                self.train_maps = self._get_map_dict(mode="train") # Key: Map size, Value: {Key=level: Value=[map file list]}
                 
-                train_map_dir = os.path.join(self.map_save_dir, 'train')
                 
-                # 각 map의 path를 level, map size별로 나누어서 저장
-                for folder in self.train_map_sizes:
-                    folder_path = os.path.join(train_map_dir, folder)
-                    self.train_maps[folder] = {}
-                    if os.path.exists(folder_path):
-                        # Image 폴더는 제외하고 .npy 파일들만 정확하게 수집
-                        npy_file_names = sorted([
-                            f for f in os.listdir(folder_path) 
-                            if f.endswith('.npy') and os.path.isfile(os.path.join(folder_path, f))
-                        ])
-                        
-                        for file_name in npy_file_names:
-                            full_path = os.path.join(folder_path, file_name)
-                            match = re.search(TRAIN_MAP_FILE_REGEX, file_name)
-                            gd = match.groupdict()
-                            level = int(gd['level'])
-                            if level not in self.train_maps[folder]:
-                                self.train_maps[folder][level] = []
-                            self.train_maps[folder][level].append(full_path)
-                        
-                        for level in self.train_maps[folder].keys():
-                            self.train_maps[folder][level].sort()
-                            self.train_maps[folder][level] = cycle(self.train_maps[folder][level])
-            else:
-                self.train_map_sizes = []
-                window_size = self.env_cfg.map_cfg.window_size
-                for mult in range(1, 5):
-                    map_size = (window_size*mult, window_size*mult)
-                    self.train_map_sizes.append(map_size)
-                self.train_map_sizes.append('None')
+            # else:
+            #     self.train_map_sizes = []
+            #     window_size = self.env_cfg.map_cfg.window_size
+            #     for mult in range(1, 5):
+            #         map_size = (window_size*mult, window_size*mult)
+            #         self.train_map_sizes.append(map_size)
+            #     self.train_map_sizes.append('None')
+
+            # Validation에 필요한 map 얻기
+            self.valid_maps = self._get_map_dict(mode="valid") # Key: Map size, Value: {Key=level: Value=[map file list]}
                 
             self.train_maps_sizes_iterator = iter(self.train_map_sizes) # 다음에 훈련시킬 map size를 결정하기 위한 iterator
             self.train_maps_sizes_idx = 0 # Map size iterator 현황을 저장하기 위한 변수
@@ -228,7 +251,7 @@ class LSTMAgent:
             # Training을 위한 난수 생성기의 seed 설정
             self.train_rng = np.random.default_rng(seed=args.seed)
             
-            # Training process를 볼 logger 설정: tb, wandb, vessl
+            # Training process를 볼 logger 설정: wandb
             self._setup_logging()
             
             # Optimizer 설정
@@ -241,47 +264,116 @@ class LSTMAgent:
 
             self.scheduler = CosineAnnealingLR(self.optimizer, T_max=self.train_cfg.scheduler_max_step, eta_min=1e-6)
 
-        elif args.mode == 'test':
-
-            # Test map 저장
-            self.test_maps: dict[int, list[str]] = {}
-            if not args.not_use_maps_folder:
-                test_map_dir = os.path.join(args.map_save_dir, args.test_map_folder_name)
-                
-                if os.path.exists(test_map_dir):
-
-                    npy_file_names = sorted([
-                        f for f in os.listdir(test_map_dir) 
-                        if f.endswith('.npy') and os.path.isfile(os.path.join(test_map_dir, f))
-                    ])
-
-                    if len(npy_file_names) > 0:
-                        print(f"There are {len(npy_file_names)} map files for testing.")
-                    else:
-                        print(f"There is no test map is folder: {test_map_dir}")
-                        
-                    for file_name in npy_file_names:
-                        full_path = os.path.join(test_map_dir, file_name)
-                        match = re.search(TEST_MAP_FILE_REGEX, file_name)
-                        gd = match.groupdict()
-                        level = gd['level']
-                        if level not in self.test_maps.keys():
-                            self.test_maps[level] = []
-                        self.test_maps[level].append(full_path)
-                
-                    # Map 순서 정렬
-                    for key in self.test_maps.keys():
-                        self.test_maps[key].sort()
-
-                else:
-                    print(f"There is no test maps folder: {test_map_dir}")
 
         # Loading model
         self._load_model(args)
          
+    def _check_and_generate_train_valid_maps(self, mode: str="train"):
+
+        if mode == "train":
+            mode_str = "training"
+        elif mode == "valid":
+            mode_str = "validation"
+        else:
+            raise ValueError(f"Invalid mode {mode} at _check_and_generate_train_valid_maps method: mode must be \"train\" or \"valid\"")
+        print(f"Checking pre-generated maps for {mode_str}...")
+                    
+        maps_folder = os.path.join(self.args.map_save_dir, mode)
+        make_maps = False
+        
+        # 1. Map을 저장하는 폴더가 있는지 검사
+        if not os.path.isdir(maps_folder):
+            print(f"  Folder '{maps_folder}' does not exist.")
+            make_maps = True
+        else:
+            # 2. 각 사이즈별 map이 모두 존재하는지 검사
+            for map_size_str in self.train_map_sizes:
+                sub_folder_path = os.path.join(maps_folder, map_size_str)
+                if not os.path.isdir(sub_folder_path):
+                    print(f"  Map size folder '{sub_folder_path}' does not exist.")
+                    make_maps = True
+                    break
+                
+                npy_files = glob.glob(os.path.join(sub_folder_path, "**", "*.npy"), recursive=True)
+                map_count = len(npy_files)
+                if map_count == 0:
+                    print(f"  There is no map with map size {map_size_str}.")
+                    make_maps = True
+                    break
+                else:
+                    print(f"  There are {map_count} maps with map size {map_size_str}")
+
+        # 3. 각 map size 폴더에 map이 하나라도 없을 경우, map 전체를 재생성
+        if make_maps:
+            print(f"Regenerating {mode_str} maps...")
+
+            if os.path.exists(maps_folder):
+                shutil.rmtree(maps_folder)
+
+            for map_size_str in self.train_map_sizes:
+                map_folder_name = os.path.join(maps_folder, map_size_str)
+                os.makedirs(map_folder_name, exist_ok=True)
+
+                if map_size_str == "Cropped":
+                    map_size = None
+                else:
+                    H, W = map(int, map_size_str.split('x'))
+                    map_size = (H, W)
+
+                if mode == "train":
+                    map_num = 1000 if map_size_str == "Cropped" else 200
+                else:
+                    map_num = self.args.valid_map_num
+                generate_multiple_maps(
+                    map_folder_name=map_folder_name,
+                    robot_diameter=self.env_cfg.robot_size, 
+                    mode=mode, 
+                    seed=self.seed,
+                    map_num_per_cond=map_num, 
+                    visualize=True, 
+                    map_size=map_size
+                )
+                print(f"  Generate {map_num} maps with map size {map_size_str}")
+        else:
+            print(f"Using pre-generated maps for {mode_str}.\n")
+
+
+    def _get_map_dict(self, mode: str="train"):
+
+        map_dict = {}
+        map_dir = os.path.join(self.map_save_dir, mode)
+                        
+        # 각 map의 path를 level, map size별로 나누어서 저장
+        for folder in self.train_map_sizes:
+            folder_path = os.path.join(map_dir, folder)
+            map_dict[folder] = {}
+            if os.path.exists(folder_path):
+                # Image 폴더는 제외하고 .npy 파일들만 정확하게 수집
+                npy_file_names = sorted([
+                    f for f in os.listdir(folder_path) 
+                    if f.endswith('.npy') and os.path.isfile(os.path.join(folder_path, f))
+                ])
+                
+                for file_name in npy_file_names:
+                    full_path = os.path.join(folder_path, file_name)
+                    match = re.search(TRAIN_MAP_FILE_REGEX, file_name)
+                    gd = match.groupdict()
+                    level = int(gd['level'])
+                    if level not in map_dict[folder]:
+                        map_dict[folder][level] = []
+                    map_dict[folder][level].append(full_path)
+                
+                for level in map_dict[folder].keys():
+                    map_dict[folder][level].sort()
+                    if mode == "train":
+                        map_dict[folder][level] = cycle(map_dict[folder][level])
+
+        return map_dict
+
+
     def _setup_logging(self):
         """
-        Training process를 지켜 볼 tool 설정: tb, wandb, vessl
+        Training process를 지켜 볼 tool 설정: wandb
         """
         import pytz
         import datetime
@@ -296,14 +388,6 @@ class LSTMAgent:
         ]
         train_cfg_dict = asdict(self.train_cfg)
         params_config = {k: v for k, v in train_cfg_dict.items() if k in params_list_for_log}
-        
-        # TensorBoard 설정
-        self.tb_writer = None
-        if self.args.use_tb:
-            tb_save_dir = os.path.join(self.args.tb_save_dir, current_time)
-            if not os.path.exists(tb_save_dir):
-                os.makedirs(tb_save_dir)
-            self.tb_writer = SummaryWriter(tb_save_dir)
             
         # wandb 설정
         self.wandb_run = None
@@ -314,16 +398,6 @@ class LSTMAgent:
                 config=params_config,
                 name=f"{current_time}_{self.args.model_name}_training"
             )
-            
-        # vessl 설정
-        if self.args.use_vessl:
-            vessl.init(
-                organization="snu-eng-gtx1080", 
-                project="lg-robot-ReDQN", 
-                hp=params_config,
-                # name=f"{current_time}_{args.model_name}_training"                  
-            )
-        # ---------------------------------------------------------
     
     def _load_model(self, args):
         """
@@ -418,7 +492,7 @@ class LSTMAgent:
                 
                 # map_size_iterator원래 형태로
                 if self.train_maps_sizes_idx > 0:
-                    for _ in range(self.train_maps_sizes_idx-1):
+                    for _ in range(self.train_maps_sizes_idx):
                         try:
                             next(self.train_maps_sizes_iterator)
                         except StopIteration: # 마지막 map size인 경우, 이전에 설정한 map size를 그대로 사용
@@ -542,7 +616,7 @@ class LSTMAgent:
             "action_mask": action_masks   # Shape: (B, action_num)
         }
            
-    def _validation(self, episode: int):
+    def _validation(self, episode: int, curr_map_size: str):
         
         self.policy_net.eval() # eval mode로 전환
         coverage = []; overlap_percent = []; cleaning_time = []
@@ -552,45 +626,43 @@ class LSTMAgent:
         coverage_mean = 0.0; overlap_percent_mean = 0.0; cleaning_time_mean = 0.0
         best_traj_img = None # 가장 성능이 좋았던 map에서의 trajectory를 보여줌
         
-        # 현재 훈련 중인 map size를 얻음. FIXME
-        map_size = "Cropped"
-        if self.args.use_train_maps:
-            if map_size == "Cropped":
-                H = None; W = None
-            else:
-                H, W = map(int, map_size.split('x'))
-        else:
-            if map_size is None:
-                H = None; W = None
-            else:
-                H, W = map_size
+        # # 현재 훈련 중인 map size를 얻음. FIXME
+        # map_size = "Cropped"
+        # if self.args.use_train_maps:
+        #     if map_size == "Cropped":
+        #         H = None; W = None
+        #     else:
+        #         H, W = map(int, map_size.split('x'))
+        # else:
+        #     if map_size is None:
+        #         H = None; W = None
+        #     else:
+        #         H, W = map_size
 
-        map_size_str = f"{H}x{W}" if H is not None else "random"
-        print(f"Validation on {map_size_str} map size")
-        
+        # map_size_str = f"{H}x{W}" if H is not None else "random"
+        print(f"Validation on {curr_map_size} map size")
+        # Key: Map size, Value: {Key=level: Value=[map file list]}
         # Model의 성능 평가
         for level in range(1, 5):
 
-            map_config = MapConfigSchema(level=level, H=H, W=W)
-            
-            for _ in range(self.train_cfg.valid_map_num):
+            for i in range(self.train_cfg.valid_map_num):
+
+                map_path = self.valid_maps[curr_map_size][level][i]
+                map_config = MapConfigSchema(file_path=map_path)
                 
                 # Validation 환경을 초기화
-                if self.train_cfg.reset_only_start_pos:
-                    obs, _ = self.test_env.reset(mode='test')
+                reset_info = self.test_env.reset(mode='test', map_config=map_config)
+                if reset_info:
+                    obs, _ = reset_info
                 else:
-                    reset_info = self.test_env.reset(mode='test', map_config=map_config)
-                    if reset_info:
-                        obs, _ = reset_info
-                    else:
-                        break # 다음 map_config를 이용
+                    break # 다음 map_config를 이용
                     
                 for start_num in range(self.train_cfg.valid_start_point_num):
                     
                     # start_num == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
                     if start_num != 0:
                         obs, _ = self.test_env.reset(mode='test') # 시작 지점 초기화
-                    cur_coverage, cur_overlap_percent, cur_cleaning_time = self._test_one_map(self.test_env, obs, debug=False) # Coverage 성능을 평가
+                    cur_coverage, cur_overlap_percent, cur_cleaning_time, _ = self._test_one_map(self.test_env, obs, debug=False) # Coverage 성능을 평가
 
                     ##### Reward 계산 #####
                     total_steps = self.test_env.steps
@@ -672,20 +744,13 @@ class LSTMAgent:
                 self.best_traj_img = best_traj_img
             self._save_model(mode='model') # 성능이 가장 좋았던 model을 저장
         
-        # Validation 결과를 tensorboard와 wandb에 기록
-        if self.tb_writer:
-            self.tb_writer.add_scalar('Validation/Coverage_mean', coverage_mean, episode)
+        # Validation 결과를 wandb에 기록
         if self.wandb_run:
             self.wandb_run.log({'Validation/Coverage_mean': coverage_mean,
                                 'Validation/Overlap Rate Mean': overlap_percent_mean,
                                 'Validation/Cleaning Time Mean': cleaning_time_mean,
                                 'Validation/Path Reward Mean': path_reward_mean,
                                 'Validation/Best_path': wandb.Image(best_traj_img)}, step=self.total_steps)
-        if self.args.use_vessl:
-            vessl.log(step=episode, payload={'Validation/Coverage_mean': coverage_mean,
-                                             'Validation/Overlap Rate Mean': overlap_percent_mean,
-                                             'Validation/Cleaning Time Mean': cleaning_time_mean,
-                                             'Validation/Best_path': vessl.Image(best_traj_img)})
         
         # Validation 결과 출력
         print(f"[Validation] Episode {episode}: \n"
@@ -698,7 +763,14 @@ class LSTMAgent:
 
         return path_reward_mean
     
-    def _test_one_map(self, env: CoverageEnv, obs: dict, debug: bool = False) -> tuple[float, float, float]:
+    def _test_one_map(self, env: CoverageEnv, obs: dict, 
+                      target_cov_list: list[float] = [0.85, 0.90, 0.95],
+                      debug: bool = False) -> tuple[float, float, float, dict[float, tuple[float, float]]]:
+
+        # 1. Target coverage를 달성할 때마다 청소 시간을 저장. 달성하지 못한 경우는 -1로 저장하여 구별.
+        sorted_target_cov = sorted(target_cov_list)
+        target_cov_time_dict = {cov: (-1.0, -1.0) for cov in target_cov_list}
+        target_idx = 0
         
         # 2. Path 생성: LSTM network에 통과시켜서 각 action의 확률값을 얻고 map 상의 전체 경로 생성
         done = False
@@ -712,7 +784,7 @@ class LSTMAgent:
         # LSTM의 hidden state와 cell state, processed_obs를 복원하기 위한 list
         state_history = []
         
-        # [1] 디버그 모드일 때 사용할 도화지(fig)를 미리 딱 한 번만 만듦
+        # 디버그 모드일 때 사용할 도화지(fig)를 미리 딱 한 번만 만듦
         if debug:
             fig, axes = plt.subplots(2, 1, figsize=(15, 20))
             # 초기 이미지
@@ -734,6 +806,12 @@ class LSTMAgent:
             # Jupyter용 디스플레이 핸들을 생성 (이걸 통해 이미지만 쏙 바꿉니다)
             display_handle = display(fig, display_id=True)
             plt.close(fig) # 별도의 정적 출력이 생기지 않도록 닫기
+
+        # 초기 상태(0 step)에서의 coverage 달성 여부 확인
+        current_cov = env.coverage
+        while target_idx < len(sorted_target_cov) and current_cov >= sorted_target_cov[target_idx]:
+            target_cov_time_dict[sorted_target_cov[target_idx]] = (env.overlap_percent, env.cleaning_time)
+            target_idx += 1
         
         # LSTM network에 통과시키면서 action을 얻으면서 경로 생성. Action 확률을 저장.
         while not done:
@@ -744,7 +822,12 @@ class LSTMAgent:
             glob_vec_data = processed_obs["glob_vec"]
             action_mask = processed_obs["action_mask"]
 
-            state_history.append({'h_t': h_t.clone(), 'c_t': c_t.clone()})
+            state_history.append({
+                'h_t': h_t.clone(), 
+                'c_t': c_t.clone(),
+                'target_idx': target_idx,
+                'target_cov_time_dict': target_cov_time_dict.copy()
+            })
 
             with torch.no_grad():
                 action_probs, h_t, c_t = self.policy_net(loc_map_data, loc_vec_data, glob_vec_data, h_t, c_t)
@@ -754,17 +837,9 @@ class LSTMAgent:
                 masked_probs = masked_probs / (masked_probs.sum(dim=-1, keepdim=True) + 1e-8)
             
             action = torch.argmax(masked_probs).item()
-            
-            # Action 수행: 다음 obs 얻기
-            next_obs, reward, terminated, truncated, info = env.step(action)
-            processed_obs = self._pre_process_obs(next_obs, local_view_dim=LOCAL_VIEW_DIM)
-            
-            # 각 환경별 종료 여부 판단
-            done = terminated or truncated
-            
+
             if debug:
-                
-                if debug_skip_count > 0:
+                if not done and debug_skip_count > 0:
                     debug_skip_count -= 1
                 else:
                     
@@ -772,52 +847,73 @@ class LSTMAgent:
                     prob_np = masked_probs.squeeze().cpu().numpy()
                     probs_str = ", ".join([f"{prob:.3f}" for prob in prob_np])
                     action_info = (f"[Selected action]: {action}\n"
-                                   f"[Action probs] [{probs_str}]")
+                                    f"[Action probs] [{probs_str}]")
                     
                     # Map 시각화
                     traj_img = env.get_visualized_img(img_choice='traj')
                     obs_img = env.get_visualized_img(img_choice='obs')
-                    # pro_obs_img = env.get_visualized_img(img_choice='obs', preprocessor=self._pre_process_obs)
                     
                     im_traj.set_data(traj_img)
                     im_obs.set_data(obs_img)
-                    # im_pro_obs.set_data(pro_obs_img)
                     text_traj.set_text(action_info)
                     
-                    # [4] 화면 갱신 (도화지 위치는 그대로, 내용물만 부드럽게 변경)
+                    # 화면 갱신 (도화지 위치는 그대로, 내용물만 부드럽게 변경)
                     display_handle.update(fig)
-                    
-                    user_val = input("Next step: [Enter] | Auto: [Number: If want to backstep, input negative number] | Exit: [q] >> ")
-                    user_val = user_val.strip()
-                    
-                    if user_val.lower() == 'q':
-                        break
-                    
-                    try:
-                        val = int(user_val)
-                        if val < 0:
-                            backstep_num = abs(val)
-                            last_obs = env.backstep(backstep_num)
-                            processed_obs = self._pre_process_obs(last_obs)
 
-                            pop_count = min(backstep_num, len(state_history))
-                            for _ in range(pop_count):
-                                target_state = state_history.pop()
-                            h_t = target_state['h_t']
-                            c_t = target_state['c_t']
-                            continue
-                        elif val > 0:
-                            debug_skip_count = int(user_val) - 1
-                        else:
-                            continue
-                    except ValueError:
-                        print("숫자 또는 'q'를 입력해주세요.")
+                    if not done: # Episode가 끝났으면 별도 입력 없이 바로 다음 map test 시작
+                        user_val = input("Next step: [Enter] | Auto: [Number: If want to backstep, input negative number] | Exit: [q] >> ")
+                        user_val = user_val.strip()
+
+                        if user_val.lower() == 'q':
+                            break
+                        
+                        try:
+                            val = int(user_val)
+                            if val < 0: # Back step 수행
+                                backstep_num = abs(val)
+                                last_obs = env.backstep(backstep_num)
+                                processed_obs = self._pre_process_obs(last_obs)
+
+                                pop_count = min(backstep_num, len(state_history))
+                                for _ in range(pop_count):
+                                    target_state = state_history.pop()
+                                h_t = target_state['h_t']
+                                c_t = target_state['c_t']
+                                continue
+                            elif val > 0: # Forward step 수행
+                                debug_skip_count = int(user_val) - 1
+                            else:
+                                continue
+                        except ValueError:
+                            print("숫자 또는 'q'를 입력해주세요.")
+            
+            # Action 수행: 다음 obs 얻기
+            next_obs, reward, terminated, truncated, info = env.step(action)
+            processed_obs = self._pre_process_obs(next_obs, local_view_dim=LOCAL_VIEW_DIM)
+
+            # Target Coverage 달성 여부 체크
+            current_cov = env.coverage
+            while target_idx < len(sorted_target_cov) and current_cov >= sorted_target_cov[target_idx]:
+                target_cov_time_dict[sorted_target_cov[target_idx]] = (env.overlap_percent, env.cleaning_time)
+                target_idx += 1
+            
+            # 각 환경별 종료 여부 판단
+            done = terminated or truncated
+
+        if debug:
+            # Episode가 끝났을 때 map 시각화
+            traj_img = env.get_visualized_img(img_choice='traj')
+            obs_img = env.get_visualized_img(img_choice='obs')
+            im_traj.set_data(traj_img)
+            im_obs.set_data(obs_img)
+            text_traj.set_text(action_info)
+            display_handle.update(fig)
         
         coverage = env.coverage
         overlap_percent = env.overlap_percent
         cleaning_time = env.cleaning_time
         
-        return coverage, overlap_percent, cleaning_time
+        return coverage, overlap_percent, cleaning_time, target_cov_time_dict
     
     def train(self):
         
@@ -854,8 +950,8 @@ class LSTMAgent:
                         map_config = MapConfigSchema(file_path=map_file_path)
                     else:
                         H = None; W = None
-                        if curr_map_size != 'None':
-                            H, W = curr_map_size
+                        if curr_map_size != "Cropped":
+                            H, W = map(int, curr_map_size.split('x'))
                         map_config = MapConfigSchema(level=level, H=H, W=W)
                     reset_info = self.train_envs.call_at(method_name="reset", env_id=env_id, seed=None, map_config=map_config)
                 obs, info = reset_info
@@ -891,7 +987,7 @@ class LSTMAgent:
                 h_t = torch.zeros(batch_size, self.policy_net.lstm_hid_dim, device=self.device)
                 c_t = torch.zeros(batch_size, self.policy_net.lstm_hid_dim, device=self.device)
                 
-                # log probability 저장ㅌ
+                # log probability 저장
                 saved_log_probs = []
                 prob_masks = [] # 종료된 environment에서 계산된 log probability가 gradient update을 하지 않도록 하기 위한 mask
                 saved_entropies = []
@@ -1076,7 +1172,7 @@ class LSTMAgent:
             # Validation 수행
             if episode % self.train_cfg.valid_freq == 0:
                 print("Validation...")
-                valid_path_reward_mean = self._validation(episode)
+                valid_path_reward_mean = self._validation(episode, curr_map_size)
                 if valid_path_reward_mean >= self.train_cfg.path_reward_thres:
                     change_map_size = True
                     print(f"[Map Scale Up] Achieved path reward {path_reward_mean:.3f} at map size {curr_map_size} on validation. "
@@ -1098,25 +1194,46 @@ class LSTMAgent:
             # Map 기록 저장
             if episode % 5 == 0:
                 map_img = self.train_envs.call_at(method_name="get_visualized_img", env_id=0, img_choice="traj")
-                if self.tb_writer:
-                    self.tb_writer.add_image("Visualization/Robot_path", map_img, episode, dataformats="HWC")
                 if self.wandb_run:
                     self.wandb_run.log({"Visualization/Robot_path": wandb.Image(map_img)}, step=self.total_steps)
-                if self.args.use_vessl:
-                    vessl.log(step=episode, payload={"Visualization/Robot_path": vessl.Image(map_img)})
 
             self.scheduler.step()
 
-    def test(self):
+    def test(self, target_cov_list: list[float] = [0.85, 0.90, 0.95]):
 
         self.policy_net.eval() # eval mode로 전환
         total_coverage = []; total_overlap_percent = []; total_cleaning_time = []
         computation_time = []
-        
-        condition_results: dict[int, dict[str, list[float]]] = {} # Map condition 별로 test 결과를 저장하기 위한 dictionary
+
+        sorted_target_cov = sorted(target_cov_list)
+
+        # Level별로 coverage 결과를 저장하기 위한 dictionary
+        # coverage_results_per_level = {
+        #     level: [coverage_list],
+        #     ...  
+        # }
+        coverage_results_per_level: dict[int, list[float]] = {}
+
+        # Target coverage에 따른 결과를 저장하기 위한 dictionary
+        # target_cov_results = {
+        #     target_cov: {
+        #         level: {
+        #             'total_count': total_count,
+        #             'success_count': success_count,
+        #             'overlaps': [overlap_list],
+        #             'cleaning_times': [cleaning_time_list]
+        #         }
+        #         ...
+        #     }
+        #     ...
+        # }
+        target_cov_results: dict[float, dict[int, dict[str, int | list[float]]]] = {
+            cov: {} for cov in sorted_target_cov
+        }
         
         # Level별 Best/Worst 경로 기록용 딕셔너리
         visualized_maps: dict[int, dict[str, list[tuple[tuple[float, float, float], np.ndarray, str]]]] = {}
+
 
         map_num_per_level = self.args.test_map_num_per_level
 
@@ -1125,126 +1242,201 @@ class LSTMAgent:
         # 각 map에 대해서 test
         for level in self.test_maps.keys():
 
-            level_records = [] # Level의 모든 결과를 저장하기 위한 list
-            for map_idx in range(min(map_num_per_level, len(self.test_maps[level]))):
+            level_records = []  # Level의 모든 결과를 저장하기 위한 list
+            
+            # Dictionary 구조 초기화
+            if level not in coverage_results_per_level:
+                coverage_results_per_level[level] = []
+                
+            for cov in sorted_target_cov:
+                if level not in target_cov_results[cov]:
+                    target_cov_results[cov][level] = {
+                        'total_count': 0,
+                        'success_count': 0,
+                        'overlaps': [],
+                        'cleaning_times': []
+                    }
 
-                # FIXME: map folder를 사용 안 할 경우도 추가
-                if not self.args.not_use_maps_folder:
-                    map_path = self.test_maps[level][map_idx]
-                    map_config = MapConfigSchema(file_path = map_path)
+            map_indices = range(min(map_num_per_level, len(self.test_maps[level])))
+            for map_idx in tqdm(map_indices, desc=f"Level {level} Maps"):
+
+                map_path = self.test_maps[level][map_idx]
+                map_config = MapConfigSchema(file_path=map_path)
+                map_name = os.path.basename(map_path)
 
                 reset_info = self.test_env.reset(seed=None, mode='test', map_config=map_config)
                 if not reset_info:
                     print(f"Can't reset map file: {os.path.basename(self.test_maps[level][map_idx])}")
                     continue
                 obs, _ = reset_info
-
-                # 각 map별 result와 각 level에서 좋은 경로와 나쁜 경로를 저장할 dictionary 초기화
-                if level not in condition_results:
-                    condition_results[level] = {
-                        'coverage': [],
-                        'overlap_percent': [],
-                        'cleaning_time': []
-                    }
                 
                 # 여러 starting point에서 model 성능을 test
                 for start_idx in range(self.args.test_start_point_num):
                 
-                    # start_idx == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
                     if start_idx != 0:
-                        obs, _ = self.test_env.reset(mode='test') # 시작 지점 초기화
-                    start_time = time.time()
-                    cur_coverage, cur_overlap_percent, cur_cleaning_time = self._test_one_map(self.test_env, obs, debug=self.args.debug) # Coverage 성능을 평가
-                    end_time = time.time()
-                    computation_time.append(end_time-start_time)
+                        obs, _ = self.test_env.reset(mode='test')  # 시작 지점 초기화
                     
-                    # Reachable grid의 수가 전체 grid 수의 절반을 넘는 경우에만 저장
+                    start_time = time.time()
+                    cur_coverage, cur_overlap_percent, cur_cleaning_time, target_cov_time_dict = self._test_one_map(
+                        self.test_env, obs, target_cov_list=sorted_target_cov, debug=self.args.debug
+                    ) 
+                    end_time = time.time()
+                    comp_t = end_time - start_time
+                    computation_time.append(comp_t)
+                    
+                    # Reachable grid의 수가 전체 grid 수의 절반을 넘는 경우에만 결과 저장
                     if self.test_env.map_layers.coverable.sum() >= self.test_env.H * self.test_env.W * 0.5:
-                        condition_results[level]['coverage'].append(cur_coverage)
-                        condition_results[level]['overlap_percent'].append(cur_overlap_percent)
-                        condition_results[level]['cleaning_time'].append(cur_cleaning_time)
                         
-                        total_coverage.append(cur_coverage)
-                        total_overlap_percent.append(cur_overlap_percent)
-                        total_cleaning_time.append(cur_cleaning_time)
+                        # 1) Level별 Final Coverage 저장
+                        coverage_results_per_level[level].append(cur_coverage)
                         
+                        # 2) Target Coverage별 지표 저장
+                        for cov in sorted_target_cov:
+                            t_overlap, t_time = target_cov_time_dict.get(cov, (-1.0, -1.0))
+                            
+                            target_lvl_data = target_cov_results[cov][level]
+                            target_lvl_data['total_count'] += 1
+                            
+                            # 성공한 경우 (-1이 아닌 경우)
+                            if t_time != -1.0 and t_time > 0:
+                                target_lvl_data['success_count'] += 1
+                                target_lvl_data['overlaps'].append(t_overlap)
+                                target_lvl_data['cleaning_times'].append(t_time)
+                        
+                        # 시각화용 데이터 레코드 생성
                         cand_metrics = (cur_coverage, cur_overlap_percent, cur_cleaning_time)
                         cand_img = self.test_env.get_visualized_img(img_choice='traj')
-                        cand_info = f"Map name: {os.path.basename(map_path)} | Cov: {cur_coverage*100:.1f}%, Overlap: {cur_overlap_percent:.1f}%, Time: {cur_cleaning_time:.1f}m"
+                        cand_info = f"Map name: {os.path.basename(map_path)} | Final Cov: {cur_coverage*100:.1f}%, Overlap: {cur_overlap_percent:.1f}%, Time: {cur_cleaning_time:.1f}m"
 
                         level_records.append((cand_metrics, cand_img, cand_info))
 
+            # Best / Median / Worst 경로 선별
             if len(level_records) > 0:
-                # 1) is_better_path 기준으로 정렬 (Best -> Worst)
                 import functools
                 
                 def compare_paths(item1, item2):
-                    metrics1 = item1[0]
-                    metrics2 = item2[0]
+                    metrics1, metrics2 = item1[0], item2[0]
                     if is_better_path(metrics1, metrics2):
-                        return -1  # item1이 더 우수함 (앞으로)
+                        return -1
                     elif is_better_path(metrics2, metrics1):
-                        return 1   # item2가 더 우수함 (뒤로)
+                        return 1
                     return 0
 
                 sorted_records = sorted(level_records, key=functools.cmp_to_key(compare_paths))
                 total_cnt = len(sorted_records)
                 num_sample = self.args.vis_test_map_num
 
-                # 2) Best 상위 N개
                 bests = sorted_records[:min(num_sample, total_cnt)]
-                
-                # 3) Worst 하위 N개 (가장 나쁜 것부터 역순 추출)
                 worsts = sorted_records[-min(num_sample, total_cnt):][::-1]
 
-                # 4) Median 중간 N개 (중앙 지점 기준 대칭 추출)
                 mid_idx = total_cnt // 2
                 half_k = num_sample // 2
                 start_m = max(0, mid_idx - half_k)
                 end_m = min(total_cnt, start_m + num_sample)
                 medians = sorted_records[start_m:end_m]
 
-                # 결과 저장
                 visualized_maps[level] = {
-                    'best': bests,      # [(metrics, img, info), ...]
-                    'median': medians,  # [(metrics, img, info), ...]
-                    'worst': worsts     # [(metrics, img, info), ...]
+                    'best': bests,
+                    'median': medians,
+                    'worst': worsts
                 }
-        
-        # =========================================================================
-        # 맵 조건(난이도)별 최종 평균 및 표준편차 출력부
-        # =========================================================================
-        print("\n" + "="*60)
-        print("📊 [Test Results Breakdown by Map Conditions]")
-        print("="*60)
-        
-        for cond_key in sorted(condition_results.keys()):
-            level = cond_key
-            res = condition_results[cond_key]
-            
-            # 데이터 개수 체크
-            if not res['coverage']:
-                print(f" ▶ Map Condition: Level {level} -> No Valid Data")
-                continue
-                
-            # 조건별 평균(mean) 및 표준편차(std) 계산
-            cov_m, cov_s = np.mean(res['coverage']), np.std(res['coverage'])
-            ov_m, ov_s = np.mean(res['overlap_percent']), np.std(res['overlap_percent'])
-            time_m, time_s = np.mean(res['cleaning_time']), np.std(res['cleaning_time'])
-            
-            print(f" ▶ Map Condition: Level {level} (Total tests: {len(res['coverage'])})")
-            print(f"    - Coverage(%):     {cov_m*100:.2f} ± {cov_s*100:.2f}")
-            print(f"    - Overlap Rate(%): {ov_m:.2f} ± {ov_s:.2f}")
-            print(f"    - Cleaning Time(min): {time_m:.2f} ± {time_s:.2f}")
-            print("-" * 50)
 
-            # Level별 Best, median, worst 결과 시각화
+        # =========================================================================
+        # 1. Level별 Final Coverage 출력
+        # =========================================================================
+        print("\n" + "="*65)
+        print("[Final Coverage Summary by Level]")
+        print("="*65)
+        
+        for level in sorted(coverage_results_per_level.keys()):
+            covs = coverage_results_per_level[level]
+            if covs:
+                cov_m, cov_s = np.mean(covs), np.std(covs)
+                print(f" ▶ Level {level} (Total tests: {len(covs)})")
+                print(f"    - Final Coverage(%): {cov_m*100:.2f} ± {cov_s*100:.2f}%")
+            else:
+                print(f" ▶ Level {level} -> No Valid Data")
+
+        # =========================================================================
+        # 2. Target Coverage별 & Level별 세부 및 Overall 성능 출력
+        # =========================================================================
+        print("\n" + "="*65)
+        print("[2. Detailed Results by Target Coverage]")
+        print("="*65)
+        
+        for cov in sorted_target_cov:
+            print(f"\n Target Coverage: {cov*100:.1f}%")
+            print("-" * 60)
+            
+            total_attempts = 0
+            total_successes = 0
+            all_overlaps = []
+            all_times = []
+            
+            for level in sorted(target_cov_results[cov].keys()):
+                lvl_data = target_cov_results[cov][level]
+                t_cnt = lvl_data['total_count']
+                s_cnt = lvl_data['success_count']
+                
+                total_attempts += t_cnt
+                total_successes += s_cnt
+                all_overlaps.extend(lvl_data['overlaps'])
+                all_times.extend(lvl_data['cleaning_times'])
+                
+                if t_cnt == 0:
+                    print(f"   Level {level}: No Data")
+                    continue
+                
+                sr = (s_cnt / t_cnt) * 100.0
+                
+                if s_cnt > 0:
+                    ov_m, ov_s = np.mean(lvl_data['overlaps']), np.std(lvl_data['overlaps'])
+                    tm_m, tm_s = np.mean(lvl_data['cleaning_times']), np.std(lvl_data['cleaning_times'])
+                    print(f"   Level {level} | Success Rate: {sr:5.1f}% ({s_cnt}/{t_cnt}) "
+                        f"| Overlap: {ov_m:5.2f} ± {ov_s:4.2f}% "
+                        f"| Time: {tm_m:5.2f} ± {tm_s:4.2f}m")
+                else:
+                    print(f"   Level {level} | Success Rate:   0.0% ({s_cnt}/{t_cnt}) "
+                        f"| Overlap: N/A | Time: N/A")
+            
+            # Overall 출력
+            print("-" * 60)
+            if total_attempts > 0:
+                overall_sr = (total_successes / total_attempts) * 100.0
+                if total_successes > 0:
+                    ov_m, ov_s = np.mean(all_overlaps), np.std(all_overlaps)
+                    tm_m, tm_s = np.mean(all_times), np.std(all_times)
+                    print(f"   [Overall for Target {cov*100:.1f}%]")
+                    print(f"   - Success Rate : {overall_sr:.2f}% ({total_successes}/{total_attempts})")
+                    print(f"   - Overlap Rate : {ov_m:.2f} ± {ov_s:.2f}%")
+                    print(f"   - Cleaning Time: {tm_m:.2f} ± {tm_s:.2f} min")
+                else:
+                    print(f"   [Overall for Target {cov*100:.1f}%]")
+                    print(f"   - Success Rate : 0.00% ({total_successes}/{total_attempts})")
+                    print(f"   - Overlap Rate : N/A | Cleaning Time: N/A")
+
+        # 평균 연산 시간 출력
+        avg_comp_time = np.mean(computation_time) if computation_time else 0.0
+        median_comp_time = np.median(computation_time) if computation_time else 0.0
+        print("\n" + "="*65)
+        print(f"Average computation time per map: {avg_comp_time:.2f} s")
+        print(f"Median computation time per map: {median_comp_time:.2f} s")
+        print("="*65)
+
+        # =========================================================================
+        # Level별 경로 시각화 출력
+        # =========================================================================
+        for level in sorted(visualized_maps.keys()):
             vis_data = visualized_maps[level]
             categories = [
                 ('best', '[Best Paths]'),
                 ('median', '[Median Paths]'),
                 ('worst', '[Worst Paths]')
             ]
+            
+            print(f"\n" + "="*50)
+            print(f" Visualization for Map Condition Level {level}")
+            print("="*50)
             
             for cat_key, cat_label in categories:
                 records = vis_data.get(cat_key, [])
@@ -1253,21 +1445,6 @@ class LSTMAgent:
                     for idx, (metrics, img, info_str) in enumerate(records, 1):
                         print(f"    #{idx} - {info_str}")
                         display_image(img)
-                
-            print("-" * 50)
-            
-        # 전체 총합 결과 (기존 코드 유지)
-        total_coverage_mean = np.mean(total_coverage) if total_coverage else 0.0
-        total_overlap_percent_mean = np.mean(total_overlap_percent) if total_overlap_percent else 0.0
-        total_cleaning_time_mean = np.mean(total_cleaning_time) if total_cleaning_time else 0.0
-        
-        print("\n" + "="*60)
-        print(f"[Overall Test result]\n"
-            f"    Coverage mean: {total_coverage_mean*100:.2f}%\n"
-            f"    Cleaning time mean: {total_cleaning_time_mean:.2f} min\n"
-            f"    Overlap rate mean: {total_overlap_percent_mean:.2f}%\n"
-            f"    Average computation time per map: {np.mean(computation_time):.2f} s")
-        print("="*60)
 
     def see_weight(self):
 

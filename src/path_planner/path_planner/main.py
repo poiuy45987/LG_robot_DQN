@@ -8,7 +8,7 @@ import torch
 torch.set_num_threads(1)
 
 from path_planner.LSTM_agent import LSTMAgent
-from path_planner.config import DEFAULT_SEED, MAP_SAVE_DIR, MODEL_SAVE_DIR, TB_SAVE_DIR
+from path_planner.config import DEFAULT_SEED, MAP_SAVE_DIR, MODEL_SAVE_DIR
 
 def parse_args():
     
@@ -24,12 +24,11 @@ def parse_args():
     parser.add_argument('--mode', choices=['train', 'test', 'see_map', 'see_weight'], default='train', help='Mode: train, test, see_map, see_weight (see_map: seed로 생성한 map을 보는 기능 / see_weight: 훈련된 model의 parameter 중 일부를 시각화 하는 기능)')
     parser.add_argument('--use_wandb', action='store_true', help='wandb 사용')
     parser.add_argument('--use_tb', action='store_true', help='tb 사용')
-    # parser.add_argument('--use_vessl', action='store_true', help='vessl 사용')
+    parser.add_argument('--use_vessl', action='store_true', help='vessl 사용')
     
     # Model, map, tensorboard 저장 경로 설정
     parser.add_argument('--model_dir', type=str, default=MODEL_SAVE_DIR, help=f'Model 파일이 저장되는 폴더 경로: {MODEL_SAVE_DIR}')
     parser.add_argument('--map_save_dir', type=str, default=MAP_SAVE_DIR, help=f'Map 파일이 저장되어 있는 폴더 경로: {MAP_SAVE_DIR}')
-    parser.add_argument('--tb_save_dir', type=str, default=TB_SAVE_DIR, help=f'Tensorboard 데이터가 저장되는 폴더 경로: {TB_SAVE_DIR}')
 
     # 모델 이름 또는 이어서 학습할 모델 이름 설정
     parser.add_argument('--pre_model_name', type=str, default=None, help='Pre-trained model file 이름. Parameter만 불러오고 step 수, optimizer 상태 등은 초기화됨.')
@@ -38,9 +37,8 @@ def parse_args():
 
     # Test 시 사용할 map, map 개수 등 설정
     parser.add_argument('--test_map_folder_name', type=str, default='test', help=f'Test 시 사용할 map이 담긴 폴더 이름 설정. {MAP_SAVE_DIR}에 담긴 폴더 중에 선택. (Default: test)')
-    parser.add_argument('--test_map_num_per_level', type=int, default=25, help='Test 시 map level별로 사용할 map 수 (Default: 25)')
-    parser.add_argument('--test_start_point_num', type=int, default=3, help='Test 시 한 map당 테스트해볼 start_poit 수 (Default: 3)')
-    parser.add_argument('--not_use_maps_folder', action='store_true', help='Test 시, maps 폴더에 저장된 map이 아닌 random하게 생성한 map을 사용')
+    parser.add_argument('--test_map_num_per_level', type=int, default=250, help='Test 시 map level별로 사용할 map 수 (Default: 250)')
+    parser.add_argument('--test_start_point_num', type=int, default=1, help='Test 시 한 map당 테스트해볼 start_poit 수 (Default: 1)')
     parser.add_argument('--vis_test_map_num', type=int, default=3, help='Test 시, level별로 성능이 좋은 map, 중간인 map, 안 좋은 map을 몇 개씩 보여줄지 결정 (Default: 3)')
     
     # Model dimension 관련 설정

@@ -491,3 +491,74 @@ def get_circle_indices(
                 indices.append((x, y))
                 
     return indices
+
+
+def compute_frontier_map( 
+    cleaned_map: np.ndarray, 
+    coverable: np.ndarray,
+    use_dilation: bool = True
+) -> np.ndarray:
+    """
+    cleaned_map과 coverable 맵을 기반으로 Frontier 맵을 계산.
+
+    Args:
+        cleaned_map (np.ndarray): 청소된 횟수/여부 맵 (H, W). 0 초과면 청소된 구역.
+        coverable (np.ndarray): 청소 가능 구역 맵 (H, W). 1이면 청소 가능 영역.
+        use_dilation (bool): Frontier 영역을 3x3 커널로 Dilation(팽창)시킬지 여부.
+
+    Returns:
+        np.ndarray: uint8 형태의 Frontier 맵 (H, W). Frontier 위치는 1, 나머지는 0.
+    """
+    H, W = cleaned_map.shape
+    frontier_map = np.zeros((H, W), dtype=np.uint8)
+
+    # 1. 청소된 영역이 하나도 없으면 Frontier도 없음
+    cleaned_mask = (cleaned_map > 0)
+    if not np.any(cleaned_mask):
+        return frontier_map
+
+    # 2. 유효한 미청소 영역 마스크 (청소 가능하고 아직 청소되지 않은 영역)
+    valid_uncleaned_mask = (coverable == 1) & (cleaned_map == 0)
+
+    # 3. 청소된 셀들(cleaned > 0)의 8방향 이웃 좌표 계산
+    cy, cx = np.where(cleaned_mask)
+    offsets = np.array([
+        [-1, -1], [-1, 0], [-1, 1],
+        [ 0, -1],          [ 0, 1],
+        [ 1, -1], [ 1, 0], [ 1, 1]
+    ], dtype=np.int32)
+
+    cleaned_coords = np.column_stack((cx, cy))
+    
+    # 청소된 셀 주변 8방향 좌표들을 구하고 중복 제거
+    roi_coords = np.unique((cleaned_coords[:, None, :] + offsets[None, :, :]).reshape(-1, 2), axis=0)
+
+    # 4. 지도 밖으로 나가는 좌표(In-bounds) 제외
+    valid_mask = (roi_coords[:, 0] >= 0) & (roi_coords[:, 0] < W) & \
+                 (roi_coords[:, 1] >= 0) & (roi_coords[:, 1] < H)
+    valid_coords = roi_coords[valid_mask]
+    rx, ry = valid_coords[:, 0], valid_coords[:, 1]
+
+    # 5. Raw Frontier 조건: (청소된 영역의 이웃) AND (유효한 미청소 영역)
+    raw_frontier_mask = valid_uncleaned_mask[ry, rx]
+    rx, ry = rx[raw_frontier_mask], ry[raw_frontier_mask]
+
+    if len(rx) == 0:
+        return frontier_map
+
+    # 6. Raw Frontier 마스크 생성
+    raw_frontier_patch = np.zeros((H, W), dtype=np.uint8)
+    raw_frontier_patch[ry, rx] = 1
+
+    # 7. 3x3 Kernel Dilation 적용 및 최종 Frontier 산출
+    if use_dilation:
+        kernel = np.ones((3, 3), dtype=np.uint8)
+        dilated_frontier = cv2.dilate(raw_frontier_patch, kernel, iterations=1)
+        
+        # Dilation된 영역 중 (청소 가능 & 아직 청소 안 된) 영역만 최종 1로 설정
+        valid_dilated = (dilated_frontier == 1) & valid_uncleaned_mask
+        frontier_map[valid_dilated] = 1
+    else:
+        frontier_map[raw_frontier_patch == 1] = 1
+
+    return frontier_map

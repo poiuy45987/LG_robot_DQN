@@ -1,3 +1,4 @@
+frozendict
 gymnasium
 ipython
 matplotlib
@@ -6,6 +7,6 @@ opencv-python-headless
 Pillow
 pytz
 torch
-vessl
+tqdm
 wandb
 tensorboard

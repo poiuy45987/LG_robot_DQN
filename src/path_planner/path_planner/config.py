@@ -8,7 +8,6 @@ DEFAULT_SEED = 42
 
 ANG_SEG_NUM = 7 # 0~90도 사이 각도를 나누는 간격 수.
 CLEANED_MAP_MAX = 10
-TRACE_MAP_MAX = 50
 LOCAL_VIEW_DIM = 51
 
 MAP_SAVE_DIR = os.path.normpath('src/path_planner/path_planner/maps')
@@ -33,25 +32,25 @@ class TrainConfig: # Training과 관련된 설정들
     
     # --- Training 설정 및 Warmup ---
     max_episodes: int = 30000
-    batch_size: int = 64
+    batch_size: int = 32
     use_train_maps: bool = False
-    max_step_per_eps: int = 20
+    max_step_per_eps: int = 10
     max_eps_per_map_size: int = 100
     path_reward_thres: float = 0.85
     
     # --- Optimizer 및 Update 주기 ---
-    optimizer: str = 'sgd' # 'sgd' or 'adam'
-    lr: float = 1e-4
+    optimizer: str = 'adam' # 'sgd' or 'adam'
+    lr: float = 3e-4
     momentum: float = 0.9
     min_lr: float = 1e-6
     detach_period: int = 20
     scheduler_max_step: int = 500
     
     # --- Validation 및 Checkpoint ---
-    valid_freq: int = 100
+    valid_freq: int = 1
     ckp_freq: int = 20
     valid_map_num: int = 5
-    valid_start_point_num: int = 3
+    valid_start_point_num: int = 1
     
     def _validate_configs(self):
 
@@ -193,7 +192,7 @@ class EnvConfig:
     max_forward: int = 50 # 단위: cm
     
     # Step, Termination 관련
-    max_steps: int = 1500
+    max_steps: int = 3000
     max_no_progress_steps: int = 60
     max_no_progress_steps_final: int = 100
     target_coverage: float = 0.95

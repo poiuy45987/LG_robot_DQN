@@ -299,7 +299,8 @@ class MapGenerator:
             eff_size=BoundingBox(x_min=0, x_max=W, y_min=0, y_max=H)
         )
 
-def generate_multiple_maps(robot_diameter: int,
+def generate_multiple_maps(map_folder_name: str, 
+                           robot_diameter: int,
                            mode: str = "test",
                            map_num_per_cond: int = 10,
                            seed: int = DEFAULT_SEED, 
@@ -318,17 +319,21 @@ def generate_multiple_maps(robot_diameter: int,
         level_range (tuple[int, int], optional): Map 난이도 조건을 (min_level, max_level) 형태로 입력. Defaults to (1, 3).
     """
     
-    assert mode in ["train", "test"]
+    assert mode in ["train", "valid", "test"]
+
+    # valid map, test map은 train map과 겹치지 않도록 seed를 100000 이상으로 설정
+    if mode == "valid":
+        seed += 100000  
+    elif mode == "test":
+        seed += 200000
     
-    if mode == "test":
-        seed += 100000  # test map은 train map과 겹치지 않도록 seed를 100000 이상으로 설정
     cfg = MapConfig()
     rng = np.random.default_rng(seed=seed)
     map_generator = MapGenerator(cfg, rng)
     
     # Map을 저장할 폴더 생성
-    map_size_name = f"{map_size[0]}x{map_size[1]}" if map_size is not None else "Cropped"
-    map_folder_name = os.path.join(MAP_SAVE_DIR, mode, map_size_name)
+    # map_size_name = f"{map_size[0]}x{map_size[1]}" if map_size is not None else "Cropped"
+    # map_folder_name = os.path.join(MAP_SAVE_DIR, mode, map_size_name)
     png_folder_name = os.path.join(map_folder_name, "image")
     os.makedirs(png_folder_name, exist_ok=True) # map_folder_name은 상위 폴더이므로 자동 생성됨.
     

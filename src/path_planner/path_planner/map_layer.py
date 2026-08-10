@@ -1,7 +1,7 @@
 import numpy as np
 from dataclasses import dataclass
 
-from path_planner.config import MapConfig, DEFAULT_SEED, TRACE_MAP_MAX
+from path_planner.config import MapConfig, DEFAULT_SEED
 from path_planner.map_generator import ObstacleMap, MapGenerator
 from path_planner.utils.map_utils import *
 
@@ -30,14 +30,6 @@ class MapInfo:
     eff_size: BoundingBox
     
 
-# @dataclass
-# class TraceMapData:
-#     """
-#     trace_map의 data를 표현하는 양식
-#     """
-#     indices: np.ndarray
-#     value: np.ndarray
-
 @dataclass
 class MapHistory:
     """
@@ -45,7 +37,6 @@ class MapHistory:
     """
     new_cleaned_cell_num: int
     new_covered_cells: np.array
-    # trace_map_data: TraceMapData
     pos: tuple[float, float]
 
 
@@ -66,13 +57,11 @@ class MapLayers():
         self.collision_map: np.ndarray | None = None   # Obstacle dilated map: uint8 [H,W] (Dilated obstacles: 1, 빈 공간: 0)
         self.reachable: np.ndarray | None = None       # Reachable robot centers: uint8 [H,W] (Reachable center: 1, Unreachable center: 0)
         self.coverable: np.ndarray | None = None       # Coverable cells: uint8 [H,W] (Coverable grid: 1, Uncoverable grid: 0)
-        # self.mode_map: np.ndarray | None = None
         
         # Map이 결정됐을 때 변하는 map layer
         self.cleaned: np.ndarray | None = None         # 로봇이 청소한 grid를 표시하는 layer: uint8 [H,W] (Cleaned: 1, Uncleaned: 0)
         self.uncleaned: np.ndarray | None = None       # 로봇이 청소하지 않은 grid를 표시하는 layer: uint8 [H,W] (Uncleaned: 1, Cleaned: 0)
         self.frontier: np.ndarray | None = None        # 탐색 대상 경계선 레이어: uint8 [H,W] (Frontier: 1, 기타: 0)
-        # self.trace: np.ndarray | None = None           # 로봇의 중심이 지나간 잔상을 표시하는 layer: uint8 [H,W] (방문한 수를 표시)
         
         self.map_info: MapInfo | None = None           # Map 정보
         
@@ -87,9 +76,6 @@ class MapLayers():
         
         # History
         self.map_history: list[MapHistory] = []
-        
-        # Trace layer를 위한 instant 변수
-        # self.active_trace_indices: np.ndarray | None = None
 
 
     def reset(self, map_config: MapConfigSchema=None, mode: str='train',
@@ -120,13 +106,6 @@ class MapLayers():
             
             # Collision map과 mode map 생성
             self.collision_map = dilation_obstacles(self.obstacles, self.robot_mask)
-            # self.mode_map = generate_navigation_mode_map(
-            #     obs=self.obstacles,
-            #     crop_size=self.robot_size, 
-            #     robot_diameter=self.robot_size, 
-            #     stride=self.robot_size//4, 
-            #     eff_size=(obs_map.eff_H, obs_map.eff_W),
-            # )
             
         # 시작점 설정: 설정에 실패하면 None을 반환하여 다시 map을 만들도록 함.
         # 시작점 설정하면서 reachable map, coverable map 설정
@@ -134,12 +113,10 @@ class MapLayers():
         if pos is None:
             return None
         
-        # Cleaned layer, Uncleaned layer, Frontier layer, Trace layer 초기화
+        # Cleaned layer, Uncleaned layer, Frontier layer 초기화
         self.cleaned = np.zeros((self.map_info.H, self.map_info.W), dtype=np.uint8)
         self.uncleaned = (self.coverable == 1).astype(np.uint8)
         self.frontier = np.zeros((self.map_info.H, self.map_info.W), dtype=np.uint8)
-        # self.trace = np.zeros((self.map_info.H, self.map_info.W), dtype=np.uint8)
-        # self.active_trace_indices = None
         
         # Map layer와 관련된 parameter 초기화
         self.coveraged_area = 0 # Cover한 영역의 grid 수
@@ -155,10 +132,8 @@ class MapLayers():
     def update_map_layers(self, cx: float, cy: float) -> tuple[bool, float, float]:
         
         collided, new_cleaned_degree, revisit_degree, new_cleaned_num, new_cleaned_grid_indices_curr_step = self._update_cleaned_uncleaned_frontier_map(cx, cy)
-        # trace_map_data = self._update_trace(cx, cy)
         curr_step_diff = MapHistory(new_cleaned_cell_num=new_cleaned_num,
                                     new_covered_cells=new_cleaned_grid_indices_curr_step,
-                                    # trace_map_data=trace_map_data,
                                     pos=(cx, cy))
         self.map_history.append(curr_step_diff)
         
@@ -187,8 +162,8 @@ class MapLayers():
         current_patch = crop_raw_patch(full_layer, cx, cy, crop_radius, value=[1, 0, 0, 0])
         
         return current_patch
+
        
-    # FIXME: Frontier layer는 수정하지 않음.
     def one_step_back(self, crop_radius: int, stack_steps_num: int = 1) -> np.ndarray:
         """
         한 step 이전의 map 상태로 변환
@@ -210,14 +185,9 @@ class MapLayers():
         if last_map_vary_data.new_covered_cells is not None and len(last_map_vary_data.new_covered_cells[:, 0]) > 0:
             cx = last_map_vary_data.new_covered_cells[:, 0]; cy = last_map_vary_data.new_covered_cells[:, 1]
             self.cleaned[cy, cx] -= 1
-            
-        # active_trace_indices = last_map_vary_data.trace_map_data.indices
-        # active_trace_value = last_map_vary_data.trace_map_data.value
-        # self.active_trace_indices = active_trace_indices
-        # self.trace = np.zeros((self.map_info.H, self.map_info.W), dtype=np.uint8) # trace를 초기화
-        # self.trace[active_trace_indices[:, 1], active_trace_indices[:, 0]] = active_trace_value
         
         self.uncleaned = ((self.obstacles == 0) & (self.cleaned == 0)).astype(np.uint8)
+        self.frontier = compute_frontier_map(self.cleaned, self.coverable)
         
         # ----------------- patch_stack 변경을 위해 past_patch 얻음 -----------------
         
@@ -230,21 +200,17 @@ class MapLayers():
                     cx = map_vary_data.new_covered_cells[:, 0]; cy = map_vary_data.new_covered_cells[:, 1]
                     past_cleaned[cy, cx] -= 1
         
-        # # stack_steps_num 전의 trace layer 얻음
         idx = -stack_steps_num
         if len(self.map_history) < stack_steps_num:
             idx = 0
         past_traj_data = self.map_history[idx]
-        # past_trace = np.zeros((self.map_info.H, self.map_info.W), dtype=np.uint8)
-        # active_trace_indices = past_traj_data.trace_map_data.indices
-        # active_trace_value = past_traj_data.trace_map_data.value
-        # past_trace[active_trace_indices[:, 1], active_trace_indices[:, 0]] = active_trace_value
         
         past_uncleaned = ((self.obstacles == 0) & (past_cleaned == 0)).astype(np.uint8)
+        past_frontier = compute_frontier_map(past_cleaned, self.coverable)
         
         # crop을 얻고 self.patch_stack에 추가
         cx, cy = past_traj_data.pos
-        full_layer = np.stack([self.collision_map, past_cleaned, past_uncleaned], axis=0)
+        full_layer = np.stack([self.collision_map, past_cleaned, past_uncleaned, past_frontier], axis=0)
         past_patch = crop_raw_patch(full_layer, cx, cy, crop_radius, value=[1, 0, 0, 0])
         
         return past_patch
@@ -253,6 +219,7 @@ class MapLayers():
     def collides(self, cx: float, cy: float) -> bool:
         cx, cy = float_to_int_coord(cx, cy)
         return bool(self.collision_map[cy, cx])
+
     
     def has_uncleaned_grid(self, cx: float, cy: float) -> bool:
         
@@ -304,8 +271,8 @@ class MapLayers():
         map_y_max = self.map_info.eff_size.y_max
         total_area = (map_x_max-map_x_min+1)*(map_y_max-map_y_min+1)
         
-        min_x, max_x = map_x_min+self.robot_half_size, map_x_max-self.robot_half_size-1
-        min_y, max_y = map_y_min+self.robot_half_size, map_y_max-self.robot_half_size-1
+        min_x, max_x = map_x_min+self.robot_half_size, map_x_max-self.robot_half_size
+        min_y, max_y = map_y_min+self.robot_half_size, map_y_max-self.robot_half_size
 
         if mode == 'train': # Train 시, 작은 map에서도 로봇 배치가 어느정도 성공적으로 나오도록 하기 위해서 가장자리 부분에 자리를 설정.
         
@@ -494,39 +461,3 @@ class MapLayers():
                 self.frontier[valid_dilated] = 1
 
         return False, new_cleaned_degree, revisit_degree, new_cleaned_num, new_cleaned_grid_indices_curr_step
-    
-    
-    # def _update_trace(self, cx: float, cy: float):
-        
-    #     # 좌표 정수화
-    #     cx, cy = float_to_int_coord(cx, cy)
-        
-    #     # 기존 활성 인덱스들의 값 일괄 감소
-    #     if self.active_trace_indices is not None and len(self.active_trace_indices) > 0:
-            
-    #         xs = self.active_trace_indices[:, 0]; ys = self.active_trace_indices[:, 1]
-            
-    #         # 현재 활성화된 좌표들만 1씩 차감
-    #         self.trace[ys, xs] -= 1
-            
-    #         # 값이 0보다 큰 인덱스만 유지 (필터링)
-    #         keep_mask = self.trace[ys, xs] > 0
-    #         self.active_trace_indices = self.active_trace_indices[keep_mask]
-
-    #     # 새로운 좌표 추가
-    #     # 만약 현재 위치가 self.active_trace_indices에 이미 있는 경우, 좌표를 추가하지 않음.
-    #     if self.trace[cy, cx] <= 0:
-    #         new_coord = np.array([[cx, cy]], dtype=np.uint8)
-    #         if self.active_trace_indices is None:
-    #             self.active_trace_indices = new_coord
-    #         else:
-    #             self.active_trace_indices = np.vstack([self.active_trace_indices, new_coord])
-        
-    #     # 맵 업데이트 (최신 위치는 항상 MAX값)
-    #     self.trace[cy, cx] = TRACE_MAP_MAX
-        
-    #     # trace map data를 형식에 맞게 반환
-    #     trace_map_data = TraceMapData(indices = self.active_trace_indices,
-    #                                   value = self.trace[self.active_trace_indices[:, 1], self.active_trace_indices[:, 0]])
-        
-    #     return trace_map_data
