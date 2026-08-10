@@ -29,3 +29,18 @@ def set_torch_seed(seed: int):
     # 결정론적 연산 설정 (속도는 조금 느려질 수 있지만 결과는 항상 동일)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+
+def print_model_info(model):
+    # 1. 전체 파라미터 수 및 학습 가능한(Trainable) 파라미터 수 계산
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    
+    # 2. 파라미터 용량 계산 (기본 float32 = 4 bytes 기준)
+    param_size = sum(p.numel() * p.element_size() for p in model.parameters())
+    buffer_size = sum(b.numel() * b.element_size() for b in model.buffers()) # BatchNorm 등의 버퍼 용량
+    
+    total_size_mb = (param_size + buffer_size) / (1024 ** 2)
+
+    print(f"Total Parameters     : {total_params:,} ({total_params / 1e6:.2f}M)")
+    print(f"Trainable Parameters : {trainable_params:,}")
+    print(f"Model File Size      : {total_size_mb:.2f} MB")

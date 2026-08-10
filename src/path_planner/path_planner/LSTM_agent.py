@@ -31,7 +31,7 @@ from path_planner.map_generator import generate_multiple_maps
 from path_planner.map_layer import MapConfigSchema
 from path_planner.environment import CoverageEnv, ACTION_NUM
 from path_planner.LSTM_network import LSTMPolicyNetwork
-from path_planner.utils.utils import get_device_info, set_torch_seed
+from path_planner.utils.utils import *
 from path_planner.utils.visualizer import display_image
 from path_planner.utils.trajectory_metrics import GRID_RESOLUTION_M, LINEAR_VELOCITY
 
@@ -1202,6 +1202,9 @@ class LSTMAgent:
     def test(self, target_cov_list: list[float] = [0.85, 0.90, 0.95]):
 
         self.policy_net.eval() # eval mode로 전환
+
+        print_model_info(self.policy_net)
+
         total_coverage = []; total_overlap_percent = []; total_cleaning_time = []
         computation_time = []
 
@@ -1233,7 +1236,6 @@ class LSTMAgent:
         
         # Level별 Best/Worst 경로 기록용 딕셔너리
         visualized_maps: dict[int, dict[str, list[tuple[tuple[float, float, float], np.ndarray, str]]]] = {}
-
 
         map_num_per_level = self.args.test_map_num_per_level
 
