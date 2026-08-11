@@ -21,12 +21,14 @@ from dataclasses import asdict
 from itertools import cycle
 from gymnasium.vector import SyncVectorEnv
 from tqdm import tqdm
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font
 
 import glob
 from IPython.display import display
 
 # 앞서 정의한 클래스들을 임포트한다고 가정 (또는 같은 파일에 위치)
-from path_planner.config import EnvConfig, TrainConfig, LOCAL_VIEW_DIM, TRAIN_MAP_FILE_REGEX, TEST_MAP_FILE_REGEX
+from path_planner.config import EnvConfig, TrainConfig, LOCAL_VIEW_DIM, RESULT_SAVE_DIR, TRAIN_MAP_FILE_REGEX, TEST_MAP_FILE_REGEX
 from path_planner.map_generator import generate_multiple_maps
 from path_planner.map_layer import MapConfigSchema
 from path_planner.environment import CoverageEnv, ACTION_NUM
@@ -316,24 +318,28 @@ class LSTMAgent:
 
                 if map_size_str == "Cropped":
                     map_size = None
+                    start_mode = "corner"
                 else:
                     H, W = map(int, map_size_str.split('x'))
                     map_size = (H, W)
+                    start_mode = "edge"
 
                 if mode == "train":
                     map_num = 1000 if map_size_str == "Cropped" else 200
                 else:
                     map_num = self.args.valid_map_num
+                print(f"  Generating {map_num} maps per level with map size {map_size_str}...")
                 generate_multiple_maps(
                     map_folder_name=map_folder_name,
                     robot_diameter=self.env_cfg.robot_size, 
                     mode=mode, 
+                    start_mode=start_mode,
                     seed=self.seed,
                     map_num_per_cond=map_num, 
                     visualize=True, 
                     map_size=map_size
                 )
-                print(f"  Generate {map_num} maps with map size {map_size_str}")
+                print(f"  Complete!")
         else:
             print(f"Using pre-generated maps for {mode_str}.\n")
 
@@ -384,7 +390,9 @@ class LSTMAgent:
         
         # Training 조건을 구별하기 위해 표시할 hyperparmeter 설정
         params_list_for_log = [
-            'batch_size', 'lr', 'min_lr', 'scheduler_max_step', 'optimizer', 'momentum', 'action_enc_dim', 'lstm_in_prj_dim', 'lstm_hid_dim', 'detach_period'    
+            'batch_size', 'lr', 'min_lr', 'scheduler_max_step', 'optimizer', 'momentum', 
+            'max_step_per_eps', 'max_eps_per_map_size',
+            'action_enc_dim', 'lstm_in_prj_dim', 'lstm_hid_dim', 'detach_period'    
         ]
         train_cfg_dict = asdict(self.train_cfg)
         params_config = {k: v for k, v in train_cfg_dict.items() if k in params_list_for_log}
@@ -615,8 +623,46 @@ class LSTMAgent:
             "glob_vec": glob_vecs,        # Shape: (B, glob_vec_dim)
             "action_mask": action_masks   # Shape: (B, action_num)
         }
+
+    @staticmethod
+    def _calculate_path_reward(
+        coverage: torch.Tensor,
+        overlap_rate: torch.Tensor,
+        cleaning_time_rel: torch.Tensor,
+        map_size: str,
+    ) -> torch.Tensor:
+        """Return the curriculum path reward used by both training and validation.
+
+        ``overlap_rate`` must be a fraction in [0, 1], not a percentage.
+        """
+        cov_rwd_max = 0.5
+        
+        if map_size == '40x40':
+            cov_thres = 0.9
+            above_cov_thres_mask = (coverage >= cov_thres).float()
+            cov_reward = torch.clamp(coverage, min=0.0, max=cov_thres) * (cov_rwd_max / cov_thres)
+
+            overlap_scale = torch.clamp(1.0 - overlap_rate**2, min=-0.1)
+            overlap_reward = overlap_scale * (1.0 - cov_rwd_max)
+
+            time_penalty = torch.clamp((cleaning_time_rel - 1.0) * 0.025, min=0.0, max=0.1)
+
+            return cov_reward + (overlap_reward - time_penalty) * above_cov_thres_mask
+
+        cov_thres = 0.75
+        above_cov_thres_mask = (coverage >= cov_thres).float()
+        cov_reward = torch.clamp(coverage, min=0.0, max=cov_thres) * (cov_rwd_max / cov_thres)
+
+        r_quad = (200.0 / 9.0) * torch.square(torch.clamp(coverage - cov_thres, min=0.0))
+        overlap_max_weight = torch.clamp(r_quad, min=0.0, max=1.0 - cov_rwd_max)
+        overlap_scale = torch.clamp(1.0 - torch.square(overlap_rate), min=-1.0)
+        overlap_reward = overlap_scale * overlap_max_weight
+
+        time_penalty = torch.clamp((cleaning_time_rel - 1.0) * 0.25, min=0.0, max=0.1)
+        scaled_time_penalty = time_penalty * (overlap_max_weight / (1.0 - cov_rwd_max))
+        return cov_reward + (overlap_reward - scaled_time_penalty) * above_cov_thres_mask
            
-    def _validation(self, episode: int, curr_map_size: str):
+    def _validation(self, episode: int, curr_map_size: str, start_mode: str = "corner"):
         
         self.policy_net.eval() # eval mode로 전환
         coverage = []; overlap_percent = []; cleaning_time = []
@@ -626,21 +672,8 @@ class LSTMAgent:
         coverage_mean = 0.0; overlap_percent_mean = 0.0; cleaning_time_mean = 0.0
         best_traj_img = None # 가장 성능이 좋았던 map에서의 trajectory를 보여줌
         
-        # # 현재 훈련 중인 map size를 얻음. FIXME
-        # map_size = "Cropped"
-        # if self.args.use_train_maps:
-        #     if map_size == "Cropped":
-        #         H = None; W = None
-        #     else:
-        #         H, W = map(int, map_size.split('x'))
-        # else:
-        #     if map_size is None:
-        #         H = None; W = None
-        #     else:
-        #         H, W = map_size
-
-        # map_size_str = f"{H}x{W}" if H is not None else "random"
         print(f"Validation on {curr_map_size} map size")
+
         # Key: Map size, Value: {Key=level: Value=[map file list]}
         # Model의 성능 평가
         for level in range(1, 5):
@@ -651,7 +684,7 @@ class LSTMAgent:
                 map_config = MapConfigSchema(file_path=map_path)
                 
                 # Validation 환경을 초기화
-                reset_info = self.test_env.reset(mode='test', map_config=map_config)
+                reset_info = self.test_env.reset(start_mode=start_mode, map_config=map_config)
                 if reset_info:
                     obs, _ = reset_info
                 else:
@@ -661,26 +694,18 @@ class LSTMAgent:
                     
                     # start_num == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
                     if start_num != 0:
-                        obs, _ = self.test_env.reset(mode='test') # 시작 지점 초기화
+                        obs, _ = self.test_env.reset(start_mode=start_mode) # 시작 지점 초기화
                     cur_coverage, cur_overlap_percent, cur_cleaning_time, _ = self._test_one_map(self.test_env, obs, debug=False) # Coverage 성능을 평가
 
-                    ##### Reward 계산 #####
                     total_steps = self.test_env.steps
                     straight_cleaning_time = total_steps * GRID_RESOLUTION_M / LINEAR_VELOCITY / 60.0
-                    cleaning_time_rel = cur_cleaning_time / (straight_cleaning_time + 1e-8) # 경로 길이에 대한 cleaning time
-
-                    cov_rwd_max = 0.5 # Coverage reward의 max 수치
-                    cov_thres = 0.9 # Coverage를 주로 고려하는 coverage 수치 임계값
-                    above_cov_thres_mask = 1.0 if cur_coverage >= cov_thres else 0.0
-                    cov_reward = min(max(cur_coverage, 0.0), cov_thres) * (cov_rwd_max / cov_thres) # Coverage가 cov_thres 미만일 때는 coverage만 reward에 적용. 만점은 cov_rwd_max 
-    
-                    overlap_scale = 1.0 - ((cur_overlap_percent/100.0) ** 2)
-                    overlap_scale = max(overlap_scale, -1.0)
-                    overlap_reward = overlap_scale * (1.0 - cov_rwd_max) # Overlap은 coverage가 cov_thres 이상일 때만 고려. 만점은 1.0 - cov_rwd_max
-                    
-                    time_penalty = min(max((cleaning_time_rel - 1.0) * 0.025, 0.0), 0.1) # 직진 경로 시간과 비교해서 얼마나 차이나는지에 따라 penalty 부여. 직진보다 다섯 배 더 걸릴 때 최대 감점.
-                    cur_path_reward = cov_reward + (overlap_reward - time_penalty) * above_cov_thres_mask
-                    #######################
+                    cleaning_time_rel = cur_cleaning_time / (straight_cleaning_time + 1e-8)
+                    cur_path_reward = self._calculate_path_reward(
+                        torch.tensor(cur_coverage, device=self.device),
+                        torch.tensor(cur_overlap_percent / 100.0, device=self.device),
+                        torch.tensor(cleaning_time_rel, device=self.device),
+                        curr_map_size,
+                    ).item()
 
                     coverage.append(cur_coverage)
                     overlap_percent.append(cur_overlap_percent)
@@ -790,13 +815,12 @@ class LSTMAgent:
             # 초기 이미지
             init_traj_img = env.get_visualized_img(img_choice='traj')
             init_obs_img = env.get_visualized_img(img_choice='obs')
-            # init_pro_obs_img = env.get_visualized_img(img_choice='obs', preprocessor=self._pre_process_obs)
             
             # 초기 빈 이미지 설치
             im_traj = axes[0].imshow(init_traj_img)
             im_obs = axes[1].imshow(init_obs_img)
             # im_pro_obs = axes[2].imshow(init_pro_obs_img)
-            text_traj = axes[0].text(0.5, 0, "", transform=axes[0].transAxes, ha="center", fontsize=15, color='black')
+            text_traj = axes[0].text(0.0, -0.15, "", transform=axes[0].transAxes, ha="left", fontsize=15, color='black')
             axes[0].set_title("Trajectory", fontsize=20)
             axes[1].set_title("Observation", fontsize=20)
             # axes[2].set_title("Processed Observation", fontsize=20)
@@ -832,11 +856,18 @@ class LSTMAgent:
             with torch.no_grad():
                 action_probs, h_t, c_t = self.policy_net(loc_map_data, loc_vec_data, glob_vec_data, h_t, c_t)
                 
-                # Action이 나올 확률을 가지고 action 선택. Action 선택 확률을 저장. 장애물에 부딪히는 action은 제외
-                masked_probs = action_probs * action_mask # Shape: action_probs (B, action_num) / action_mask (B, action_num)
-                masked_probs = masked_probs / (masked_probs.sum(dim=-1, keepdim=True) + 1e-8)
+                # Training과 동일하게 log-probability 공간에서 mask를 적용한다.
+                # +1e-8은 매우 작은 policy 확률이 log(0)이 되어 유효 action까지
+                # 제거되는 것을 막고, mask=0인 action만 확실히 선택 불가하게 만든다.
+                log_probs = torch.log(action_probs + 1e-8)
+                masked_logits = torch.where(
+                    action_mask == 1,
+                    log_probs,
+                    torch.tensor(-1e9, device=action_probs.device),
+                )
             
-            action = torch.argmax(masked_probs).item()
+            # Validation/test는 확률 sampling 없이, 유효 action 중 최대 확률 action을 결정적으로 선택.
+            action = torch.argmax(masked_logits, dim=-1).item()
 
             if debug:
                 if not done and debug_skip_count > 0:
@@ -844,10 +875,18 @@ class LSTMAgent:
                 else:
                     
                     # 각 action이 선택될 확률 및 선택된 action 표시
-                    prob_np = masked_probs.squeeze().cpu().numpy()
+                    before_mask_prob_np = action_probs.squeeze().cpu().numpy()
+                    action_mask_np = action_mask.squeeze().cpu().numpy()
+                    prob_np = torch.softmax(masked_logits, dim=-1).squeeze().cpu().numpy()
+
+                    before_mask_probs_str = ", ".join([f"{prob:.3f}" for prob in before_mask_prob_np])
+                    action_mask_str = ", ".join([f"{mask:.3f}" for mask in action_mask_np])
                     probs_str = ", ".join([f"{prob:.3f}" for prob in prob_np])
-                    action_info = (f"[Selected action]: {action}\n"
-                                    f"[Action probs] [{probs_str}]")
+
+                    action_info = (f"[Selected action  ]: {action}\n"
+                                   f"[Before mask probs]: [{before_mask_probs_str}]\n"
+                                   f"[Action masks     ]: [{action_mask_str}]\n"
+                                   f"[Action probs     ]: [{probs_str}]")
                     
                     # Map 시각화
                     traj_img = env.get_visualized_img(img_choice='traj')
@@ -933,6 +972,18 @@ class LSTMAgent:
         
         # Episode 동안 map을 변경하지 않음. 고정된 map에서 경로 생성 수 policy update을 반복
         for episode in range(self.start_episode, self.train_cfg.max_episodes+1):
+
+            if curr_map_size == '40x40':
+                self.env_cfg.max_no_progress_steps = 30
+                self.env_cfg.max_no_progress_steps_final = 50
+                self.train_cfg.path_reward_thres = 0.85
+            elif curr_map_size == '80x80':
+                self.env_cfg.max_no_progress_steps = 45
+                self.env_cfg.max_no_progress_steps_final = 75
+                self.train_cfg.path_reward_thres = 0.80
+            elif curr_map_size == 'Cropped':
+                self.env_cfg.max_no_progress_steps = 60
+                self.env_cfg.max_no_progress_steps_final = 100
 
             print(f"[Episode {episode}] Starting training...")
             eps_path_rwd_mean = 0 # Episode의 훈련 상태를 표시할 reward
@@ -1063,18 +1114,9 @@ class LSTMAgent:
                 overlap_tensor = torch.tensor(overlap_rates, device=self.device, dtype=torch.float32).detach()
                 time_tensor = torch.tensor(cleaning_times_rel, device=self.device, dtype=torch.float32).detach()
                 
-                # Reward 계산
-                cov_rwd_max = 0.5 # Coverage reward의 max 수치
-                cov_thres = 0.9 # Coverage를 주로 고려하는 coverage 수치 임계값
-                above_cov_thres_mask = (cov_tensor >= cov_thres).float()
-                cov_reward = torch.clamp(cov_tensor, min=0.0, max=cov_thres) * (cov_rwd_max/cov_thres) # Coverage가 cov_thres 미만일 때는 coverage만 reward에 적용. 만점은 cov_rwd_max 
-
-                overlap_scale = 1.0 - (overlap_tensor ** 2)
-                overlap_scale = torch.clamp(overlap_scale, min=-1.0)
-                overlap_reward = overlap_scale * (1.0 - cov_rwd_max) # Overlap은 coverage가 cov_thres 이상일 때만 고려. 만점은 1.0 - cov_rwd_max
-                
-                time_penalty = torch.clamp((time_tensor - 1.0) * 0.25, min=0.0, max=0.1) # 직진 경로 시간과 비교해서 얼마나 차이나는지에 따라 penalty 부여. 직진보다 다섯 배 더 걸릴 때 최대 감점.
-                path_reward = cov_reward + (overlap_reward - time_penalty) * above_cov_thres_mask
+                path_reward = self._calculate_path_reward(
+                    cov_tensor, overlap_tensor, time_tensor, curr_map_size
+                )
                 
                 advantage = (path_reward - path_reward.mean()).detach() # Shape: (B,)
                 ##############################################################
@@ -1137,9 +1179,6 @@ class LSTMAgent:
                 if self.args.use_wandb: # 혹은 관련 조건문
                     self.wandb_run.log(log_dict, step=self.total_steps)
                 
-                # 훈련되고 있음을 확인하기 위해 steps 현황을 출력
-                # print(f"[Step {self.total_steps+1:04d}] Path reward (Mean): {log_dict['train/path_reward_mean']:.3f}")
-                
                 # Steps: Parameter update 횟수
                 steps += 1
                 self.total_steps += 1
@@ -1149,15 +1188,9 @@ class LSTMAgent:
             
             # 좋은 경로 생성에 성공했거나 episode 횟수가 한계치를 넘어서면 map size를 바꿈
             change_map_size = False
-            if not no_more_map_size: # 변경할 map_size가 더 없는 경우에는 change_map_size를 무조건 False로 설정되도록 함.
-                if path_reward_mean >= self.train_cfg.path_reward_thres:
-                    change_map_size = True
-                    print(f"[Map Scale Up] Achieved path reward {path_reward_mean:.3f} at map size {curr_map_size}. "
-                          f"Exceeded the threshold {self.train_cfg.path_reward_thres}.")
-                elif self.eps_num_per_map_size > self.train_cfg.max_eps_per_map_size:
-                    change_map_size = True
-                    print(f"[Map Scale Up] Reached maximum episodes ({self.eps_num_per_map_size}) for map size {curr_map_size}.")
-            
+            if not no_more_map_size and self.eps_num_per_map_size > self.train_cfg.max_eps_per_map_size: # 변경할 map_size가 더 없는 경우에는 change_map_size를 무조건 False로 설정되도록 함.
+                change_map_size = True
+                print(f"[Map Scale Up] Reached maximum episodes ({self.eps_num_per_map_size}) for map size {curr_map_size}.")
             
             # 한 map에 대해서 훈련이 끝나면 checkpoint 저장 및 validation 수행
 
@@ -1172,10 +1205,11 @@ class LSTMAgent:
             # Validation 수행
             if episode % self.train_cfg.valid_freq == 0:
                 print("Validation...")
-                valid_path_reward_mean = self._validation(episode, curr_map_size)
+                start_mode = "corner" if curr_map_size == "Cropped" else "edge"
+                valid_path_reward_mean = self._validation(episode, curr_map_size, start_mode)
                 if valid_path_reward_mean >= self.train_cfg.path_reward_thres:
                     change_map_size = True
-                    print(f"[Map Scale Up] Achieved path reward {path_reward_mean:.3f} at map size {curr_map_size} on validation. "
+                    print(f"[Map Scale Up] Achieved path reward {valid_path_reward_mean:.3f} at map size {curr_map_size} on validation. "
                           f"Exceeded the threshold {self.train_cfg.path_reward_thres}.")
 
                 
@@ -1207,6 +1241,8 @@ class LSTMAgent:
 
         total_coverage = []; total_overlap_percent = []; total_cleaning_time = []
         computation_time = []
+        map_result_rows: list[dict] = []
+        result_dir = self._get_test_result_dir()
 
         sorted_target_cov = sorted(target_cov_list)
 
@@ -1266,7 +1302,7 @@ class LSTMAgent:
                 map_config = MapConfigSchema(file_path=map_path)
                 map_name = os.path.basename(map_path)
 
-                reset_info = self.test_env.reset(seed=None, mode='test', map_config=map_config)
+                reset_info = self.test_env.reset(seed=None, start_mode='corner', map_config=map_config)
                 if not reset_info:
                     print(f"Can't reset map file: {os.path.basename(self.test_maps[level][map_idx])}")
                     continue
@@ -1276,7 +1312,7 @@ class LSTMAgent:
                 for start_idx in range(self.args.test_start_point_num):
                 
                     if start_idx != 0:
-                        obs, _ = self.test_env.reset(mode='test')  # 시작 지점 초기화
+                        obs, _ = self.test_env.reset(start_mode='corner')  # 시작 지점 초기화
                     
                     start_time = time.time()
                     cur_coverage, cur_overlap_percent, cur_cleaning_time, target_cov_time_dict = self._test_one_map(
@@ -1311,6 +1347,15 @@ class LSTMAgent:
                         cand_info = f"Map name: {os.path.basename(map_path)} | Final Cov: {cur_coverage*100:.1f}%, Overlap: {cur_overlap_percent:.1f}%, Time: {cur_cleaning_time:.1f}m"
 
                         level_records.append((cand_metrics, cand_img, cand_info))
+
+                        map_result_rows.append({
+                            'coverage': cur_coverage,
+                            'time': cur_cleaning_time,
+                            'overlap': cur_overlap_percent,
+                            'target_metrics': target_cov_time_dict,
+                            'map_name': map_name,
+                        })
+                        self._save_test_path_image(result_dir, map_name, cand_img)
 
             # Best / Median / Worst 경로 선별
             if len(level_records) > 0:
@@ -1425,6 +1470,14 @@ class LSTMAgent:
         print(f"Median computation time per map: {median_comp_time:.2f} s")
         print("="*65)
 
+        result_file_path = self._save_test_result_workbook(
+            result_dir,
+            map_result_rows,
+            sorted_target_cov,
+            target_cov_results,
+        )
+        print(f"Test results saved to: {result_file_path}")
+
         # =========================================================================
         # Level별 경로 시각화 출력
         # =========================================================================
@@ -1447,6 +1500,132 @@ class LSTMAgent:
                     for idx, (metrics, img, info_str) in enumerate(records, 1):
                         print(f"    #{idx} - {info_str}")
                         display_image(img)
+
+    def _get_test_result_dir(self) -> str:
+        """Return the model-specific directory used for persisted test results."""
+        model_file_name = os.path.basename(self.args.model_name)
+        model_name, _ = os.path.splitext(model_file_name)
+        result_dir = os.path.join(RESULT_SAVE_DIR, model_name)
+        os.makedirs(result_dir, exist_ok=True)
+        return result_dir
+
+    @staticmethod
+    def _save_test_path_image(result_dir: str, map_name: str, rgb_image: np.ndarray) -> None:
+        """Save the environment's RGB trajectory image as ``<map>_path.png``."""
+        map_stem, _ = os.path.splitext(map_name)
+        image_path = os.path.join(result_dir, f"{map_stem}_path.png")
+        bgr_image = cv2.cvtColor(rgb_image, cv2.COLOR_RGB2BGR)
+        if not cv2.imwrite(image_path, bgr_image):
+            raise IOError(f"Failed to save test path image: {image_path}")
+
+    def _save_test_result_workbook(
+        self,
+        result_dir: str,
+        map_result_rows: list[dict],
+        target_cov_list: list[float],
+        target_cov_results: dict[float, dict[int, dict[str, int | list[float]]]],
+    ) -> str:
+        """Write per-map metrics and level/target summaries to one Excel file."""
+
+        workbook = Workbook()
+        map_sheet = workbook.active
+        map_sheet.title = "map_results"
+
+        map_headers = ["No.", "Coverage(%)", "Time(min)", "Overlap(%)"]
+        for target_cov in target_cov_list:
+            target_name = f"Coverage {target_cov * 100:g}%"
+            map_headers.extend([
+                f"{target_name} reached",
+                f"{target_name} time",
+                f"{target_name} overlap",
+            ])
+        map_headers.append("Map name")
+        map_sheet.append(map_headers)
+
+        for index, row_data in enumerate(map_result_rows, start=1):
+            row = [
+                index,
+                row_data['coverage'] * 100,
+                row_data['time'],
+                row_data['overlap'],
+            ]
+            target_metrics = row_data['target_metrics']
+            for target_cov in target_cov_list:
+                target_overlap, target_time = target_metrics.get(target_cov, (-1.0, -1.0))
+                reached = target_time >= 0.0
+                row.extend([
+                    "TRUE" if reached else "FALSE",
+                    target_time if reached else None,
+                    target_overlap if reached else None,
+                ])
+            row.append(row_data['map_name'])
+            map_sheet.append(row)
+
+        summary_sheet = workbook.create_sheet("summary")
+        summary_sheet.append([
+            "Level",
+            "Target coverage",
+            "Success rate",
+            "Time mean (median, std)",
+            "Overlap mean (median, std)",
+        ])
+        levels = sorted({
+            level
+            for target_data in target_cov_results.values()
+            for level in target_data
+        })
+        for level in levels:
+            for target_cov in target_cov_list:
+                level_data = target_cov_results[target_cov][level]
+                total_count = int(level_data['total_count'])
+                success_count = int(level_data['success_count'])
+                success_rate = success_count / total_count if total_count else 0.0
+                times = level_data['cleaning_times']
+                overlaps = level_data['overlaps']
+                if success_count:
+                    time_text = self._format_summary_metric(times, "min")
+                    overlap_text = self._format_summary_metric(overlaps, "%")
+                else:
+                    time_text = "N/A"
+                    overlap_text = "N/A"
+                summary_sheet.append([
+                    level,
+                    target_cov,
+                    success_rate,
+                    time_text,
+                    overlap_text,
+                ])
+
+        for sheet in (map_sheet, summary_sheet):
+            for cell in sheet[1]:
+                cell.font = Font(bold=True)
+                cell.alignment = Alignment(horizontal="center")
+            sheet.freeze_panes = "A2"
+            sheet.auto_filter.ref = sheet.dimensions
+            for column_cells in sheet.columns:
+                column_letter = column_cells[0].column_letter
+                max_length = max(len(str(cell.value or "")) for cell in column_cells)
+                sheet.column_dimensions[column_letter].width = min(max_length + 2, 40)
+
+        for row in map_sheet.iter_rows(min_row=2, min_col=2):
+            for cell in row:
+                if isinstance(cell.value, (int, float)):
+                    cell.number_format = "0.00"
+        for row in summary_sheet.iter_rows(min_row=2, min_col=2, max_col=3):
+            row[1].number_format = "0.00"
+            row[0].number_format = "0"
+
+        workbook_path = os.path.join(result_dir, "test_results.xlsx")
+        workbook.save(workbook_path)
+        return workbook_path
+
+    @staticmethod
+    def _format_summary_metric(values: list[float], unit: str) -> str:
+        values_array = np.asarray(values, dtype=float)
+        return (
+            f"{np.mean(values_array):.2f} "
+            f"({np.median(values_array):.2f}, {np.std(values_array):.2f}) {unit}"
+        )
 
     def see_weight(self):
 
@@ -1558,3 +1737,17 @@ class LSTMAgent:
 
         plt.tight_layout()
         plt.show()
+
+    def test_one_map_for_debug(self, map_rel_path: str):
+
+        map_full_path = os.path.join(self.args.map_save_dir, map_rel_path)
+        map_config = MapConfigSchema(file_path=map_full_path)
+        map_name = os.path.basename(map_full_path)
+
+        reset_info = self.test_env.reset(seed=None, start_mode='edge', map_config=map_config)
+        if not reset_info:
+            print(f"Can't reset map file: {map_name}")
+            return
+        obs, _ = reset_info
+        _, _, _, _ = self._test_one_map(self.test_env, obs, debug=True) 
+            

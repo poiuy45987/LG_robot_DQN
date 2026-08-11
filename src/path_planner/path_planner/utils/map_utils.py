@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import math
 import numpy as np
 import cv2
@@ -161,6 +163,124 @@ def compute_coverable_cells_from_reachable(obstacles: np.ndarray, reachable: np.
     # never count obstacle cells
     coverable &= (obstacles == 0).astype(np.uint8)
     return coverable
+
+
+@dataclass
+class MapStartAnalysis:
+    """A valid robot start and the map layers derived while selecting it."""
+
+    start_pos: tuple[float, float]
+    collision_map: np.ndarray
+    reachable: np.ndarray
+    coverable: np.ndarray
+    coverable_area_rate: float
+
+
+def analyze_map_startability(
+    obstacles: np.ndarray,
+    robot_size: int,
+    *,
+    start_mode: str,
+    rng: np.random.Generator,
+    min_coverable_area_rate: float = 0.5,
+    eff_size: BoundingBox | None = None,
+    collision_map: np.ndarray | None = None,
+) -> MapStartAnalysis | None:
+    """Select a usable start position and compute its static map layers once.
+
+    ``start_mode`` is ``"edge"`` for a randomly selected edge position and
+    ``"corner"`` for the first usable corner in a deterministic order.  A map
+    is usable only when the selected start has at least
+    ``min_coverable_area_rate`` of its effective area coverable.
+    """
+    if not 0.0 <= min_coverable_area_rate <= 1.0:
+        raise ValueError("min_coverable_area_rate must be between 0 and 1.")
+
+    obstacles = (obstacles != 0).astype(np.uint8, copy=False)
+    H, W = obstacles.shape
+    if eff_size is None:
+        eff_size = get_eff_size_from_obs_map(obstacles)
+
+    x_min, x_max = eff_size.x_min, eff_size.x_max
+    y_min, y_max = eff_size.y_min, eff_size.y_max
+    if not (0 <= x_min <= x_max < W and 0 <= y_min <= y_max < H):
+        raise ValueError("eff_size must be an inclusive bounding box inside obstacles.")
+
+    robot_half_size = robot_size // 2
+    min_x, max_x = x_min + robot_half_size, x_max - robot_half_size
+    min_y, max_y = y_min + robot_half_size, y_max - robot_half_size
+    if min_x > max_x or min_y > max_y:
+        return None
+
+    robot_mask = make_robot_mask(robot_size)
+    y_idx, x_idx = np.nonzero(robot_mask)
+    robot_mask_offsets = np.column_stack([
+        x_idx - robot_half_size,
+        y_idx - robot_half_size,
+    ]).astype(np.int32)
+    if collision_map is None:
+        collision_map = dilation_obstacles(obstacles, robot_mask)
+    elif collision_map.shape != obstacles.shape:
+        raise ValueError("collision_map must have the same shape as obstacles.")
+    total_area = (x_max - x_min + 1) * (y_max - y_min + 1)
+
+    if start_mode == "edge":
+        x_range = np.arange(min_x, max_x + 1)
+        y_range = np.arange(min_y + 1, max_y)
+        candidates = np.concatenate([
+            np.stack([x_range, np.full_like(x_range, max_y)], axis=1),
+            np.stack([x_range, np.full_like(x_range, min_y)], axis=1),
+            np.stack([np.full_like(y_range, min_x), y_range], axis=1),
+            np.stack([np.full_like(y_range, max_x), y_range], axis=1),
+        ])
+        # A rejected connected component cannot become valid at another one
+        # of its edge positions, so evaluate each component only once.
+        remaining = candidates[collision_map[candidates[:, 1], candidates[:, 0]] == 0]
+        while len(remaining) > 0:
+            chosen_idx = int(rng.integers(len(remaining)))
+            start_x, start_y = remaining[chosen_idx]
+            reachable = compute_reachable_centers(collision_map, start_x, start_y)
+            coverable = compute_coverable_cells_from_reachable(
+                obstacles, reachable, robot_mask_offsets
+            )
+            coverable_area_rate = float(coverable.sum(dtype=np.int64) / total_area)
+            if coverable_area_rate >= min_coverable_area_rate:
+                return MapStartAnalysis(
+                    start_pos=(float(start_x), float(start_y)),
+                    collision_map=collision_map,
+                    reachable=reachable,
+                    coverable=coverable,
+                    coverable_area_rate=coverable_area_rate,
+                )
+            remaining = remaining[reachable[remaining[:, 1], remaining[:, 0]] == 0]
+
+    elif start_mode == "corner":
+        candidates = (
+            (min_x, max_y),
+            (max_x, max_y),
+            (max_x, min_y),
+            (min_x, min_y),
+        )
+        for start_x, start_y in candidates:
+            if collision_map[start_y, start_x]:
+                continue
+            reachable = compute_reachable_centers(collision_map, start_x, start_y)
+            coverable = compute_coverable_cells_from_reachable(
+                obstacles, reachable, robot_mask_offsets
+            )
+            coverable_area_rate = float(coverable.sum(dtype=np.int64) / total_area)
+            if coverable_area_rate >= min_coverable_area_rate:
+                return MapStartAnalysis(
+                    start_pos=(float(start_x), float(start_y)),
+                    collision_map=collision_map,
+                    reachable=reachable,
+                    coverable=coverable,
+                    coverable_area_rate=coverable_area_rate,
+                )
+    else:
+        raise ValueError('start_mode must be "edge" or "corner".')
+
+    return None
 
 
 def crop_raw_patch(arr: np.ndarray, cx: float, cy: float, crop_radius: int, value: int | list | tuple = 0) -> np.ndarray:

@@ -121,11 +121,12 @@ class CoverageEnv(gym.Env):
 
         # self.cleaned_segment: np.ndarray | None = None
     
-    def reset(self, *, seed: int=None, mode: str='train', map_config: MapConfigSchema | None = None) -> tuple[dict, dict] | None:
+    def reset(self, *, seed: int=None, start_mode: str='corner', map_config: MapConfigSchema | None = None) -> tuple[dict, dict] | None:
         """
 
         Args:
             seed (int, optional): Random generator seed. Defaults to None.
+            start_mode (str, optional): 시작 지점을 edge 중 하나로 할지, corner로 강제할지 결정. Defaults to 'corner'
             map_config (MapConfigSchema, optional): None이면 map을 새로 생성하지 않고 시작점만 초기화. Defaults to None.
 
         Returns:
@@ -135,7 +136,7 @@ class CoverageEnv(gym.Env):
 
         # 새로운 map 생성 또는 시작점만 바꾸고 map 초기화
         for _ in range(100):
-            self.pos = self.map_layers.reset(map_config=map_config, mode=mode, env_rng=self.env_rng)
+            self.pos = self.map_layers.reset(map_config=map_config, start_mode=start_mode, env_rng=self.env_rng)
             
             # 시작 지점이 정해지면 이후 step 진행
             if self.pos is not None:
@@ -156,7 +157,7 @@ class CoverageEnv(gym.Env):
         self.H = self.map_layers.map_info.H
         self.W = self.map_layers.map_info.W
         eff_size = self.map_layers.map_info.eff_size
-        self.dir = self._get_init_dir(self.pos, eff_size, mode)
+        self.dir = self._get_init_dir(self.pos, eff_size, start_mode)
 
         # self.cleaned_segment = np.zeros((self.H, self.W), dtype=np.uint8)
         
@@ -262,6 +263,7 @@ class CoverageEnv(gym.Env):
         
         if collision:
             print("Collide!")
+            self.show_visualized_img(img_choice='traj')
             terminated = True
         elif cur_coverage >= self.cfg.target_coverage:
             terminated = True
@@ -609,7 +611,7 @@ class CoverageEnv(gym.Env):
         return env_history
 
 
-    def _get_init_dir(self, init_pos: tuple[int, int], eff_size: BoundingBox, mode: str='train'):
+    def _get_init_dir(self, init_pos: tuple[int, int], eff_size: BoundingBox, start_mode: str='corner'):
         """
         초기 위치에서 로봇이 바라보는 방향 설정: 로봇이 붙어 있는 벽과 반대 방향을 바라보도록 설정
         """
@@ -634,10 +636,12 @@ class CoverageEnv(gym.Env):
         # 가장 가까운 벽들의 '반대 방향' 세그먼트들 추출
         first_candidate_dir = opposite_dir_map[closest_wall_indices] * ANG_SEG_NUM
 
-        if mode == 'train':
+        if start_mode == 'edge':
             return int(self.env_rng.choice(first_candidate_dir))
-        else:
+        elif start_mode == 'corner':
             return int(first_candidate_dir[0])
+        else:
+            raise ValueError(f"Invalid start_mode: {start_mode}. Must be \'edge\' or \'corner\'.")
 
 
     def _get_all_dir_indices(self, dir: int = None) -> np.ndarray:

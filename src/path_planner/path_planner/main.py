@@ -21,7 +21,8 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=DEFAULT_SEED, help=f'Set seed: (Default: {DEFAULT_SEED})')
     
     # Mode 설정, tensorboard와 wandb의 사용 여부를 결정
-    parser.add_argument('--mode', choices=['train', 'test', 'see_map', 'see_weight'], default='train', help='Mode: train, test, see_map, see_weight (see_map: seed로 생성한 map을 보는 기능 / see_weight: 훈련된 model의 parameter 중 일부를 시각화 하는 기능)')
+    parser.add_argument('--mode', choices=['train', 'test', 'see_map', 'see_weight', 'test_for_debug'], default='train', help='Mode: train, test, see_map, see_weight, test_for_debug (see_map: seed로 생성한 map을 보는 기능 / see_weight: 훈련된 model의 parameter 중 일부를 시각화 하는 기능 / test_for_debug: Debugging을 위해서 map 하나를 test하는 기능)')
+    parser.add_argument('--map_rel_path', type=str, default='test/test_map_L1_0000.npy', help='\'test_for_debug\' mode를 사용할 때, 테스트할 map의 경로')
     parser.add_argument('--use_wandb', action='store_true', help='wandb 사용')
     parser.add_argument('--use_tb', action='store_true', help='tb 사용')
     parser.add_argument('--use_vessl', action='store_true', help='vessl 사용')
@@ -73,7 +74,7 @@ def parse_args():
     # Validation 주기 및 checkpoint 저장 주기 설정, Validation 설정
     train_set_group.add_argument('--valid_freq', type=int, help='Validation을 수행하는 주기 (episodes) (Default: 100)')
     train_set_group.add_argument('--ckp_freq', type=int, help='Checkpoint를 저장하는 주기 (episodes) (Default: 20)')
-    train_set_group.add_argument('--valid_map_num', type=int, help='Validation 시 사용할 map 수 (Default: 5)')
+    train_set_group.add_argument('--valid_map_num', type=int, default=5, help='Validation 시 사용할 map 수 (Default: 5)')
     train_set_group.add_argument('--valid_start_point_num', type=int, help='Validation 시 한 map당 테스트해볼 start_poit 수 (Default: 3)')
     # -------------------------
         
@@ -144,6 +145,8 @@ def main():
         visualize_test_map(seed=args.seed)
     elif args.mode == 'see_weight':
         lstm_agent.see_weight()
+    elif args.mode == 'test_for_debug':
+        lstm_agent.test_one_map_for_debug(map_rel_path=args.map_rel_path)
 
 if __name__ == "__main__":
     main()

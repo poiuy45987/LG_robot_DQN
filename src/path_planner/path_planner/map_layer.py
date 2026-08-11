@@ -78,7 +78,7 @@ class MapLayers():
         self.map_history: list[MapHistory] = []
 
 
-    def reset(self, map_config: MapConfigSchema=None, mode: str='train',
+    def reset(self, map_config: MapConfigSchema=None, start_mode: str='corner',
               env_rng: np.random.Generator=np.random.default_rng(DEFAULT_SEED)) -> tuple[int, int]:
         
         # Map을 새로 생성
@@ -103,13 +103,11 @@ class MapLayers():
                 W=obs_map.W,
                 eff_size=obs_map.eff_size
             )
-            
-            # Collision map과 mode map 생성
-            self.collision_map = dilation_obstacles(self.obstacles, self.robot_mask)
+            self.collision_map = None
             
         # 시작점 설정: 설정에 실패하면 None을 반환하여 다시 map을 만들도록 함.
         # 시작점 설정하면서 reachable map, coverable map 설정
-        pos = self._get_start_pos(env_rng, mode)
+        pos = self._get_start_pos(env_rng, start_mode)
         if pos is None:
             return None
         
@@ -249,7 +247,7 @@ class MapLayers():
         self.robot_area = int(self.robot_mask.sum(dtype=np.int64))
 
     
-    def _get_start_pos(self, env_rng: np.random.Generator, mode='train') -> tuple[int, int] | None:
+    def _get_start_pos(self, env_rng: np.random.Generator, start_mode: str='corner') -> tuple[int, int] | None:
         """
         로봇의 청소 시작 지점을 선정하는 method. 가장자리에서 시작하도록 함.
         
@@ -264,77 +262,25 @@ class MapLayers():
             tuple[int, int]: 선정된 시작 지점 출력
         """
 
-        # 가장자리 좌표를 얻음
-        map_x_min = self.map_info.eff_size.x_min
-        map_x_max = self.map_info.eff_size.x_max
-        map_y_min = self.map_info.eff_size.y_min
-        map_y_max = self.map_info.eff_size.y_max
-        total_area = (map_x_max-map_x_min+1)*(map_y_max-map_y_min+1)
-        
-        min_x, max_x = map_x_min+self.robot_half_size, map_x_max-self.robot_half_size
-        min_y, max_y = map_y_min+self.robot_half_size, map_y_max-self.robot_half_size
+        if start_mode not in ["edge", "corner"]:
+            raise ValueError(f"Invalid start mode: {start_mode}. Must be \'edge\' or \'corner\'.")
 
-        if mode == 'train': # Train 시, 작은 map에서도 로봇 배치가 어느정도 성공적으로 나오도록 하기 위해서 가장자리 부분에 자리를 설정.
-        
-            x_range = np.arange(min_x, max_x+1)
-            y_range = np.arange(min_y+1, max_y)
-            top = np.stack([np.full_like(x_range, max_y), x_range], axis=1)
-            bottom = np.stack([np.full_like(x_range, min_y), x_range], axis=1)
-            left = np.stack([y_range, np.full_like(y_range, min_x)], axis=1)
-            right = np.stack([y_range, np.full_like(y_range, max_x)], axis=1)
-            
-            edge_pos = np.concatenate([top, bottom, left, right], axis=0)
-            
-            # 가장자리 좌표 중에 collision이 일어나지 않는 좌표를 선별
-            edge_collision_value = self.collision_map[edge_pos[:, 0], edge_pos[:, 1]]
-            valid_indices = np.where(edge_collision_value == 0)[0]
-            
-            # coverable_area_rate이 50% 이상인 위치만 선택
-            coverable_area_rate = 0.0
-            start_x = None; start_y = None # 시작 위치
-            
-            for _ in range(100):
-            
-                if len(valid_indices) > 0:
-                    chosen_idx = env_rng.choice(valid_indices)
-                    start_x = edge_pos[chosen_idx, 1]; start_y = edge_pos[chosen_idx, 0]
-                else:
-                    return None
-
-                self.reachable = compute_reachable_centers(self.collision_map, start_x, start_y)
-                self.coverable = compute_coverable_cells_from_reachable(self.obstacles, self.reachable, self.robot_mask_offsets)
-                self.total_coverable_area = int(self.coverable.sum(dtype=np.int64)) # Cover할 수 있는 영역의 넓이
-                coverable_area_rate = self.total_coverable_area / total_area # coverable_area_rate이 너무 낮으면 맵을 재생성해야 함.
-                if coverable_area_rate >= 0.5:
-                    return (float(start_x), float(start_y))
-                
-            else:
-                return None
-
-        else: # Test 시, 시작점 통일을 위해 구석 자리에만 로봇을 배치
-
-            # (x, y) 후보군 설정
-            test_candidates = [
-                (min_x, max_y),  # 1. 좌상단 (Top-Left)
-                (max_x, max_y),  # 2. 우상단 (Top-Right)
-                (max_x, min_y),  # 3. 우하단 (Bottom-Right)
-                (min_x, min_y),  # 4. 좌하단 (Bottom-Left)
-            ]
-
-            for start_x, start_y in test_candidates:
-
-                # Collision 검사 (충돌이 없어야 함)
-                if self.collision_map[start_y, start_x] == 0:
-                    self.reachable = compute_reachable_centers(self.collision_map, start_x, start_y)
-                    self.coverable = compute_coverable_cells_from_reachable(self.obstacles, self.reachable, self.robot_mask_offsets)
-                    self.total_coverable_area = int(self.coverable.sum(dtype=np.int64))
-                    coverable_area_rate = self.total_coverable_area / total_area
-
-                    if coverable_area_rate >= 0.5:
-                        return (float(start_x), float(start_y))
-
-            # 4개 코너 모두 실패 시
+        analysis = analyze_map_startability(
+            self.obstacles,
+            self.robot_size,
+            start_mode=start_mode,
+            rng=env_rng,
+            eff_size=self.map_info.eff_size,
+            collision_map=self.collision_map,
+        )
+        if analysis is None:
             return None
+
+        self.collision_map = analysis.collision_map
+        self.reachable = analysis.reachable
+        self.coverable = analysis.coverable
+        self.total_coverable_area = int(self.coverable.sum(dtype=np.int64))
+        return analysis.start_pos
 
     
     

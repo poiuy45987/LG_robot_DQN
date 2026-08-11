@@ -1,4 +1,3 @@
-import numpy as np
 import torch
 
 def get_device_info(device: torch.device):
@@ -30,7 +29,8 @@ def set_torch_seed(seed: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def print_model_info(model):
+def print_model_info(model: torch.nn.Module):
+    
     # 1. 전체 파라미터 수 및 학습 가능한(Trainable) 파라미터 수 계산
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)

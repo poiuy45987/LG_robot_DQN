@@ -6,6 +6,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 import os
 import re
 import zipfile
+from tqdm.auto import tqdm
 
 from path_planner.config import (
     MapConfig, 
@@ -23,7 +24,8 @@ from path_planner.utils.map_utils import (
     get_rect_indices_for_big_rect, 
     get_rect_indices_for_small_rect,
     get_leg_indices,
-    get_circle_indices
+    get_circle_indices,
+    analyze_map_startability,
 )
 from path_planner.utils.visualizer import get_map_img, display_image
 
@@ -296,17 +298,20 @@ class MapGenerator:
             level=level,
             H=H,
             W=W,
-            eff_size=BoundingBox(x_min=0, x_max=W, y_min=0, y_max=H)
+            eff_size=BoundingBox(x_min=0, x_max=W-1, y_min=0, y_max=H-1)
         )
 
 def generate_multiple_maps(map_folder_name: str, 
                            robot_diameter: int,
                            mode: str = "test",
+                           start_mode: str = "corner",
                            map_num_per_cond: int = 10,
                            seed: int = DEFAULT_SEED, 
                            visualize: bool = False, 
                            map_size: tuple[int, int] | None = None,
-                           level_range: tuple[int, int] = (1, 4)):
+                           level_range: tuple[int, int] = (1, 4),
+                           min_coverable_area_rate: float = 0.5,
+                           max_generation_attempts: int = 1000):
     """
     Test map을 여러 개 얻는 method
 
@@ -317,6 +322,8 @@ def generate_multiple_maps(map_folder_name: str,
         visualize (bool, optional): Map 생성 후 시각화할지 여부. Defaults to False.
         map_size (tuple[float, float], optional): Map의 pixel 단위 크기를 (H, W)로 설정. None이면 config에 정의된 map 크기로 설정 후 crop이 진행됨.
         level_range (tuple[int, int], optional): Map 난이도 조건을 (min_level, max_level) 형태로 입력. Defaults to (1, 3).
+        min_coverable_area_rate (float): 시작점에서 보장할 최소 청소 가능 영역 비율.
+        max_generation_attempts (int): map 하나를 만들기 위한 최대 재생성 횟수.
     """
     
     assert mode in ["train", "valid", "test"]
@@ -346,13 +353,29 @@ def generate_multiple_maps(map_folder_name: str,
     # Map 생성 및 저장
     min_level, max_level = level_range
     for level in range(min_level, max_level + 1):
-        for map_id in range(map_num_per_cond):
-            
-            # Map에 장애물 배치
-            obs_map = map_generator.generate_house_like_obstacles(robot_diameter=robot_diameter, 
-                                                                  level=level, 
-                                                                  map_size=map_size,
-                                                                  visualize=visualize)
+        for map_id in tqdm(range(map_num_per_cond), desc=f"    Generating level {level} maps", leave=True):
+            for _ in range(max_generation_attempts):
+                obs_map = map_generator.generate_house_like_obstacles(
+                    robot_diameter=robot_diameter,
+                    level=level,
+                    map_size=map_size,
+                    visualize=visualize,
+                )
+                analysis = analyze_map_startability(
+                    obs_map.obs_map,
+                    robot_diameter,
+                    start_mode=start_mode,
+                    rng=rng,
+                    min_coverable_area_rate=min_coverable_area_rate,
+                    eff_size=obs_map.eff_size,
+                )
+                if analysis is not None:
+                    break
+            else:
+                raise RuntimeError(
+                    f"Failed to generate a valid level-{level} map after "
+                    f"{max_generation_attempts} attempts."
+                )
             
             # Map file, png file 이름 설정
             H, W = obs_map.obs_map.shape

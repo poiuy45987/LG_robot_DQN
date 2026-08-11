@@ -21,3 +21,4 @@ wandb/
 
 *.egg-info/
 lgsim.tar.gz
+result/

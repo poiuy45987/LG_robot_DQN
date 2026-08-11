@@ -2,11 +2,11 @@ frozendict
 gymnasium
 ipython
 matplotlib
-numpy<2.0
+numpy
+openpyxl
 opencv-python-headless
 Pillow
 pytz
 torch
 tqdm
 wandb
-tensorboard

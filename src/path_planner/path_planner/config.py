@@ -13,6 +13,7 @@ LOCAL_VIEW_DIM = 51
 MAP_SAVE_DIR = os.path.normpath('src/path_planner/path_planner/maps')
 MODEL_SAVE_DIR = os.path.normpath('src/path_planner/path_planner/models')
 TB_SAVE_DIR = os.path.normpath('src/path_planner/path_planner/models')
+RESULT_SAVE_DIR = os.path.normpath('src/path_planner/path_planner/result')
 
 TRAIN_MAP_FILE_FORMAT = "{mode}_map_level{level}_{map_id:04d}_{H}x{W}.npy"
 TRAIN_MAP_FILE_REGEX = r"(?P<mode>\w+)_map_level(?P<level>\d+)_(?P<map_id>\d+)_(?P<H>\d+)x(?P<W>\d+)"
