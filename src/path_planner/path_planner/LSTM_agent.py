@@ -538,7 +538,6 @@ class LSTMAgent:
                     torch.cuda.set_rng_state_all(gpu_rngs)
 
                 # Map 설정 iterator 상태 복원
-                # consumed_map_sizes = self.train_maps_sizes_iter_count + (1 if self._resume_curr_map_size is not None else 0)
                 for _ in range(self.train_maps_sizes_iter_count):
                     try:
                         next(self.train_maps_sizes_iter)
