@@ -162,7 +162,7 @@ class LSTMAgent:
                 print(f"  There are {len(test_map_npy_files_name)} map files for testing.")
             else:
                 raise FileNotFoundError(f"There is no test map is folder: {test_maps_dir}")
-                
+
             for file_name in test_map_npy_files_name:
                 full_path = os.path.join(test_maps_dir, file_name)
                 match = re.search(TEST_MAP_FILE_REGEX, file_name)
@@ -217,11 +217,28 @@ class LSTMAgent:
 
             self.train_envs = CustomGymVecEnv(env_fns, autoreset_mode="Disabled")
 
+            ########## Train map 설정 관련 iterator: Iterator, count, len이 세트 ##########
+            # Train할 map_size를 결정하는 iterator
+            self.train_maps_sizes_iter = iter(self.train_map_sizes)
+            self.train_maps_sizes_iter_count = 0
+
+            # Train할 map_size에서 어떤 level의 map을 뽑을지 결정하는 iterator
+            self.train_maps_level_iter = {}
+            self.train_maps_level_iter_len = {}
+            self.train_maps_level_iter_counts = {}
+            for map_size in self.train_map_sizes:
+                self.train_maps_level_iter[map_size] = cycle(range(1, 5)) # 각 map size마다 level iterator를 생성
+                self.train_maps_level_iter_len[map_size] = 4
+                self.train_maps_level_iter_counts[map_size] = 0
+
+            # args.use_train_maps가 참인 경우, self.train_maps에 iterator 저장
+            self.train_maps_iter_len = {}
+            self.train_maps_iter_counts = {}
             if args.use_train_maps:
                 # Training에 필요한 map 얻기
                 self.train_maps = self._get_map_dict(mode="train") # Key: Map size, Value: {Key=level: Value=[map file list]}
-                
-                
+            ##############################################################################
+
             # else:
             #     self.train_map_sizes = []
             #     window_size = self.env_cfg.map_cfg.window_size
@@ -232,12 +249,6 @@ class LSTMAgent:
 
             # Validation에 필요한 map 얻기
             self.valid_maps = self._get_map_dict(mode="valid") # Key: Map size, Value: {Key=level: Value=[map file list]}
-                
-            self.train_maps_sizes_iterator = iter(self.train_map_sizes) # 다음에 훈련시킬 map size를 결정하기 위한 iterator
-            self.train_maps_sizes_idx = 0 # Map size iterator 현황을 저장하기 위한 변수
-            self.train_maps_level_iterator = {} # Map의 level을 고루 변화시킬 때 사용하는 iterator
-            for folder in self.train_map_sizes:
-                self.train_maps_level_iterator[folder] = cycle(range(1, 5)) # 각 map size마다 level iterator를 생성
                     
             # Training에 필요한 변수 설정
             self.total_steps = 0            # Training을 진행한 steps 수 (Warmup 과정 포함)
@@ -249,6 +260,19 @@ class LSTMAgent:
             self.min_overlap_percent_mean = float('inf')   # Validation을 수행했을 때 가장 낮았던 overlap rate
             self.min_cleaning_time_mean = float('inf')  # Validation을 수행했을 때 가장 낮았던 cleaning time    
             self.best_traj_img = None                   # Validation을 수행했을 때 가장 coverage를 잘 했던 trajectory를 img로 저장 (RGB image)
+            # Validation reward scales differ by curriculum map size, so best
+            # checkpoints must be compared only within the same map size.
+            self.best_validation_by_map_size = {
+                map_size: {
+                    'path_reward': float('-inf'),
+                    'coverage': 0.0,
+                    'overlap_percent': float('inf'),
+                    'cleaning_time': float('inf'),
+                }
+                for map_size in self.train_map_sizes
+            }
+            # self._resume_curr_map_size = None
+            # self._resume_no_more_map_size = False
             
             # Training을 위한 난수 생성기의 seed 설정
             self.train_rng = np.random.default_rng(seed=args.seed)
@@ -265,7 +289,6 @@ class LSTMAgent:
                 raise ValueError(f"Unsupported optimizer type: {self.train_cfg.optimizer}")
 
             self.scheduler = CosineAnnealingLR(self.optimizer, T_max=self.train_cfg.scheduler_max_step, eta_min=1e-6)
-
 
         # Loading model
         self._load_model(args)
@@ -295,7 +318,7 @@ class LSTMAgent:
                     print(f"  Map size folder '{sub_folder_path}' does not exist.")
                     make_maps = True
                     break
-                
+
                 npy_files = glob.glob(os.path.join(sub_folder_path, "**", "*.npy"), recursive=True)
                 map_count = len(npy_files)
                 if map_count == 0:
@@ -347,6 +370,7 @@ class LSTMAgent:
     def _get_map_dict(self, mode: str="train"):
 
         map_dict = {}
+
         map_dir = os.path.join(self.map_save_dir, mode)
                         
         # 각 map의 path를 level, map size별로 나누어서 저장
@@ -372,6 +396,8 @@ class LSTMAgent:
                 for level in map_dict[folder].keys():
                     map_dict[folder][level].sort()
                     if mode == "train":
+                        self.train_maps_iter_len.setdefault(folder, {})[level] = len(map_dict[folder][level])
+                        self.train_maps_iter_counts.setdefault(folder, {})[level] = 0
                         map_dict[folder][level] = cycle(map_dict[folder][level])
 
         return map_dict
@@ -454,11 +480,12 @@ class LSTMAgent:
                 raise FileNotFoundError(f"Model file not found: {model_path}")
             data = torch.load(model_path, map_location=self.device, weights_only=False)
             self.policy_net.load_state_dict(data['model_state_dict'])
-            self.max_coverage_mean = data.get('max_coverage_mean', 0)
-            self.min_overlap_percent_mean = data.get('min_overlap_percent_mean', float('inf'))
-            self.min_cleaning_time_mean = data.get('min_cleaning_time_mean', float('inf'))
             
             if is_checkpoint: # Checkpoint를 사용하는 경우 optimizer와 step 수도 추가로 load
+                for map_size, valid_metric_dict in data.get('best_validation_by_map_size', {}).items():
+                    if map_size in self.best_validation_by_map_size:
+                        self.best_validation_by_map_size[map_size].update(valid_metric_dict)
+
                 # Optimizer loading
                 try:
                     self.optimizer.load_state_dict(data['optimizer_state_dict']) # Optimizer도 checkpoint와 똑같이 유지
@@ -473,9 +500,21 @@ class LSTMAgent:
               
                 # 추가적인 변수 loading
                 self.total_steps = data['total_steps']
-                self.train_maps_sizes_idx = data['train_maps_sizes_idx']
+
+                self.train_maps_sizes_iter_count = data.get('train_maps_sizes_iter_count', 0)
+                self.train_maps_level_iter_counts.update(data.get('train_maps_level_iter_counts', {}))
+                if args.use_train_maps:
+                    for map_size, counts in data.get('train_maps_iter_counts', {}).items():
+                        if map_size in self.train_maps_iter_counts:
+                            self.train_maps_iter_counts[map_size].update(counts)
+
                 self.start_episode = data['episode'] + 1
                 self.eps_num_per_map_size = data['eps_num_per_map_size']
+
+                best_traj_img_path = os.path.join(checkpoint_dir, args.best_traj_img_name)
+                if os.path.isfile(best_traj_img_path):
+                    img = cv2.imread(best_traj_img_path) # BGR image
+                    self.best_traj_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) # BGR -> RGB 변환
 
                 # seed 진행도 복원
                 for rng, state in zip(self.train_env_rngs, data['train_env_rng_states']):
@@ -497,30 +536,37 @@ class LSTMAgent:
                         for s in data['torch_gpu_rng_states']
                     ]
                     torch.cuda.set_rng_state_all(gpu_rngs)
-                
-                # map_size_iterator원래 형태로
-                if self.train_maps_sizes_idx > 0:
-                    for _ in range(self.train_maps_sizes_idx):
-                        try:
-                            next(self.train_maps_sizes_iterator)
-                        except StopIteration: # 마지막 map size인 경우, 이전에 설정한 map size를 그대로 사용
-                            pass
+
+                # Map 설정 iterator 상태 복원
+                # consumed_map_sizes = self.train_maps_sizes_iter_count + (1 if self._resume_curr_map_size is not None else 0)
+                for _ in range(self.train_maps_sizes_iter_count):
+                    try:
+                        next(self.train_maps_sizes_iter)
+                    except StopIteration:
+                        break
+
+                for map_size, count in self.train_maps_level_iter_counts.items():
+                    for _ in range(count % self.train_maps_level_iter_len[map_size]):
+                        next(self.train_maps_level_iter[map_size])
+
+                if self.train_cfg.use_train_maps:
+                    for map_size, count_dict in self.train_maps_iter_counts.items():
+                        for level, count in count_dict.items():
+                            map_len = self.train_maps_iter_len[map_size][level]
+                            for _ in range(count % map_len):
+                                next(self.train_maps[map_size][level])
+
+                # Config 확인
+                saved_env_cfg = data.get('env_config')
+                saved_train_cfg = data.get('train_config')
+                if saved_env_cfg is not None and saved_env_cfg != asdict(self.env_cfg):
+                    print('Warning: EnvConfig differs from checkpoint; exact resume is not guaranteed.')
+                if saved_train_cfg is not None and saved_train_cfg != asdict(self.train_cfg):
+                    print('Warning: TrainConfig differs from checkpoint; exact resume is not guaranteed.')
                 
                 print(f"Resumed training from episode {data['episode']}")
                 
-            # best_traj_img loading
-            traj_img_dir = checkpoint_dir
-            if args.pre_model_name:
-                pre_model_name_base, _ = os.path.splitext(args.pre_model_name) # 확장자 '.pth'를 제거한 model_name
-                traj_img_dir = os.path.join(model_dir, pre_model_name_base + "_checkpoints")
-            
-            best_traj_img_path = os.path.join(traj_img_dir, args.best_traj_img_name)
-            if os.path.isfile(best_traj_img_path):
-                img = cv2.imread(best_traj_img_path) # BGR image
-                self.best_traj_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB) # BGR -> RGB 변환
-                
         else:
-            
             test_model = os.path.join(model_dir, args.model_name)
             if not os.path.exists(test_model):
                 raise FileNotFoundError(f"Test model file not found: {test_model}")
@@ -540,9 +586,7 @@ class LSTMAgent:
         save_path = None
         save_data = {
             'model_state_dict': self.policy_net.state_dict(),
-            'max_coverage_mean': self.max_coverage_mean,
-            'min_overlap_percent_mean': self.min_overlap_percent_mean,
-            'min_cleaning_time_mean': self.min_cleaning_time_mean,
+            'best_validation_by_map_size': self.best_validation_by_map_size,
         }
 
         if mode == 'model': # model을 /models에 저장
@@ -564,8 +608,12 @@ class LSTMAgent:
                 'total_steps': self.total_steps,
                 'optimizer_state_dict': self.optimizer.state_dict(),
                 'scheduler_state_dict': self.scheduler.state_dict(),
-                'train_maps_sizes_idx': self.train_maps_sizes_idx,
+                'train_maps_sizes_iter_count': self.train_maps_sizes_iter_count,
+                'train_maps_level_iter_counts': self.train_maps_level_iter_counts,
+                'train_maps_iter_counts': self.train_maps_iter_counts,
                 'eps_num_per_map_size': self.eps_num_per_map_size,
+                'env_config': asdict(self.env_cfg),
+                'train_config': asdict(self.train_cfg),
 
                 # seed 진행도 저장
                 'train_env_rng_states': [rng.bit_generator.state for rng in self.train_env_rngs],
@@ -667,8 +715,7 @@ class LSTMAgent:
         self.policy_net.eval() # eval mode로 전환
         coverage = []; overlap_percent = []; cleaning_time = []
         path_reward = []
-        max_coverage = 0.0; min_overlap_percent = float('inf'); min_cleaning_time = float('inf')
-        coverage_threshold = 0.90; overlap_percent_gap = 0.10
+        best_single_path_reward = float('-inf')
         coverage_mean = 0.0; overlap_percent_mean = 0.0; cleaning_time_mean = 0.0
         best_traj_img = None # 가장 성능이 좋았던 map에서의 trajectory를 보여줌
         
@@ -712,28 +759,8 @@ class LSTMAgent:
                     cleaning_time.append(cur_cleaning_time)
                     path_reward.append(cur_path_reward)
 
-                    # Coverage를 어느 정도 달성한 경우, overlap_percent과 cleaning_time을 중심으로 best_traj의 후보로 고려
-                    if cur_coverage >= coverage_threshold:
-                        
-                        # max_coverage 최신화
-                        if max_coverage < cur_coverage:
-                            max_coverage = cur_coverage
-                        
-                        # Overlap 비율이 감소했을 때: best_traj의 후보로 고려
-                        if cur_overlap_percent < min_overlap_percent:
-                            min_overlap_percent = cur_overlap_percent
-                            min_cleaning_time = cur_cleaning_time
-                            best_traj_img = self.test_env.get_visualized_img()
-                        
-                        # Overlap 비율이 최소 overlap 비율과 크지 않을 경우, cleaning_time이 가장 빠른 trajectory를 선택
-                        elif cur_overlap_percent <= min_overlap_percent + overlap_percent_gap:
-                            if cur_cleaning_time < min_cleaning_time:
-                                min_cleaning_time = cur_cleaning_time
-                                best_traj_img = self.test_env.get_visualized_img() # best trajectory의 이미지 저장
-
-                    # Coverage 달성도가 미달인 경우, coverage가 높은 경로를 best_traj의 후보로 고려
-                    elif max_coverage < cur_coverage:
-                        max_coverage = cur_coverage
+                    if cur_path_reward > best_single_path_reward:
+                        best_single_path_reward = cur_path_reward
                         best_traj_img = self.test_env.get_visualized_img()
                     
         coverage_mean = np.mean(coverage) if coverage else 0.0
@@ -741,33 +768,24 @@ class LSTMAgent:
         cleaning_time_mean = np.mean(cleaning_time) if cleaning_time else 0.0
         path_reward_mean = np.mean(path_reward) if path_reward else 0.0
         
-        # 이전 model의 종합적 성능(Coverage, Overlap rate, Cleaning time 모두 고려)보다 더 좋으면 model을 저장
-        if coverage_mean >= coverage_threshold: # Coverage가 일정 수준 이상인 경우: Overlap, Cleaning time을 고려
-            
-            # self.max_coverage_mean 최신화
-            if coverage_mean > self.max_coverage_mean:
-                self.max_coverage_mean = coverage_mean
-            
-            # Overlap 비율이 감소했을 때: best_model의 후보로 고려   
-            if overlap_percent_mean < self.min_overlap_percent_mean:
-                self.min_overlap_percent_mean = overlap_percent_mean
-                self.min_cleaning_time_mean = cleaning_time_mean
-                if best_traj_img is not None:
-                    self.best_traj_img = best_traj_img
-                self._save_model(mode='model') # 성능이 가장 좋았던 model을 저장
-            
-            elif overlap_percent_mean <= self.min_overlap_percent_mean + overlap_percent_gap:
-                if cleaning_time_mean < self.min_cleaning_time_mean:
-                    self.min_cleaning_time_mean = cleaning_time_mean
-                    if best_traj_img is not None:
-                        self.best_traj_img = best_traj_img
-                    self._save_model(mode='model') # 성능이 가장 좋았던 model을 저장
-        
-        elif coverage_mean > self.max_coverage_mean:
-            self.max_coverage_mean = coverage_mean
+        curr_metrics = {
+            'path_reward': path_reward_mean,
+            'coverage': coverage_mean,
+            'overlap_percent': overlap_percent_mean,
+            'cleaning_time': cleaning_time_mean,
+        }
+        best_metrics = self.best_validation_by_map_size.setdefault(
+            curr_map_size,
+            {'path_reward': float('-inf'), 'coverage': 0.0,
+             'overlap_percent': float('inf'), 'cleaning_time': float('inf')},
+        )
+        saved_best_model = curr_metrics['path_reward'] > best_metrics['path_reward']
+        if saved_best_model:
+            self.best_validation_by_map_size[curr_map_size].update(curr_metrics)
             if best_traj_img is not None:
                 self.best_traj_img = best_traj_img
-            self._save_model(mode='model') # 성능이 가장 좋았던 model을 저장
+            self._save_model(mode='model')
+            print(f"[Model Saved] New best path reward achieved. Model saved! / Past best reward: {best_metrics['path_reward']}, Current best reward: {curr_metrics['path_reward']}")
         
         # Validation 결과를 wandb에 기록
         if self.wandb_run:
@@ -775,6 +793,7 @@ class LSTMAgent:
                                 'Validation/Overlap Rate Mean': overlap_percent_mean,
                                 'Validation/Cleaning Time Mean': cleaning_time_mean,
                                 'Validation/Path Reward Mean': path_reward_mean,
+                                'Validation/Best Model Saved': int(saved_best_model),
                                 'Validation/Best_path': wandb.Image(best_traj_img)}, step=self.total_steps)
         
         # Validation 결과 출력
@@ -961,9 +980,9 @@ class LSTMAgent:
         # Policy network를 train mode로 설정
         self.policy_net.train()        
 
-        no_more_map_size = False # 더 바꿀 map size가 없는 경우: map size 변경 logic을 건너뜀.
+        no_more_map_size = False
         try:
-            curr_map_size = next(self.train_maps_sizes_iterator)
+            curr_map_size = next(self.train_maps_sizes_iter)
         except StopIteration: # 마지막 map size인 경우, 이전에 설정한 map size를 그대로 사용
             no_more_map_size = True
             curr_map_size = self.train_map_sizes[-1]
@@ -975,15 +994,16 @@ class LSTMAgent:
 
             if curr_map_size == '40x40':
                 self.env_cfg.max_no_progress_steps = 30
-                self.env_cfg.max_no_progress_steps_final = 50
+                self.env_cfg.max_no_progress_steps_final = 10
                 self.train_cfg.path_reward_thres = 0.85
             elif curr_map_size == '80x80':
                 self.env_cfg.max_no_progress_steps = 45
-                self.env_cfg.max_no_progress_steps_final = 75
-                self.train_cfg.path_reward_thres = 0.80
+                self.env_cfg.max_no_progress_steps_final = 20
+                self.train_cfg.path_reward_thres = 0.75
             elif curr_map_size == 'Cropped':
                 self.env_cfg.max_no_progress_steps = 60
-                self.env_cfg.max_no_progress_steps_final = 100
+                self.env_cfg.max_no_progress_steps_final = 30
+                self.train_cfg.path_reward_thres = 0.75
 
             print(f"[Episode {episode}] Starting training...")
             eps_path_rwd_mean = 0 # Episode의 훈련 상태를 표시할 reward
@@ -995,9 +1015,11 @@ class LSTMAgent:
             for env_id in range(self.train_envs.num_envs):
                 reset_info = None
                 while not reset_info:
-                    level = next(self.train_maps_level_iterator[curr_map_size])
+                    level = next(self.train_maps_level_iter[curr_map_size])
+                    self.train_maps_level_iter_counts[curr_map_size] += 1
                     if self.train_cfg.use_train_maps:
                         map_file_path = next(self.train_maps[curr_map_size][level])
+                        self.train_maps_iter_counts[curr_map_size][level] += 1
                         map_config = MapConfigSchema(file_path=map_file_path)
                     else:
                         H = None; W = None
@@ -1196,11 +1218,6 @@ class LSTMAgent:
 
             # Episode 훈련 결과 출력
             print(f"\tEpisode reward: {eps_path_rwd_mean}")
-
-            # Checkpoint 저장
-            if episode % self.train_cfg.ckp_freq == 0:
-                checkpoint_info = {"episode": episode}
-                self._save_model(mode='checkpoint', info=checkpoint_info)
                 
             # Validation 수행
             if episode % self.train_cfg.valid_freq == 0:
@@ -1215,14 +1232,14 @@ class LSTMAgent:
                 
             if change_map_size:
                 try:
-                    curr_map_size = next(self.train_maps_sizes_iterator)
+                    curr_map_size = next(self.train_maps_sizes_iter)
+                    self.train_maps_sizes_iter_count += 1
                 except StopIteration: # 마지막 map size인 경우, 이전에 설정한 map size를 그대로 사용
                     print("[Map Scale Up] No more map sizes available. Maintaining the current size.")
                     curr_map_size = self.train_map_sizes[-1]
                     no_more_map_size = True
                 else:
                     print(f"[Map Scale Up] Successfully changed map size to {curr_map_size}.")
-                    self.train_maps_sizes_idx += 1
                     self.eps_num_per_map_size = 0
             
             # Map 기록 저장
@@ -1232,6 +1249,11 @@ class LSTMAgent:
                     self.wandb_run.log({"Visualization/Robot_path": wandb.Image(map_img)}, step=self.total_steps)
 
             self.scheduler.step()
+
+            # Checkpoint 저장
+            if episode % self.train_cfg.ckp_freq == 0:
+                checkpoint_info = {"episode": episode}
+                self._save_model(mode='checkpoint', info=checkpoint_info)
 
     def test(self, target_cov_list: list[float] = [0.85, 0.90, 0.95]):
 

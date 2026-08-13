@@ -215,8 +215,13 @@ class MapLayers():
     
     
     def collides(self, cx: float, cy: float) -> bool:
+        # This method is also used by the heuristic planner, which may query
+        # positions outside the effective map before update_map_layers does.
+        if not self._in_bounds_center(cx, cy):
+            return True
         cx, cy = float_to_int_coord(cx, cy)
-        return bool(self.collision_map[cy, cx])
+        # reachable is the component connected to the selected start point.
+        return bool(self.collision_map[cy, cx] or not self.reachable[cy, cx])
 
     
     def has_uncleaned_grid(self, cx: float, cy: float) -> bool:
