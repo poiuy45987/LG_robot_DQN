@@ -1032,11 +1032,10 @@ class LSTMAgent:
                 info_list.append(info)
             processed_obs = self._pre_process_obs(obs_list, local_view_dim=LOCAL_VIEW_DIM) # Map data를 resize, Observation data를 얻음
             
-            steps = 0 # Episode 내에서의 step 수
             new_maps = True
 
             # 고정된 map에 대해서 경로 생성 최대 횟수를 넘으면 다른 map으로 바꿈. (while문을 빠져나옴)
-            while steps < self.train_cfg.max_step_per_eps:
+            for steps in tqdm(range(self.train_cfg.max_step_per_eps), desc="Training steps", leave=False):
                 
                 # 1. Map 상태 reset: 
                 # Map을 방금 새로 생성한 경우, reset이 이미 일어났으므로 reset을 생략.
@@ -1105,6 +1104,14 @@ class LSTMAgent:
                     # Action 수행: 다음 obs 얻기
                     next_obs_list, rewards, terminateds, truncateds, info = self.train_envs.step(actions)
                     processed_obs = self._pre_process_obs(next_obs_list, local_view_dim=LOCAL_VIEW_DIM)
+                    if any(info['Collision']):
+                        env_id = np.where(info['Collision'])[0]
+                        print(action_probs[env_id])
+                        print(action_mask[env_id])
+                        print(masked_logits[env_id])
+                        print(actions[env_id])
+                        print()
+
                     
                     # 확률 미분 계산을 위해 log probability를 저장
                     selected_log_probs = dist.log_prob(actions_tensor)
@@ -1169,7 +1176,6 @@ class LSTMAgent:
                 
                 log_dict = {
                     "train/episode": episode,
-                    "train/step": steps,
                     "train/loss": loss.item(),
                     "train/grad_norm_raw": grad_norm_before.item() if isinstance(grad_norm_before, torch.Tensor) else grad_norm_before,
                     "train/entropy_mean": mean_entropy.item(), # 💡 수집된 평균 엔트로피
@@ -1202,7 +1208,6 @@ class LSTMAgent:
                     self.wandb_run.log(log_dict, step=self.total_steps)
                 
                 # Steps: Parameter update 횟수
-                steps += 1
                 self.total_steps += 1
                 
             # 주어진 map size에서 training한 episode 횟수 증가

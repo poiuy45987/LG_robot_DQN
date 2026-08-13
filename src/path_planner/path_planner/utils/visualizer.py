@@ -172,10 +172,14 @@ def draw_layer(map_layers: MapLayers, fig: Figure, pos: tuple[float, float], las
 
     # obstacles
     axes[0, 0].imshow(map_layers.obstacles, cmap='gray_r', origin='lower')
+    cx, cy = pos
+    axes[0, 0].plot(cx, cy, 'r.') # 로봇 위치를 빨간 점으로 표시
     axes[0, 0].set_title("Original Obstacles")
 
     # collision_map (Dilation 결과)
     axes[1, 0].imshow(map_layers.collision_map, cmap='gray_r', origin='lower')
+    cx, cy = pos
+    axes[1, 0].plot(cx, cy, 'r.') # 로봇 위치를 빨간 점으로 표시
     axes[1, 0].set_title("Collision Map (Dilation)")
 
     # cleaned
@@ -194,14 +198,20 @@ def draw_layer(map_layers: MapLayers, fig: Figure, pos: tuple[float, float], las
     
     # reachable
     axes[0, 2].imshow(map_layers.reachable, cmap='gray_r', origin='lower')
+    cx, cy = pos
+    axes[0, 2].plot(cx, cy, 'r.') # 로봇 위치를 빨간 점으로 표시
     axes[0, 2].set_title(f"Reachable grid")
     
     # coverable
     axes[1, 2].imshow(map_layers.coverable, cmap='gray', origin='lower')
+    cx, cy = pos
+    axes[1, 2].plot(cx, cy, 'r.') # 로봇 위치를 빨간 점으로 표시
     axes[1, 2].set_title(f"Coverable map")
 
     # Frontier
     axes[0, 3].imshow(map_layers.frontier, cmap='gray_r', origin='lower')
+    cx, cy = pos
+    axes[0, 3].plot(cx, cy, 'r.') # 로봇 위치를 빨간 점으로 표시
     axes[0, 3].set_title(f"Frontier map")
 
     axes[1, 3].axis('off')

@@ -264,6 +264,7 @@ class CoverageEnv(gym.Env):
         if collision:
             print("Collide!")
             self.show_visualized_img(img_choice='traj')
+            self.show_visualized_img(img_choice='layer')
             terminated = True
         elif cur_coverage >= self.cfg.target_coverage:
             terminated = True
@@ -431,7 +432,9 @@ class CoverageEnv(gym.Env):
         line_x_idx, line_y_idx = float_to_int_coord(line_x[valid], line_y[valid])
         
         # 5. 충돌 검사 (장애물 탐색)
-        line_collisions = self.map_layers.collision_map[line_y_idx, line_x_idx]
+        collision_map_mask = self.map_layers.collision_map[line_y_idx, line_x_idx].astype(bool)
+        reachable_mask = self.map_layers.reachable[line_y_idx, line_x_idx].astype(bool)
+        line_collisions = collision_map_mask | ~reachable_mask
         hit_indices = np.where(line_collisions == 1)[0]
 
         if len(hit_indices) > 0:
