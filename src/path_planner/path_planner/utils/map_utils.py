@@ -182,7 +182,7 @@ def analyze_map_startability(
     *,
     start_mode: str,
     rng: np.random.Generator,
-    min_coverable_area_rate: float = 0.5,
+    min_coverable_area_rate: float = 0.1,
     eff_size: BoundingBox | None = None,
     collision_map: np.ndarray | None = None,
 ) -> MapStartAnalysis | None:

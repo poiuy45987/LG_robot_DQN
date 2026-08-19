@@ -28,7 +28,7 @@ import glob
 from IPython.display import display
 
 # 앞서 정의한 클래스들을 임포트한다고 가정 (또는 같은 파일에 위치)
-from path_planner.config import EnvConfig, TrainConfig, LOCAL_VIEW_DIM, RESULT_SAVE_DIR, TRAIN_MAP_FILE_REGEX, TEST_MAP_FILE_REGEX
+from path_planner.config import EnvConfig, TrainConfig, LOCAL_VIEW_DIM, GLOBAL_MAP_DIM, RESULT_SAVE_DIR, TRAIN_MAP_FILE_REGEX, TEST_MAP_FILE_REGEX
 from path_planner.map_generator import generate_multiple_maps
 from path_planner.map_layer import MapConfigSchema
 from path_planner.environment import CoverageEnv, ACTION_NUM
@@ -184,6 +184,7 @@ class LSTMAgent:
         network_config = {
             'action_enc_dim': args.action_enc_dim,
             'locel_view_dim': LOCAL_VIEW_DIM,
+            'global_view_dim': GLOBAL_MAP_DIM,
             'stack_steps': self.env_cfg.stack_steps,
             'map_feat_dim': 512,
             'loc_vec_in_dim': ACTION_NUM*2,
@@ -638,18 +639,21 @@ class LSTMAgent:
         # 1. CPU 리스트 데이터를 빠르게 PyTorch GPU 텐서로 통합 (연산 그래프 분리 .detach())
         if isinstance(obs_list, dict):
             maps = torch.as_tensor(obs_list['map'], device=self.device).float().detach() # Shape: (B, C, H, W) or (C, H, W)
+            global_maps = torch.as_tensor(obs_list['global_map'], device=self.device).float().detach()
             loc_vecs = torch.as_tensor(obs_list['loc_vec'], device=self.device).float().detach() # Shape: (B, vector_dim) or (vector_dim,)
             glob_vecs = torch.as_tensor(obs_list['glob_vec'], device=self.device).float().detach() # Shape: (B, vector_dim) or (vector_dim,)
             action_masks = torch.as_tensor(obs_list['action_mask'], device=self.device).float().detach() # Shape: (B, action_num) or (action_num,)
 
             if maps.ndim == 3: # local map view가 (C, H, W)로 들어오는 경우
                 maps = maps.unsqueeze(0)
+                global_maps = global_maps.unsqueeze(0)
                 loc_vecs = loc_vecs.unsqueeze(0)
                 glob_vecs = glob_vecs.unsqueeze(0)
                 action_masks = action_masks.unsqueeze(0)
 
         elif isinstance(obs_list, (list, tuple)):
             maps = (torch.stack([torch.as_tensor(o["map"], device=self.device) for o in obs_list], dim=0).float().detach()) # Shape: (B, C, H, W)
+            global_maps = (torch.stack([torch.as_tensor(o["global_map"], device=self.device) for o in obs_list], dim=0).float().detach())
             loc_vecs = (torch.stack([torch.as_tensor(o["loc_vec"], device=self.device) for o in obs_list], dim=0).float().detach()) # Shape: (B, vector_dim)
             glob_vecs = (torch.stack([torch.as_tensor(o["glob_vec"], device=self.device) for o in obs_list], dim=0).float().detach()) # Shape: (B, vector_dim)
             action_masks = (torch.stack([torch.as_tensor(o["action_mask"], device=self.device) for o in obs_list], dim=0).float().detach()) # Shape: (B, action_num)
@@ -666,6 +670,7 @@ class LSTMAgent:
 
         return {
             "map": total_patch,           # Shape: (B, C, local_view_dim, local_view_dim)
+            "global_map": global_maps,    # Shape: (B, 4, GLOBAL_MAP_DIM, GLOBAL_MAP_DIM)
             "loc_vec": loc_vecs,          # Shape: (B, loc_vec_dim)
             "glob_vec": glob_vecs,        # Shape: (B, glob_vec_dim)
             "action_mask": action_masks   # Shape: (B, action_num)
@@ -860,6 +865,7 @@ class LSTMAgent:
             
             # Network에 통과시켜 각 action이 선택될 확률을 출력
             loc_map_data = processed_obs["map"]
+            global_map_data = processed_obs["global_map"]
             loc_vec_data = processed_obs["loc_vec"]
             glob_vec_data = processed_obs["glob_vec"]
             action_mask = processed_obs["action_mask"]
@@ -872,7 +878,7 @@ class LSTMAgent:
             })
 
             with torch.no_grad():
-                action_probs, h_t, c_t = self.policy_net(loc_map_data, loc_vec_data, glob_vec_data, h_t, c_t)
+                action_probs, h_t, c_t = self.policy_net(loc_map_data, global_map_data, loc_vec_data, glob_vec_data, h_t, c_t)
                 
                 # Training과 동일하게 log-probability 공간에서 mask를 적용한다.
                 # +1e-8은 매우 작은 policy 확률이 log(0)이 되어 유효 action까지
@@ -1075,10 +1081,11 @@ class LSTMAgent:
                     
                     # Network에 통과시켜 각 action이 선택될 확률을 출력
                     loc_map_data = processed_obs["map"]
+                    global_map_data = processed_obs["global_map"]
                     loc_vec_data = processed_obs["loc_vec"]
                     glob_vec_data = processed_obs["glob_vec"]
                     action_mask = processed_obs["action_mask"]
-                    action_probs, h_t, c_t = self.policy_net(loc_map_data, loc_vec_data, glob_vec_data, h_t, c_t)
+                    action_probs, h_t, c_t = self.policy_net(loc_map_data, global_map_data, loc_vec_data, glob_vec_data, h_t, c_t)
                     
                     # Action이 나올 확률을 가지고 action 선택. Action 선택 확률을 저장. 장애물에 부딪히는 action은 제외
                     log_probs = torch.log(action_probs + 1e-8)
@@ -1591,15 +1598,21 @@ class LSTMAgent:
         summary_sheet.append([
             "Level",
             "Target coverage",
-            "Success rate",
-            "Time mean (median, std)",
-            "Overlap mean (median, std)",
+            "Success rate (%)",
+            "Time mean (min)",
+            "Overlap mean (%)",
         ])
         levels = sorted({
             level
             for target_data in target_cov_results.values()
             for level in target_data
         })
+
+        overall_total_count = {target_cov: 0 for target_cov in target_cov_list}
+        overall_success = {target_cov: 0 for target_cov in target_cov_list}
+        overall_times = {target_cov: [] for target_cov in target_cov_list}
+        overall_overlap = {target_cov: [] for target_cov in target_cov_list}
+
         for level in levels:
             for target_cov in target_cov_list:
                 level_data = target_cov_results[target_cov][level]
@@ -1608,19 +1621,37 @@ class LSTMAgent:
                 success_rate = success_count / total_count if total_count else 0.0
                 times = level_data['cleaning_times']
                 overlaps = level_data['overlaps']
+
+                overall_total_count[target_cov] += total_count
+                overall_success[target_cov] += success_count
+                overall_times[target_cov] += times
+                overall_overlap[target_cov] += overlaps
+
                 if success_count:
-                    time_text = self._format_summary_metric(times, "min")
-                    overlap_text = self._format_summary_metric(overlaps, "%")
+                    time_text = self._format_summary_metric(times)
+                    overlap_text = self._format_summary_metric(overlaps)
                 else:
                     time_text = "N/A"
                     overlap_text = "N/A"
                 summary_sheet.append([
                     level,
                     target_cov,
-                    success_rate,
+                    success_rate*100,
                     time_text,
                     overlap_text,
                 ])
+
+        for target_cov in target_cov_list:
+            success_rate = overall_success[target_cov] / overall_total_count[target_cov] if overall_total_count[target_cov] else 0.0
+            time_text = self._format_summary_metric(overall_times[target_cov])
+            overlap_text = self._format_summary_metric(overall_overlap[target_cov])
+            summary_sheet.append([
+                'Total',
+                target_cov,
+                success_rate*100,
+                time_text,
+                overlap_text,
+            ])
 
         for sheet in (map_sheet, summary_sheet):
             for cell in sheet[1]:
@@ -1636,22 +1667,20 @@ class LSTMAgent:
         for row in map_sheet.iter_rows(min_row=2, min_col=2):
             for cell in row:
                 if isinstance(cell.value, (int, float)):
-                    cell.number_format = "0.00"
+                    cell.number_format = "00.0"
         for row in summary_sheet.iter_rows(min_row=2, min_col=2, max_col=3):
-            row[1].number_format = "0.00"
-            row[0].number_format = "0"
+            row[1].number_format = "00.0"
+            row[0].number_format = "0.00"
 
-        workbook_path = os.path.join(result_dir, "test_results.xlsx")
+        model_name = os.path.basename(result_dir)
+        workbook_path = os.path.join(result_dir, f"{model_name}_test_results.xlsx")
         workbook.save(workbook_path)
         return workbook_path
 
     @staticmethod
-    def _format_summary_metric(values: list[float], unit: str) -> str:
+    def _format_summary_metric(values: list[float]) -> str:
         values_array = np.asarray(values, dtype=float)
-        return (
-            f"{np.mean(values_array):.2f} "
-            f"({np.median(values_array):.2f}, {np.std(values_array):.2f}) {unit}"
-        )
+        return (f"{np.mean(values_array):.1f} ± {np.std(values_array):.1f}")
 
     def see_weight(self):
 

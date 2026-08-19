@@ -23,6 +23,7 @@ class LSTMPolicyNetwork(nn.Module):
         self.action_enc_dim = kwargs.get('action_enc_dim', 128) # Action vector를 encoding하는 dimension (Default: 128)
         
         self.local_view_dim = kwargs.get('local_view_dim', 51) # Local view map의 dimension
+        self.global_view_dim = kwargs.get('global_view_dim', 51) # Resized full-map dimension
         self.stack_steps = kwargs.get('stack_steps', 1) # State에서 local view map의 layer 수
         self.map_feat_dim = kwargs.get('map_feat_dim', 512) # Local view map의 feature dimension
         self.loc_vec_in_dim = kwargs.get('loc_vec_in_dim', 16) # Additional state vector의 dimension
@@ -55,6 +56,24 @@ class LSTMPolicyNetwork(nn.Module):
             nn.Flatten(),
             nn.Linear(64 * final_dim * final_dim, self.map_feat_dim),
         )
+
+        # Global-map encoder.  This receives the complete collision/cleaned/
+        # uncleaned/frontier layers at a fixed resolution, independently from
+        # the egocentric local patch above.
+        global_next_dim = get_next_layer_dim(self.global_view_dim, kernel_size=3, stride=1, padding=1)
+        global_next_dim = get_next_layer_dim(global_next_dim, kernel_size=3, stride=2, padding=0)
+        global_final_dim = get_next_layer_dim(global_next_dim, kernel_size=3, stride=2, padding=0)
+        self.global_map_feat_dim = kwargs.get('global_map_feat_dim', 256)
+        self.global_map_enc = nn.Sequential(
+            nn.Conv2d(4, 32, kernel_size=3, stride=1, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=0),
+            nn.ReLU(),
+            nn.Conv2d(64, 64, kernel_size=3, stride=2, padding=0),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(64 * global_final_dim * global_final_dim, self.global_map_feat_dim),
+        )
         
         # Additional state vector feature extractor
         self.vec_enc = nn.Sequential(
@@ -74,7 +93,7 @@ class LSTMPolicyNetwork(nn.Module):
         self.lstm = nn.LSTMCell(input_size=self.lstm_in_prj_dim, hidden_size=self.lstm_hid_dim)
         
         # 4. Compress network: Encoded action의 차원과 일치시키기 위해 feature를 compress하는 network
-        total_feat_dim = self.map_feat_dim + self.vec_feat_dim + self.lstm_hid_dim
+        total_feat_dim = self.map_feat_dim + self.global_map_feat_dim + self.vec_feat_dim + self.lstm_hid_dim
         self.cmps_net = nn.Linear(total_feat_dim, self.action_enc_dim)
         # self.cmps_net = nn.Sequential(
         #     nn.Linear(total_feat_dim, 512),
@@ -84,7 +103,7 @@ class LSTMPolicyNetwork(nn.Module):
         #     nn.Linear(256, self.action_enc_dim)
         # )
 
-    def forward(self, loc_map_data, loc_vec_data, glob_vec_data, h_t, c_t) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    def forward(self, loc_map_data, global_map_data, loc_vec_data, glob_vec_data, h_t, c_t) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         loc_map_data: 
         local_view: (batch_size, 1, H, W) - Polar rotated local view
@@ -92,10 +111,11 @@ class LSTMPolicyNetwork(nn.Module):
         h_t, c_t: (batch_size, lstm_hidden_dim) - LSTM의 이전 히든/셀 상태
         """
         
-        # 1. Local feature 추출
+        # 1. Local/global map feature 추출
         map_feat = self.map_enc(loc_map_data) # Shape: (B, map_feat_dim=512)
+        global_map_feat = self.global_map_enc(global_map_data)
         vec_feat = self.vec_enc(loc_vec_data) # Shape: (B, vec_feat_dim=64)
-        loc_feat = torch.cat((map_feat, vec_feat), dim=1) # Shape: (B, local_feat_dim=512+64)
+        loc_feat = torch.cat((map_feat, global_map_feat, vec_feat), dim=1)
         
         # 2. LSTM output 계산
         lstm_in = self.lstm_inp_prj(glob_vec_data) # Shape: (B, lstm_in_prj_dim=32)

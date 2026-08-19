@@ -89,4 +89,6 @@ python -m path_planner.main \
 * --vis_test_map_num: 각 레벨별로 Best, Median, Worst 경로를 추출할 개수 (기본값: `3`)
 * --model_name: 불러올 model 이름 설정.
 
+* test 결과 저장 위치: src/path_planner/path_planner/result/(모델 이름): 각 map에서 생성된 경로 png 파일과 test 결과가 정리된 excel 파일이 같이 있습니다.
+
 ### 시각화 결과를 보고 싶은 경우, train_and_test.ipynb 파일의 cell을 실행하면 됩니다.

@@ -9,6 +9,9 @@ DEFAULT_SEED = 42
 ANG_SEG_NUM = 7 # 0~90도 사이 각도를 나누는 간격 수.
 CLEANED_MAP_MAX = 10
 LOCAL_VIEW_DIM = 51
+# Fixed resolution for the full-map observation.  Map dimensions vary by the
+# curriculum, so the global state is downsampled before entering the network.
+GLOBAL_MAP_DIM = 17
 
 MAP_SAVE_DIR = os.path.normpath('src/path_planner/path_planner/maps')
 MODEL_SAVE_DIR = os.path.normpath('src/path_planner/path_planner/models')

@@ -10,7 +10,7 @@ import argparse
 import math
 from dataclasses import dataclass
 
-from path_planner.config import EnvConfig, DEFAULT_SEED, ANG_SEG_NUM, CLEANED_MAP_MAX
+from path_planner.config import EnvConfig, DEFAULT_SEED, ANG_SEG_NUM, CLEANED_MAP_MAX, GLOBAL_MAP_DIM
 from path_planner.map_layer import MapLayers, MapConfigSchema, BoundingBox
 from path_planner.utils.visualizer import display_image, visualize_mask, draw_layer, draw_obs, draw_traj
 from path_planner.utils.map_utils import float_to_int_coord, make_robot_mask
@@ -72,6 +72,7 @@ class CoverageEnv(gym.Env):
         self.action_space: spaces.Discrete = spaces.Discrete(ACTION_NUM, seed=self.env_rng)
         self.observation_space: spaces.Dict = spaces.Dict({
             "map": spaces.Box(low=0.0, high=1.0, shape=(4*self.cfg.stack_steps, self.cfg.local_view, self.cfg.local_view), dtype=np.float32),
+            "global_map": spaces.Box(low=0.0, high=1.0, shape=(4, GLOBAL_MAP_DIM, GLOBAL_MAP_DIM), dtype=np.float32),
             "loc_vec": spaces.Box(low=-1.0, high=1.0, shape=(ACTION_NUM*2,), dtype=np.float32),
             "glob_vec": spaces.Box(low=-1.0, high=1.0, shape=(5,), dtype=np.float32),
             "action_mask": spaces.Box(low=0, high=1, shape=(ACTION_NUM,), dtype=np.float32)
@@ -552,6 +553,22 @@ class CoverageEnv(gym.Env):
         # -------------- Map data 생성 --------------
         # self.patch_stack에 저장된 patch들을 합쳐서 observation으로 사용
         total_patch = np.concatenate(list(self.patch_stack), axis=0).astype(np.float32)
+        # Full-map state is resized to a fixed resolution because map sizes
+        # differ across the curriculum.  Channels match the local map order.
+        global_layers = np.stack([
+            self.map_layers.collision_map,
+            self.map_layers.cleaned,
+            self.map_layers.uncleaned,
+            self.map_layers.frontier,
+        ], axis=0).astype(np.float32)
+        if global_layers.shape[1:] != (GLOBAL_MAP_DIM, GLOBAL_MAP_DIM):
+            global_map = cv2.resize(
+                global_layers.transpose(1, 2, 0),
+                (GLOBAL_MAP_DIM, GLOBAL_MAP_DIM),
+                interpolation=cv2.INTER_AREA,
+            ).transpose(2, 0, 1)
+        else:
+            global_map = global_layers
         # ------------------------------------------
         
         # ---------------- Additional state vector ----------------
@@ -592,7 +609,7 @@ class CoverageEnv(gym.Env):
         ], axis=0).astype(np.float32)
         # ----------------------------------------------------
         
-        return {"map": total_patch, "loc_vec": loc_vec, "glob_vec": glob_vec, "action_mask": action_mask}
+        return {"map": total_patch, "global_map": global_map, "loc_vec": loc_vec, "glob_vec": glob_vec, "action_mask": action_mask}
     
     
     def _get_env_history_data(self) -> EnvHistory:
