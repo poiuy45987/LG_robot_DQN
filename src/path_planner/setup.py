@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            
+            'path-planner = path_planner.main:main',
         ],
     },
 )

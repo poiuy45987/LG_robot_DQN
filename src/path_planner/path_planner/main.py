@@ -1,152 +1,219 @@
+"""Command-line entry point for training, evaluation, and visualization."""
+
 import argparse
 import os
+import sys
+
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["MKL_NUM_THREADS"] = "1"
 os.environ["OPENBLAS_NUM_THREADS"] = "1"
 
 import torch
+
 torch.set_num_threads(1)
 
 from path_planner.LSTM_agent import LSTMAgent
 from path_planner.config import DEFAULT_SEED, MAP_SAVE_DIR, MODEL_SAVE_DIR
+from path_planner.gif_generator import generate_cleaning_gif
+from path_planner.utils.utils import is_jupyter
+from path_planner.utils.visualizer import visualize_saved_map
 
-def parse_args():
-    
-    parser = argparse.ArgumentParser()
-    
-    # Debugging 여부 설정
-    parser.add_argument('--debug', action='store_true', help='Test 시 debugging 여부 결정')
-    
-    # Seed 설정
-    parser.add_argument('--seed', type=int, default=DEFAULT_SEED, help=f'Set seed: (Default: {DEFAULT_SEED})')
-    
-    # Mode 설정, tensorboard와 wandb의 사용 여부를 결정
-    parser.add_argument('--mode', choices=['train', 'test', 'see_map', 'see_weight', 'test_for_debug'], default='train', help='Mode: train, test, see_map, see_weight, test_for_debug (see_map: seed로 생성한 map을 보는 기능 / see_weight: 훈련된 model의 parameter 중 일부를 시각화 하는 기능 / test_for_debug: Debugging을 위해서 map 하나를 test하는 기능)')
-    parser.add_argument('--map_rel_path', type=str, default='test/test_map_L1_0000.npy', help='\'test_for_debug\' mode를 사용할 때, 테스트할 map의 경로')
-    parser.add_argument('--use_wandb', action='store_true', help='wandb 사용')
-    parser.add_argument('--use_tb', action='store_true', help='tb 사용')
-    parser.add_argument('--use_vessl', action='store_true', help='vessl 사용')
-    
-    # Model, map, tensorboard 저장 경로 설정
-    parser.add_argument('--model_dir', type=str, default=MODEL_SAVE_DIR, help=f'Model 파일이 저장되는 폴더 경로: {MODEL_SAVE_DIR}')
-    parser.add_argument('--map_save_dir', type=str, default=MAP_SAVE_DIR, help=f'Map 파일이 저장되어 있는 폴더 경로: {MAP_SAVE_DIR}')
 
-    # 모델 이름 또는 이어서 학습할 모델 이름 설정
-    parser.add_argument('--pre_model_name', type=str, default=None, help='Pre-trained model file 이름. Parameter만 불러오고 step 수, optimizer 상태 등은 초기화됨.')
-    parser.add_argument('--model_name', type=str, default='model.pth', help='저장하거나 불러올 model 이름 설정. Train mode에서 이 model의 checkpoint가 있을 경우, 최신 checkpoint부터 학습을 재개. 확장자 .pth를 쓰거나 확장자를 아예 쓰지 않고 입력.')
-    parser.add_argument('--best_traj_img_name', type=str, default='best_coverage_path.png', help='Model이 생성한 최적 경로 이미지의 파일 이름')
+def _add_seed_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--seed", type=int, default=DEFAULT_SEED, help=f"Random seed (default: {DEFAULT_SEED})")
 
-    # Test 시 사용할 map, map 개수 등 설정
-    parser.add_argument('--test_map_folder_name', type=str, default='test', help=f'Test 시 사용할 map이 담긴 폴더 이름 설정. {MAP_SAVE_DIR}에 담긴 폴더 중에 선택. (Default: test)')
-    parser.add_argument('--test_map_num_per_level', type=int, default=250, help='Test 시 map level별로 사용할 map 수 (Default: 250)')
-    parser.add_argument('--test_start_point_num', type=int, default=1, help='Test 시 한 map당 테스트해볼 start_poit 수 (Default: 1)')
-    parser.add_argument('--vis_test_map_num', type=int, default=3, help='Test 시, level별로 성능이 좋은 map, 중간인 map, 안 좋은 map을 몇 개씩 보여줄지 결정 (Default: 3)')
-    
-    # Model dimension 관련 설정
-    parser.add_argument('--action_enc_dim', type=int, default=128, help='Encoded action의 dimension')
-    parser.add_argument('--lstm_in_prj_dim', type=int, default=32, help='LSTM cell block의 input vector의 dimension')
-    parser.add_argument('--lstm_hid_dim', type=int, default=512, help='LSTM cell block의 hidden state vector의 dimension')
-    
-    # ---- Training hyperparameter 설정 ----
-    
-    train_set_group = parser.add_argument_group('Training setting')
-    
-    # 데이터를 쌓는 warmup 과정 설정, Replay buffer 설정
-    train_set_group.add_argument('--use_train_maps', action='store_true', help='Train 시 maps 폴더에 저장된 map을 training set으로 이용')
-    train_set_group.add_argument('--max_step_per_eps', type=int, help='Train 시 한 map에 대해서 훈련시키는 최대 횟수 (Default: 20)')
-    train_set_group.add_argument('--max_eps_per_map_size', type=int, help='Train 시 한 map size에 대해서 훈련시키는 episode 최대 횟수 (Default: 100)')
-    train_set_group.add_argument('--path_reward_thres', type=float, help='Train 시 한 map size를 바꾸는 path reward threshold (Default: 0.85)')
-    
-    # 훈련시킬 최대 episode 수 설정
-    train_set_group.add_argument('--max_episodes', type=int, help='Total episodes (Default: 30,000)')
-    
-    # batch_size 설정
-    train_set_group.add_argument('--batch_size', type=int, help='Batch size (Default: 64)')
-    
-    # Optimizer 설정, Update 주기 설정
-    train_set_group.add_argument('--optimizer', choices=['sgd', 'adam'], help='Optimizer 설정: sgd, adam (Default: sgd)')
-    train_set_group.add_argument('--lr', type=float, help='Learning rate for the optimizer (Default: 1e-4)')
-    train_set_group.add_argument('--momentum', type=float, help='Momentum for SGD optimizer  (Default: 0.9)')
-    train_set_group.add_argument('--min_lr', type=float, help='Learning rate scheduler의 최소 learning rate (Default: 1e-6)')
-    train_set_group.add_argument('--scheduler_max_step', type=int, help='Cosine Annealing learning rate scheuler가 최저 learning rate까지 도달하기 위한 episode 수 (Default: 500)')
-    train_set_group.add_argument('--detach_period', type=int, help='LSTM detaching period (Default: 20)')
-    
-    # Validation 주기 및 checkpoint 저장 주기 설정, Validation 설정
-    train_set_group.add_argument('--valid_freq', type=int, help='Validation을 수행하는 주기 (episodes) (Default: 100)')
-    train_set_group.add_argument('--ckp_freq', type=int, help='Checkpoint를 저장하는 주기 (episodes) (Default: 20)')
-    train_set_group.add_argument('--valid_map_num', type=int, default=5, help='Validation 시 사용할 map 수 (Default: 5)')
-    train_set_group.add_argument('--valid_start_point_num', type=int, help='Validation 시 한 map당 테스트해볼 start_poit 수 (Default: 3)')
-    # -------------------------
-        
-    # ---- Environment 관련 설정 ----
-    
-    env_set_group = parser.add_argument_group('Environment setting')
-    
-    env_set_group.add_argument('--max_steps', type=int, help='Maximum steps per episode (Default: 1,500)')
-    env_set_group.add_argument('--max_no_progress_steps', type=int, help='Coverage가 증가하지 않을 때 max_steps (Default: 60)')
-    env_set_group.add_argument('--max_no_progress_steps_final', type=int, help='Coverage가 높은 상태에서 coverage가 증가하지 않을 때 max_stes (Default: 100)')
-    env_set_group.add_argument('--final_coverage_thres', type=int, help='Coverage가 높은 상태를 정의하는 threshold (Default: 0.90)')
-    env_set_group.add_argument('--target_coverage', type=float, help='Target coverage (Default: 0.95)')
-    env_set_group.add_argument('--local_view', type=float, help='Observation으로 출력할 local view의 크기: 단위 cm (Default: 200.0)')
-    env_set_group.add_argument('--max_forward', type=float, help='한 방향으로 이동할 수 있는 최대 거리를 정규화하기 위한 수치: 단위 cm (Default: 50.0)')
-    env_set_group.add_argument('--robot_size', type=float, help='로봇의 지름: 단위 cm (Default: 36.0)')
-    env_set_group.add_argument('--stack_steps', type=int, help='Map의 observation data의 step 수 (Default: 1)')
-    
-    # Reward function 관련 설정
-    env_set_group.add_argument('--uncleaned_reward', type=float, help='Uncleaned grid reward (Default: 1.0)')
-    env_set_group.add_argument('--cleaned_penalty', type=float, help='Cleaned grid penalty (Default: 0.1)')
-    env_set_group.add_argument('--obstacle_penalty', type=float, help='Obstalce penalty (Default: 10.0)')
-    env_set_group.add_argument('--turn_penalty', type=float, help='Turning penalty (Default: 0.1)')
-    env_set_group.add_argument('--step_penalty', type=float, help='Step penalty (Default: 0.01)')
-    env_set_group.add_argument('--complete_reward', type=float, help='Complete_reward (Default: 10.0)')
-    env_set_group.add_argument('--intrinsic_reward', type=float, help='Intrinsic_reward (Default: 1.0)')
-    # -----------------------------
-    
-    args = parser.parse_args()
-    
-    # model_name에 확장자가 없으면 추가
-    name, ext = os.path.splitext(args.model_name)
-    if not ext:
-        args.model_name = name + ".pth"
-    
+
+def _add_storage_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--model-dir", type=str, default=MODEL_SAVE_DIR, help=f"Model directory (default: {MODEL_SAVE_DIR})")
+    parser.add_argument("--map-save-dir", type=str, default=MAP_SAVE_DIR, help=f"Map directory (default: {MAP_SAVE_DIR})")
+
+
+def _add_model_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--pre-model-name", type=str, default=None, help="Pre-trained model name used only when training")
+    parser.add_argument("--model-name", type=str, default="model.pth", help="Model/checkpoint file name")
+    parser.add_argument("--best-traj-img-name", type=str, default="best_coverage_path.png", help="Best trajectory image file name")
+    parser.add_argument("--action-enc-dim", type=int, default=128, help="Action encoding dimension")
+    parser.add_argument("--lstm-in-prj-dim", type=int, default=32, help="LSTM input projection dimension")
+    parser.add_argument("--lstm-hid-dim", type=int, default=512, help="LSTM hidden-state dimension")
+
+
+def _add_environment_arguments(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("environment")
+    group.add_argument("--max-steps", type=int, help="Maximum steps per episode")
+    group.add_argument("--max-no-progress-steps", type=int, help="Steps allowed without coverage progress")
+    group.add_argument("--max-no-progress-steps-final", type=int, help="Steps allowed without progress near completion")
+    group.add_argument("--final-coverage-thres", type=float, help="Coverage threshold for final no-progress handling")
+    group.add_argument("--target-coverage", type=float, help="Target coverage")
+    group.add_argument("--local-view", type=float, help="Local observation size in cm")
+    group.add_argument("--max-forward", type=float, help="Maximum forward distance in cm")
+    group.add_argument("--robot-size", type=float, help="Robot diameter in cm")
+    group.add_argument("--stack-steps", type=int, help="Number of stacked local-map observations")
+    group.add_argument("--uncleaned-reward", type=float, help="Reward for newly cleaned area")
+    group.add_argument("--cleaned-penalty", type=float, help="Penalty for revisiting cleaned area")
+    group.add_argument("--obstacle-penalty", type=float, help="Collision penalty")
+    group.add_argument("--turn-penalty", type=float, help="Turning penalty")
+    group.add_argument("--step-penalty", type=float, help="Per-step penalty")
+    group.add_argument("--complete-reward", type=float, help="Completion reward")
+    group.add_argument("--intrinsic-reward", type=float, help="Intrinsic reward scale")
+
+
+def _add_agent_arguments(parser: argparse.ArgumentParser) -> None:
+    _add_seed_argument(parser)
+    _add_storage_arguments(parser)
+    _add_model_arguments(parser)
+    _add_environment_arguments(parser)
+
+
+def _add_training_arguments(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("training")
+    group.add_argument("--use-train-maps", action="store_true", help="Use pre-generated train maps")
+    group.add_argument("--max-step-per-eps", type=int, help="Maximum episodes per map")
+    group.add_argument("--max-eps-per-map-size", type=int, help="Maximum episodes at one map size")
+    group.add_argument("--path-reward-thres", type=float, help="Validation reward threshold for map scale-up")
+    group.add_argument("--max-episodes", type=int, help="Total training episodes")
+    group.add_argument("--batch-size", type=int, help="Number of parallel environments")
+    group.add_argument("--optimizer", choices=["sgd", "adam"], help="Optimizer")
+    group.add_argument("--lr", type=float, help="Learning rate")
+    group.add_argument("--momentum", type=float, help="SGD momentum")
+    group.add_argument("--min-lr", type=float, help="Minimum scheduler learning rate")
+    group.add_argument("--scheduler-max-step", type=int, help="Cosine scheduler duration")
+    group.add_argument("--detach-period", type=int, help="LSTM detach period")
+    group.add_argument("--valid-freq", type=int, help="Validation interval in episodes")
+    group.add_argument("--ckp-freq", type=int, help="Checkpoint interval in episodes")
+    group.add_argument("--valid-map-num", type=int, default=5, help="Validation maps per map size")
+    group.add_argument("--valid-start-point-num", type=int, help="Validation start points per map")
+    group.add_argument("--use-wandb", action="store_true", help="Enable Weights & Biases logging")
+    group.add_argument("--use-tb", action="store_true", help="Enable TensorBoard logging")
+    group.add_argument("--use-vessl", action="store_true", help="Enable Vessl integration")
+
+
+def _add_test_arguments(parser: argparse.ArgumentParser) -> None:
+    group = parser.add_argument_group("test")
+    group.add_argument("--test-map-folder-name", type=str, default="test", help="Test-map subdirectory")
+    group.add_argument("--test-map-num-per-level", type=int, default=250, help="Maps evaluated per level")
+    group.add_argument("--test-start-point-num", type=int, default=1, help="Start points evaluated per map")
+    group.add_argument("--vis-test-map-num", type=int, default=3, help="Best/median/worst paths shown per level")
+    group.add_argument("--debug", action="store_true", help="Show interactive step-by-step test debugging")
+    group.add_argument("--min-coverable-area-rate", type=float, default=0.1, help="Minimum coverable area rate for debugging")
+
+
+def _add_map_path_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--map-rel-path", type=str, default="test/test_map_L1_0000.npy", help="Path relative to --map-save-dir")
+
+
+def _normalize_legacy_arguments(argv: list[str]) -> list[str]:
+    """Translate the former ``--mode`` CLI form to the subcommand form.
+
+    Existing notebooks still use underscore-style options.  Keep them working
+    during the CLI migration while presenting only the new form in ``-h``.
+    """
+    if "--mode" not in argv:
+        return argv
+
+    mode_index = argv.index("--mode")
+    if mode_index + 1 >= len(argv):
+        return argv
+
+    legacy_modes = {
+        "see_map": "map",
+        "see_weight": "weights",
+        "test_for_debug": "debug",
+    }
+    command = legacy_modes.get(argv[mode_index + 1], argv[mode_index + 1])
+    remaining_args = argv[:mode_index] + argv[mode_index + 2:]
+    normalized_args = [command]
+    for argument in remaining_args:
+        if argument.startswith("--"):
+            option, separator, value = argument.partition("=")
+            normalized_args.append(option.replace("_", "-") + separator + value)
+        else:
+            normalized_args.append(argument)
+
+    print("Warning: '--mode ...' is deprecated; use a subcommand instead.", file=sys.stderr)
+    return normalized_args
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Robot vacuum path-planning tools")
+    commands = parser.add_subparsers(dest="mode", required=True, title="commands")
+
+    train_parser = commands.add_parser("train", help="Train the LSTM policy")
+    _add_agent_arguments(train_parser)
+    _add_training_arguments(train_parser)
+
+    test_parser = commands.add_parser("test", help="Evaluate a model over a test-map set")
+    _add_agent_arguments(test_parser)
+    _add_test_arguments(test_parser)
+
+    gif_parser = commands.add_parser("gif", help="Save a single map rollout as an animated GIF")
+    _add_agent_arguments(gif_parser)
+    _add_map_path_argument(gif_parser)
+    gif_parser.add_argument("--gif-frame-duration", type=float, default=0.08, help="GIF frame duration in seconds (default: 0.08)")
+
+    inference_parser = commands.add_parser("inference", help="Run one map for inference and get performance metrics")
+    _add_agent_arguments(inference_parser)
+    _add_map_path_argument(inference_parser)
+    inference_parser.add_argument("--start-mode", type=str, default="corner", choices=["corner", "edge"], help="Starting position mode for inference")
+    inference_parser.add_argument("--min-coverable-area-rate", type=float, default=0.1, help="Minimum coverable area rate for inference")
+    inference_parser.add_argument("--debug", action="store_true", help="Enable interactive step-by-step debugging mode")
+
+    weights_parser = commands.add_parser("weights", help="Visualize selected model weights")
+    _add_agent_arguments(weights_parser)
+
+    map_parser = commands.add_parser("map", help="Display one saved map and its initial trajectory")
+    _add_storage_arguments(map_parser)
+    _add_map_path_argument(map_parser)
+
+    raw_args = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(_normalize_legacy_arguments(raw_args))
+    model_name = getattr(args, "model_name", None)
+    if model_name:
+        name, extension = os.path.splitext(model_name)
+        if not extension:
+            args.model_name = f"{name}.pth"
     return args
 
 
-def visualize_test_map(seed: int = DEFAULT_SEED):
-    """
-    생성한 맵을 빠르게 보고싶을 때 사용하는 method
+def _show_map(map_save_dir: str, map_rel_path: str) -> None:
+    map_path = os.path.join(map_save_dir, map_rel_path)
+    visualize_saved_map(map_file_path=map_path)
 
-    Args:
-        seed (int, optional): 환경 구성에 사용하는 seed 번호. Defaults to None.
-    """
-    
-    from .config import EnvConfig
-    from .environment import CoverageEnv
-    
-    if seed is None:
-        seed = DEFAULT_SEED
-        
-    cfg = EnvConfig()
-    env = CoverageEnv(cfg, seed=seed)
-    env.reset()
-    env.show_visualized_img(img_choice = 'traj')
-     
-    
-def main():
-    
-    # args parsing
+    from path_planner.environment import CoverageEnv
+    from path_planner.map_layer import MapConfigSchema
+
+    env = CoverageEnv()
+    reset_result = env.reset(map_config=MapConfigSchema(file_path=map_path))
+    if reset_result is not None:
+        env.show_visualized_img(img_choice="traj", window_name=f"{os.path.basename(map_path)} image")
+
+
+def main() -> None:
     args = parse_args()
-    lstm_agent = LSTMAgent(args)
-    if args.mode == 'train':
-        lstm_agent.train()
-    elif args.mode == 'test':
-        lstm_agent.test()
-    elif args.mode == 'see_map':
-        visualize_test_map(seed=args.seed)
-    elif args.mode == 'see_weight':
-        lstm_agent.see_weight()
-    elif args.mode == 'test_for_debug':
-        lstm_agent.test_one_map_for_debug(map_rel_path=args.map_rel_path)
+
+    if args.mode == "map":
+        _show_map(args.map_save_dir, args.map_rel_path)
+    else:
+        agent = LSTMAgent(args)
+        if args.mode == "train":
+            agent.train()
+        elif args.mode == "test":
+            agent.test()
+        elif args.mode == "gif":
+            generate_cleaning_gif(
+                agent,
+                map_file_path=os.path.join(args.map_save_dir, args.map_rel_path),
+                frame_duration=args.gif_frame_duration,
+            )
+        elif args.mode == "inference":
+            agent.run_inference_on_single_map(map_rel_path=args.map_rel_path, start_mode=args.start_mode, min_coverable_area_rate=args.min_coverable_area_rate, debug=args.debug)
+        elif args.mode == "weights":
+            agent.see_weight()
+
+    if args.mode != "gif" and not is_jupyter():
+        print("완료. 창을 확인하고 마우스로 닫으세요.")
+        import matplotlib.pyplot as plt
+        plt.show(block=True)
+
 
 if __name__ == "__main__":
     main()

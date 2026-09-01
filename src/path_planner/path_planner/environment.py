@@ -15,6 +15,7 @@ from path_planner.map_layer import MapLayers, MapConfigSchema, BoundingBox
 from path_planner.utils.visualizer import display_image, visualize_mask, draw_layer, draw_obs, draw_traj
 from path_planner.utils.map_utils import float_to_int_coord, make_robot_mask
 from path_planner.utils.trajectory_metrics import cleaning_time_minutes, overlap_percent
+from path_planner.utils.utils import is_jupyter
 
 # Action 및 진행 가능 각도 종류 설정
 # Action: 현재 로봇이 바라보는 방향과의 각도 차이를 의미. 0~90, -90~0를 각각 ACTION_SEG_NUM개의 구간으로 나눠서 얻은 2*ACTION_SEG_NUM+1가지의 각도 + 유턴
@@ -122,7 +123,7 @@ class CoverageEnv(gym.Env):
 
         # self.cleaned_segment: np.ndarray | None = None
     
-    def reset(self, *, seed: int=None, start_mode: str='corner', map_config: MapConfigSchema | None = None) -> tuple[dict, dict] | None:
+    def reset(self, *, seed: int=None, start_mode: str='corner', map_config: MapConfigSchema | None = None, min_coverable_area_rate: float = 0.1) -> tuple[dict, dict] | None:
         """
 
         Args:
@@ -137,7 +138,7 @@ class CoverageEnv(gym.Env):
 
         # 새로운 map 생성 또는 시작점만 바꾸고 map 초기화
         for _ in range(100):
-            self.pos = self.map_layers.reset(map_config=map_config, start_mode=start_mode, env_rng=self.env_rng)
+            self.pos = self.map_layers.reset(map_config=map_config, start_mode=start_mode, env_rng=self.env_rng, min_coverable_area_rate=min_coverable_area_rate)
             
             # 시작 지점이 정해지면 이후 step 진행
             if self.pos is not None:
@@ -264,8 +265,8 @@ class CoverageEnv(gym.Env):
         
         if collision:
             print("Collide!")
-            self.show_visualized_img(img_choice='traj')
-            self.show_visualized_img(img_choice='layer')
+            self.show_visualized_img(img_choice='traj', window_name="Environment step collide traj image")
+            self.show_visualized_img(img_choice='layer', window_name="Environment step collide layer image")
             terminated = True
         elif cur_coverage >= self.cfg.target_coverage:
             terminated = True
@@ -736,13 +737,13 @@ class CoverageEnv(gym.Env):
         self.canvas.draw()
         return np.array(self.canvas.buffer_rgba(), dtype=np.uint8)[:, :, :3] # [H, W, C]
 
-    def show_visualized_img(self, img_choice: str = 'traj'):
+    def show_visualized_img(self, img_choice: str = 'traj', window_name="Image"):
 
         if img_choice not in ['layer', 'traj', 'obs']:
             raise ValueError(f"Invalid img_choice: {img_choice}. Must be one of ['layer', 'traj', 'obs']")
         
         img_array = self.get_visualized_img(img_choice)
-        display_image(img_array)
+        display_image(img_array, window_name)
     
     # def is_zigzag_zone(self, cx: float = None, cy: float = None):
     #     if cx is None or cy is None:
@@ -767,22 +768,30 @@ if __name__ == "__main__":
     if args.debug_reset:
         if args.see_map:
             # 1. Map visualize: Agent layer, Cleaned layer, Obstacle layer, Collision map, 
-            env.show_visualized_img('layer')
-            env.show_visualized_img('traj')
+            env.show_visualized_img('layer', window_name='Reset layer image')
+            env.show_visualized_img('traj', window_name='Reset traj image')
         if args.see_obs:
             # 2. observation visualization
-            env.show_visualized_img('obs')
+            env.show_visualized_img('obs', window_name='Reset obs image')
 
     
     # Debug step() method
     if args.debug_step:
-        action_seq = [0]*1000 + [3]*1000 + [2]*1000 + [1]*1000
+        # 3. step() method
+        # action_seq = [0]*150 + [1]*3 + [3]*150 + [2]*250 + [3]*100 + [1]*200
+        pattern = [0]*30 + [13] + [0]*10 + [13] + [0]*30 + [14] + [0]*10 + [14]
+        action_seq = pattern * 20
         for action in action_seq:
             obs, reward, terminated, truncated, info = env.step(action)
         if args.see_map:
             # 1. Map visualize: Agent layer, Cleaned layer, Obstacle layer, Collision map, 
-            env.show_visualized_img('layer')
-            env.show_visualized_img('traj')
+            env.show_visualized_img('layer', window_name='After step layer image')
+            env.show_visualized_img('traj', window_name='After step traj image')
         if args.see_obs:
             # 2. observation visualization
-            env.show_visualized_img('obs')
+            env.show_visualized_img('obs', window_name='After step obs image')
+
+    if not is_jupyter():
+        print("완료. 창을 확인하고 마우스로 닫으세요.")
+        import matplotlib.pyplot as plt
+        plt.show(block=True)

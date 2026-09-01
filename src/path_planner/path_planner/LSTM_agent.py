@@ -14,6 +14,8 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 import wandb
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 import cv2
 import time
 import os
@@ -25,7 +27,6 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font
 
 import glob
-from IPython.display import display
 
 # 앞서 정의한 클래스들을 임포트한다고 가정 (또는 같은 파일에 위치)
 from path_planner.config import EnvConfig, TrainConfig, LOCAL_VIEW_DIM, GLOBAL_MAP_DIM, RESULT_SAVE_DIR, TRAIN_MAP_FILE_REGEX, TEST_MAP_FILE_REGEX
@@ -35,6 +36,7 @@ from path_planner.environment import CoverageEnv, ACTION_NUM
 from path_planner.LSTM_network import LSTMPolicyNetwork
 from path_planner.utils.utils import *
 from path_planner.utils.visualizer import display_image
+from path_planner.utils.utils import is_jupyter
 from path_planner.utils.trajectory_metrics import GRID_RESOLUTION_M, LINEAR_VELOCITY
 
 class CustomGymVecEnv(SyncVectorEnv):
@@ -289,7 +291,7 @@ class LSTMAgent:
             else:
                 raise ValueError(f"Unsupported optimizer type: {self.train_cfg.optimizer}")
 
-            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=self.train_cfg.scheduler_max_step, eta_min=1e-6)
+            self.scheduler = CosineAnnealingLR(self.optimizer, T_max=self.train_cfg.scheduler_max_step, eta_min=self.train_cfg.min_lr)
 
         # Loading model
         self._load_model(args)
@@ -349,7 +351,7 @@ class LSTMAgent:
                     start_mode = "edge"
 
                 if mode == "train":
-                    map_num = 1000 if map_size_str == "Cropped" else 200
+                    map_num = 100000 if map_size_str == "Cropped" else 1000
                 else:
                     map_num = self.args.valid_map_num
                 print(f"  Generating {map_num} maps per level with map size {map_size_str}...")
@@ -361,7 +363,8 @@ class LSTMAgent:
                     seed=self.seed,
                     map_num_per_cond=map_num, 
                     visualize=True, 
-                    map_size=map_size
+                    map_size=map_size,
+                    min_coverable_area_rate=0.5
                 )
                 print(f"  Complete!")
         else:
@@ -688,22 +691,22 @@ class LSTMAgent:
         ``overlap_rate`` must be a fraction in [0, 1], not a percentage.
         """
         cov_rwd_max = 0.5
+        max_cov = 0.90
         
         if map_size == '40x40':
-            cov_thres = 0.9
-            above_cov_thres_mask = (coverage >= cov_thres).float()
-            cov_reward = torch.clamp(coverage, min=0.0, max=cov_thres) * (cov_rwd_max / cov_thres)
+            above_max_cov_mask = (coverage >= max_cov).float()
+            cov_reward = torch.clamp(coverage, min=0.0, max=max_cov) * (cov_rwd_max / max_cov)
 
             overlap_scale = torch.clamp(1.0 - overlap_rate**2, min=-0.1)
             overlap_reward = overlap_scale * (1.0 - cov_rwd_max)
 
             time_penalty = torch.clamp((cleaning_time_rel - 1.0) * 0.025, min=0.0, max=0.1)
 
-            return cov_reward + (overlap_reward - time_penalty) * above_cov_thres_mask
+            return cov_reward + (overlap_reward - time_penalty) * above_max_cov_mask
 
         cov_thres = 0.75
         above_cov_thres_mask = (coverage >= cov_thres).float()
-        cov_reward = torch.clamp(coverage, min=0.0, max=cov_thres) * (cov_rwd_max / cov_thres)
+        cov_reward = torch.clamp(coverage, min=0.0, max=max_cov) * (cov_rwd_max / max_cov)
 
         r_quad = (200.0 / 9.0) * torch.square(torch.clamp(coverage - cov_thres, min=0.0))
         overlap_max_weight = torch.clamp(r_quad, min=0.0, max=1.0 - cov_rwd_max)
@@ -735,7 +738,7 @@ class LSTMAgent:
                 map_config = MapConfigSchema(file_path=map_path)
                 
                 # Validation 환경을 초기화
-                reset_info = self.test_env.reset(start_mode=start_mode, map_config=map_config)
+                reset_info = self.test_env.reset(start_mode=start_mode, map_config=map_config, min_coverable_area_rate=0.5)
                 if reset_info:
                     obs, _ = reset_info
                 else:
@@ -745,8 +748,8 @@ class LSTMAgent:
                     
                     # start_num == 0인 경우 map을 초기화하면서 시작 지점도 초기화가 되었으므로 reset을 실행하지 않음.
                     if start_num != 0:
-                        obs, _ = self.test_env.reset(start_mode=start_mode) # 시작 지점 초기화
-                    cur_coverage, cur_overlap_percent, cur_cleaning_time, _ = self._test_one_map(self.test_env, obs, debug=False) # Coverage 성능을 평가
+                        obs, _ = self.test_env.reset(start_mode=start_mode, min_coverable_area_rate=0.5) # 시작 지점 초기화
+                    cur_coverage, cur_overlap_percent, cur_cleaning_time, _, _, _ = self._test_one_map(self.test_env, obs, debug=False) # Coverage 성능을 평가
 
                     total_steps = self.test_env.steps
                     straight_cleaning_time = total_steps * GRID_RESOLUTION_M / LINEAR_VELOCITY / 60.0
@@ -813,7 +816,16 @@ class LSTMAgent:
     
     def _test_one_map(self, env: CoverageEnv, obs: dict, 
                       target_cov_list: list[float] = [0.85, 0.90, 0.95],
-                      debug: bool = False) -> tuple[float, float, float, dict[float, tuple[float, float]]]:
+                      debug: bool = False,
+                      on_step: Callable[[CoverageEnv, int], None] | None = None) -> tuple[float, float, float, dict[float, tuple[float, float]], float, float]:
+        """Run one deterministic test rollout.
+
+        ``on_step`` receives the environment at step 0 and after each completed
+        environment step.  It allows callers to observe the same rollout (for
+        example, to write GIF frames) without duplicating policy logic.
+        """
+
+        comp_t_per_step = []
 
         # 1. Target coverage를 달성할 때마다 청소 시간을 저장. 달성하지 못한 경우는 -1로 저장하여 구별.
         sorted_target_cov = sorted(target_cov_list)
@@ -834,7 +846,11 @@ class LSTMAgent:
         
         # 디버그 모드일 때 사용할 도화지(fig)를 미리 딱 한 번만 만듦
         if debug:
-            fig, axes = plt.subplots(2, 1, figsize=(15, 20))
+            # 별도 GUI Figure가 아니라 Agg canvas를 사용한다. 실제 터미널 창은
+            # 아래 display_image가 관리하므로, 중복 창이 생성되지 않는다.
+            fig = Figure(figsize=(12, 16), dpi=110)
+            FigureCanvasAgg(fig)
+            axes = fig.subplots(2, 1)
             # 초기 이미지
             init_traj_img = env.get_visualized_img(img_choice='traj')
             init_obs_img = env.get_visualized_img(img_choice='obs')
@@ -843,22 +859,38 @@ class LSTMAgent:
             im_traj = axes[0].imshow(init_traj_img)
             im_obs = axes[1].imshow(init_obs_img)
             # im_pro_obs = axes[2].imshow(init_pro_obs_img)
-            text_traj = axes[0].text(0.0, -0.15, "", transform=axes[0].transAxes, ha="left", fontsize=15, color='black')
-            axes[0].set_title("Trajectory", fontsize=20)
-            axes[1].set_title("Observation", fontsize=20)
+            text_traj = axes[0].text(
+                0.00,
+                -0.05,
+                "",
+                transform=axes[0].transAxes,
+                ha="left",
+                va="top",
+                fontsize=10,
+                color="black",
+                family="monospace",
+                bbox={"facecolor": "white", "alpha": 0.8, "edgecolor": "none"},
+            )
+            axes[0].set_title("Trajectory", fontsize=16, pad=6)
+            axes[1].set_title("Observation", fontsize=16, pad=6)
             # axes[2].set_title("Processed Observation", fontsize=20)
             for ax in axes: ax.axis('off')
-            plt.tight_layout()
+            fig.subplots_adjust(left=0.01, right=0.99, bottom=0.01, top=0.97, hspace=0.08)
             
-            # Jupyter용 디스플레이 핸들을 생성 (이걸 통해 이미지만 쏙 바꿉니다)
-            display_handle = display(fig, display_id=True)
-            plt.close(fig) # 별도의 정적 출력이 생기지 않도록 닫기
+            use_jupyter_display = is_jupyter()
+            if use_jupyter_display:
+                # Jupyter용 디스플레이 핸들: 같은 셀 출력의 내용만 갱신한다.
+                from IPython.display import display
+                display_handle = display(fig, display_id=True)
 
         # 초기 상태(0 step)에서의 coverage 달성 여부 확인
         current_cov = env.coverage
         while target_idx < len(sorted_target_cov) and current_cov >= sorted_target_cov[target_idx]:
             target_cov_time_dict[sorted_target_cov[target_idx]] = (env.overlap_percent, env.cleaning_time)
             target_idx += 1
+
+        if on_step is not None:
+            on_step(env, 0)
         
         # LSTM network에 통과시키면서 action을 얻으면서 경로 생성. Action 확률을 저장.
         while not done:
@@ -878,7 +910,11 @@ class LSTMAgent:
             })
 
             with torch.no_grad():
+                start_time = time.time()
                 action_probs, h_t, c_t = self.policy_net(loc_map_data, global_map_data, loc_vec_data, glob_vec_data, h_t, c_t)
+                end_time = time.time()
+                comp_t = end_time - start_time
+                comp_t_per_step.append(comp_t)
                 
                 # Training과 동일하게 log-probability 공간에서 mask를 적용한다.
                 # +1e-8은 매우 작은 policy 확률이 log(0)이 되어 유효 action까지
@@ -920,12 +956,25 @@ class LSTMAgent:
                     im_obs.set_data(obs_img)
                     text_traj.set_text(action_info)
                     
-                    # 화면 갱신 (도화지 위치는 그대로, 내용물만 부드럽게 변경)
-                    display_handle.update(fig)
+                    # Jupyter는 display handle을, 터미널은 display_image의
+                    # 이름별 재사용 창을 사용해 같은 화면을 갱신한다.
+                    if use_jupyter_display:
+                        display_handle.update(fig)
+                    else:
+                        fig.canvas.draw()
+                        debug_img = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
+                        display_image(
+                            debug_img,
+                            window_name="LSTM Debug",
+                            figure_size=(11, 14),
+                        )
 
                     if not done: # Episode가 끝났으면 별도 입력 없이 바로 다음 map test 시작
-                        user_val = input("Next step: [Enter] | Auto: [Number: If want to backstep, input negative number] | Exit: [q] >> ")
-                        user_val = user_val.strip()
+                        prompt_text = "Next step: [Enter] | Auto: [Number: If want to backstep, input negative number] | Exit: [q] >> "
+                        user_val = input(prompt_text).strip()
+                        
+                        if is_jupyter():
+                            print(prompt_text + user_val)
 
                         if user_val.lower() == 'q':
                             break
@@ -954,6 +1003,9 @@ class LSTMAgent:
             next_obs, reward, terminated, truncated, info = env.step(action)
             processed_obs = self._pre_process_obs(next_obs, local_view_dim=LOCAL_VIEW_DIM)
 
+            if on_step is not None:
+                on_step(env, env.steps)
+
             # Target Coverage 달성 여부 체크
             current_cov = env.coverage
             while target_idx < len(sorted_target_cov) and current_cov >= sorted_target_cov[target_idx]:
@@ -970,13 +1022,24 @@ class LSTMAgent:
             im_traj.set_data(traj_img)
             im_obs.set_data(obs_img)
             text_traj.set_text(action_info)
-            display_handle.update(fig)
+            if use_jupyter_display:
+                display_handle.update(fig)
+            else:
+                fig.canvas.draw()
+                debug_img = np.asarray(fig.canvas.buffer_rgba())[:, :, :3].copy()
+                display_image(
+                    debug_img,
+                    window_name="LSTM Debug",
+                    figure_size=(11, 14),
+                )
         
         coverage = env.coverage
         overlap_percent = env.overlap_percent
         cleaning_time = env.cleaning_time
+        total_comp_t = sum(comp_t_per_step)
+        mean_comp_t_per_step = total_comp_t / len(comp_t_per_step)
         
-        return coverage, overlap_percent, cleaning_time, target_cov_time_dict
+        return coverage, overlap_percent, cleaning_time, target_cov_time_dict, total_comp_t, mean_comp_t_per_step
     
     def train(self):
         
@@ -1031,7 +1094,13 @@ class LSTMAgent:
                         if curr_map_size != "Cropped":
                             H, W = map(int, curr_map_size.split('x'))
                         map_config = MapConfigSchema(level=level, H=H, W=W)
-                    reset_info = self.train_envs.call_at(method_name="reset", env_id=env_id, seed=None, map_config=map_config)
+                    if curr_map_size != "Cropped":
+                        start_mode = "edge"
+                    else:
+                        start_mode = "corner"
+                    reset_info = self.train_envs.call_at(method_name="reset", env_id=env_id, seed=None, 
+                                                         start_mode=start_mode, map_config=map_config,
+                                                         min_coverable_area_rate=0.5)
                 obs, info = reset_info
                 obs_list.append(obs)
                 info_list.append(info)
@@ -1049,7 +1118,8 @@ class LSTMAgent:
                     obs_list = []
                     info_list = []
                     for env_id in range(self.train_envs.num_envs):
-                        obs, info = self.train_envs.call_at(method_name="reset", env_id=env_id, seed=None, map_config=None)
+                        obs, info = self.train_envs.call_at(method_name="reset", env_id=env_id, start_mode=start_mode, 
+                                                            seed=None, map_config=None, min_coverable_area_rate=0.5)
                         obs_list.append(obs)
                         info_list.append(info)
                     processed_obs = self._pre_process_obs(obs_list, local_view_dim=LOCAL_VIEW_DIM)
@@ -1274,6 +1344,7 @@ class LSTMAgent:
 
         total_coverage = []; total_overlap_percent = []; total_cleaning_time = []
         computation_time = []
+        computation_time_per_step = []
         map_result_rows: list[dict] = []
         result_dir = self._get_test_result_dir()
 
@@ -1335,7 +1406,7 @@ class LSTMAgent:
                 map_config = MapConfigSchema(file_path=map_path)
                 map_name = os.path.basename(map_path)
 
-                reset_info = self.test_env.reset(seed=None, start_mode='corner', map_config=map_config)
+                reset_info = self.test_env.reset(seed=None, start_mode='corner', map_config=map_config, min_coverable_area_rate=self.args.min_coverable_area_rate)
                 if not reset_info:
                     print(f"Can't reset map file: {os.path.basename(self.test_maps[level][map_idx])}")
                     continue
@@ -1345,50 +1416,48 @@ class LSTMAgent:
                 for start_idx in range(self.args.test_start_point_num):
                 
                     if start_idx != 0:
-                        obs, _ = self.test_env.reset(start_mode='corner')  # 시작 지점 초기화
+                        obs, _ = self.test_env.reset(start_mode='corner', min_coverable_area_rate=self.args.min_coverable_area_rate)  # 시작 지점 초기화
                     
-                    start_time = time.time()
-                    cur_coverage, cur_overlap_percent, cur_cleaning_time, target_cov_time_dict = self._test_one_map(
-                        self.test_env, obs, target_cov_list=sorted_target_cov, debug=self.args.debug
-                    ) 
-                    end_time = time.time()
-                    comp_t = end_time - start_time
-                    computation_time.append(comp_t)
+                    cur_coverage, cur_overlap_percent, cur_cleaning_time, target_cov_time_dict, total_comp_t, mean_comp_t_per_step  = self._test_one_map(
+                        self.test_env,
+                        obs,
+                        target_cov_list=sorted_target_cov,
+                        debug=self.args.debug,
+                    )
+                    computation_time.append(total_comp_t)
+                    computation_time_per_step.append(mean_comp_t_per_step)
                     
-                    # Reachable grid의 수가 전체 grid 수의 절반을 넘는 경우에만 결과 저장
-                    if self.test_env.map_layers.coverable.sum() >= self.test_env.H * self.test_env.W * 0.5:
+                    # 1) Level별 Final Coverage 저장
+                    coverage_results_per_level[level].append(cur_coverage)
+                    
+                    # 2) Target Coverage별 지표 저장
+                    for cov in sorted_target_cov:
+                        t_overlap, t_time = target_cov_time_dict.get(cov, (-1.0, -1.0))
                         
-                        # 1) Level별 Final Coverage 저장
-                        coverage_results_per_level[level].append(cur_coverage)
+                        target_lvl_data = target_cov_results[cov][level]
+                        target_lvl_data['total_count'] += 1
                         
-                        # 2) Target Coverage별 지표 저장
-                        for cov in sorted_target_cov:
-                            t_overlap, t_time = target_cov_time_dict.get(cov, (-1.0, -1.0))
-                            
-                            target_lvl_data = target_cov_results[cov][level]
-                            target_lvl_data['total_count'] += 1
-                            
-                            # 성공한 경우 (-1이 아닌 경우)
-                            if t_time != -1.0 and t_time > 0:
-                                target_lvl_data['success_count'] += 1
-                                target_lvl_data['overlaps'].append(t_overlap)
-                                target_lvl_data['cleaning_times'].append(t_time)
-                        
-                        # 시각화용 데이터 레코드 생성
-                        cand_metrics = (cur_coverage, cur_overlap_percent, cur_cleaning_time)
-                        cand_img = self.test_env.get_visualized_img(img_choice='traj')
-                        cand_info = f"Map name: {os.path.basename(map_path)} | Final Cov: {cur_coverage*100:.1f}%, Overlap: {cur_overlap_percent:.1f}%, Time: {cur_cleaning_time:.1f}m"
+                        # 성공한 경우 (-1이 아닌 경우)
+                        if t_time != -1.0 and t_time > 0:
+                            target_lvl_data['success_count'] += 1
+                            target_lvl_data['overlaps'].append(t_overlap)
+                            target_lvl_data['cleaning_times'].append(t_time)
+                    
+                    # 시각화용 데이터 레코드 생성
+                    cand_metrics = (cur_coverage, cur_overlap_percent, cur_cleaning_time)
+                    cand_img = self.test_env.get_visualized_img(img_choice='traj')
+                    cand_info = f"Map name: {os.path.basename(map_path)} | Final Cov: {cur_coverage*100:.1f}%, Overlap: {cur_overlap_percent:.1f}%, Time: {cur_cleaning_time:.1f}m"
 
-                        level_records.append((cand_metrics, cand_img, cand_info))
+                    level_records.append((cand_metrics, cand_img, cand_info))
 
-                        map_result_rows.append({
-                            'coverage': cur_coverage,
-                            'time': cur_cleaning_time,
-                            'overlap': cur_overlap_percent,
-                            'target_metrics': target_cov_time_dict,
-                            'map_name': map_name,
-                        })
-                        self._save_test_path_image(result_dir, map_name, cand_img)
+                    map_result_rows.append({
+                        'coverage': cur_coverage,
+                        'time': cur_cleaning_time,
+                        'overlap': cur_overlap_percent,
+                        'target_metrics': target_cov_time_dict,
+                        'map_name': map_name,
+                    })
+                    self._save_test_path_image(result_dir, map_name, cand_img)
 
             # Best / Median / Worst 경로 선별
             if len(level_records) > 0:
@@ -1498,9 +1567,14 @@ class LSTMAgent:
         # 평균 연산 시간 출력
         avg_comp_time = np.mean(computation_time) if computation_time else 0.0
         median_comp_time = np.median(computation_time) if computation_time else 0.0
+        avg_step_comp_time = np.mean(computation_time_per_step) if computation_time_per_step else 0.0
         print("\n" + "="*65)
         print(f"Average computation time per map: {avg_comp_time:.2f} s")
         print(f"Median computation time per map: {median_comp_time:.2f} s")
+        if computation_time_per_step:
+            print(f"Average computation time per step: {avg_step_comp_time * 1_000:.2f} ms")
+        else:
+            print("Computation time per step: N/A (no valid steps)")
         print("="*65)
 
         result_file_path = self._save_test_result_workbook(
@@ -1517,22 +1591,22 @@ class LSTMAgent:
         for level in sorted(visualized_maps.keys()):
             vis_data = visualized_maps[level]
             categories = [
-                ('best', '[Best Paths]'),
-                ('median', '[Median Paths]'),
-                ('worst', '[Worst Paths]')
+                ('best', '[Best Paths]', 'best path'),
+                ('median', '[Median Paths]', 'median path'),
+                ('worst', '[Worst Paths]', 'worst path')
             ]
             
             print(f"\n" + "="*50)
             print(f" Visualization for Map Condition Level {level}")
             print("="*50)
             
-            for cat_key, cat_label in categories:
+            for cat_key, cat_label, cat_window_name in categories:
                 records = vis_data.get(cat_key, [])
                 if records:
                     print(f"\n  {cat_label} (Top {len(records)})")
                     for idx, (metrics, img, info_str) in enumerate(records, 1):
                         print(f"    #{idx} - {info_str}")
-                        display_image(img)
+                        display_image(img, window_name=f"Level {level} {cat_window_name} {idx}")
 
     def _get_test_result_dir(self) -> str:
         """Return the model-specific directory used for persisted test results."""
@@ -1793,16 +1867,34 @@ class LSTMAgent:
         plt.tight_layout()
         plt.show()
 
-    def test_one_map_for_debug(self, map_rel_path: str):
+    def run_inference_on_single_map(self, map_rel_path: str, start_mode: str='corner', min_coverable_area_rate: float=0.1, debug: bool=False):
 
         map_full_path = os.path.join(self.args.map_save_dir, map_rel_path)
         map_config = MapConfigSchema(file_path=map_full_path)
         map_name = os.path.basename(map_full_path)
 
-        reset_info = self.test_env.reset(seed=None, start_mode='edge', map_config=map_config)
+        reset_info = self.test_env.reset(seed=None, start_mode=start_mode, min_coverable_area_rate=min_coverable_area_rate, map_config=map_config)
         if not reset_info:
             print(f"Can't reset map file: {map_name}")
             return
         obs, _ = reset_info
-        _, _, _, _ = self._test_one_map(self.test_env, obs, debug=True) 
-            
+        coverage, overlap_percent, cleaning_time, target_cov_time_dict, total_comp_t, mean_comp_t_per_step = self._test_one_map(self.test_env, obs, debug=debug)
+
+        # 결과 출력
+        print("="*60)
+        print(f"Inference Results for: {map_rel_path}")
+        print("="*60)
+        print(f"Coverage:                   {coverage*100:.1f}%")
+        print(f"Overlap Rate:               {overlap_percent:.1f}%")
+        print(f"Cleaning Time:              {cleaning_time:.1f} min")
+        for target_cov, (t_overlap, t_time) in target_cov_time_dict.items():
+            if t_time != -1.0:
+                print(f"\tTarget Coverage {target_cov*100:.1f}%: Reached | Time: {t_time:.2f} min | Overlap: {t_overlap:.2f}%")
+            else:
+                print(f"\tTarget Coverage {target_cov*100:.1f}%: Not Reached")
+        print(f"Total Inference Time:       {total_comp_t:.2f} s")
+        print(f"Inference Time per Step:    {mean_comp_t_per_step*1000:.2f} ms")
+        print("="*60)
+
+        # 결과 시각화
+        self.test_env.show_visualized_img(img_choice='traj', window_name=f"Inference Result: {map_rel_path}")

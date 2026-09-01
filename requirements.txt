@@ -1,5 +1,6 @@
 frozendict
 gymnasium
+imageio
 ipython
 matplotlib
 numpy

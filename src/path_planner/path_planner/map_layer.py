@@ -79,7 +79,7 @@ class MapLayers():
 
 
     def reset(self, map_config: MapConfigSchema=None, start_mode: str='corner',
-              env_rng: np.random.Generator=np.random.default_rng(DEFAULT_SEED)) -> tuple[int, int]:
+              env_rng: np.random.Generator=np.random.default_rng(DEFAULT_SEED), min_coverable_area_rate: float=0.1) -> tuple[int, int]:
         
         # Map을 새로 생성
         map_file_path = None
@@ -107,7 +107,7 @@ class MapLayers():
             
         # 시작점 설정: 설정에 실패하면 None을 반환하여 다시 map을 만들도록 함.
         # 시작점 설정하면서 reachable map, coverable map 설정
-        pos = self._get_start_pos(env_rng, start_mode)
+        pos = self._get_start_pos(env_rng, start_mode, min_coverable_area_rate)
         if pos is None:
             return None
         
@@ -252,7 +252,7 @@ class MapLayers():
         self.robot_area = int(self.robot_mask.sum(dtype=np.int64))
 
     
-    def _get_start_pos(self, env_rng: np.random.Generator, start_mode: str='corner') -> tuple[int, int] | None:
+    def _get_start_pos(self, env_rng: np.random.Generator, start_mode: str='corner', min_coverable_area_rate: float=0.1) -> tuple[int, int] | None:
         """
         로봇의 청소 시작 지점을 선정하는 method. 가장자리에서 시작하도록 함.
         
@@ -275,6 +275,7 @@ class MapLayers():
             self.robot_size,
             start_mode=start_mode,
             rng=env_rng,
+            min_coverable_area_rate=min_coverable_area_rate,
             eff_size=self.map_info.eff_size,
             collision_map=self.collision_map,
         )

@@ -23,7 +23,7 @@ ANGULAR_ACCELERATION = 10.0
 TURN_THRESHOLD = math.radians(30.0)
 
 # INPUT
-Waypoint = tuple[float, float]
+Waypoint = tuple[int, int]
 
 # ============================================================
 # Main metrics
@@ -56,6 +56,7 @@ def _cleaning_time_seconds(
     # 연속 waypoint 사이의 이동 벡터와 거리
     steps: list[tuple[float, float, float]] = []
     for (x0, y0), (x1, y1) in zip(waypoints_m[:-1], waypoints_m[1:]):
+        x0, x1, y0, y1 = round(x0), round(x1), round(y0), round(y1)
         dx = float(x1) - float(x0)
         dy = float(y1) - float(y0)
         dist_m = math.hypot(dx, dy)

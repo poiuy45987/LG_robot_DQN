@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
-import os
 import warnings
 from enum import IntEnum
+from pathlib import Path
 from frozendict import frozendict
 
 DEFAULT_SEED = 42
@@ -13,10 +13,11 @@ LOCAL_VIEW_DIM = 51
 # curriculum, so the global state is downsampled before entering the network.
 GLOBAL_MAP_DIM = 17
 
-MAP_SAVE_DIR = os.path.normpath('src/path_planner/path_planner/maps')
-MODEL_SAVE_DIR = os.path.normpath('src/path_planner/path_planner/models')
-TB_SAVE_DIR = os.path.normpath('src/path_planner/path_planner/models')
-RESULT_SAVE_DIR = os.path.normpath('src/path_planner/path_planner/result')
+PACKAGE_DIR = Path(__file__).resolve().parent
+MAP_SAVE_DIR = str(PACKAGE_DIR / "maps")
+MODEL_SAVE_DIR = str(PACKAGE_DIR / "models")
+TB_SAVE_DIR = MODEL_SAVE_DIR
+RESULT_SAVE_DIR = str(PACKAGE_DIR / "result")
 
 TRAIN_MAP_FILE_FORMAT = "{mode}_map_level{level}_{map_id:04d}_{H}x{W}.npy"
 TRAIN_MAP_FILE_REGEX = r"(?P<mode>\w+)_map_level(?P<level>\d+)_(?P<map_id>\d+)_(?P<H>\d+)x(?P<W>\d+)"
@@ -35,7 +36,7 @@ class GridCell(IntEnum):
 class TrainConfig: # Training과 관련된 설정들
     
     # --- Training 설정 및 Warmup ---
-    max_episodes: int = 30000
+    max_episodes: int = 500
     batch_size: int = 32
     use_train_maps: bool = False
     max_step_per_eps: int = 10
@@ -48,11 +49,11 @@ class TrainConfig: # Training과 관련된 설정들
     momentum: float = 0.9
     min_lr: float = 1e-6
     detach_period: int = 20
-    scheduler_max_step: int = 500
+    scheduler_max_step: int = 300
     
     # --- Validation 및 Checkpoint ---
     valid_freq: int = 1
-    ckp_freq: int = 20
+    ckp_freq: int = 1
     valid_map_num: int = 5
     valid_start_point_num: int = 1
     
@@ -196,7 +197,7 @@ class EnvConfig:
     max_forward: int = 50 # 단위: cm
     
     # Step, Termination 관련
-    max_steps: int = 3000
+    max_steps: int = 1500
     max_no_progress_steps: int = 60
     max_no_progress_steps_final: int = 30
     target_coverage: float = 0.95
@@ -237,8 +238,6 @@ class EnvConfig:
             warnings.warn(f"It is recommended that max_steps({self.max_steps}) is bigger than max_no_progress_steps({self.max_no_progress_steps}).")
         if self.max_steps < self.max_no_progress_steps_final:
             warnings.warn(f"It is recommended that max_steps({self.max_steps}) is bigger than max_no_progress_steps_final({self.max_no_progress_steps_final}).")
-        if self.max_no_progress_steps_final < self.max_no_progress_steps:
-            warnings.warn(f"It is recommended that max_no_progress_steps_final({self.max_no_progress_steps_final}) is bigger than max_no_progress_steps({self.max_no_progress_steps}).")
         
         # 3. 맵 크기 대비 grid, window, robot 등의 size가 적절한지 검사
         min_map_dim = min(self.init_map_height, self.init_map_width)

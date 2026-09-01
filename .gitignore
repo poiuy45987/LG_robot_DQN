@@ -1,8 +1,11 @@
 # Model and checkpoints
 *.pth
 *.zip
+maps/
 models/
 logs/
+other_results/
+result/
 *_checkpoints/
 mujoco_environments/
 .conda/

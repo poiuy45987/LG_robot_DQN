@@ -417,7 +417,7 @@ def generate_map_by_seed_and_visualize(robot_diameter: int, seed: int = DEFAULT_
                           fig=fig, canvas=canvas, 
                           map_name=f"Map size: {obs_map.W} X {obs_map.H} / Map seed: {seed}", 
                           visualized=True)
-    display_image(map_img)
+    display_image(map_img, window_name=f"Map image: Map size = {obs_map.W} X {obs_map.H} / Map seed = {seed}")
 
 
 def zip_map_files(zip_file_name: str = 'maps.zip', mode: str = "test"):

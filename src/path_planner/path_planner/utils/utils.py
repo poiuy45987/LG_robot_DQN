@@ -1,4 +1,5 @@
 import torch
+import sys
 
 def get_device_info(device: torch.device):
     
@@ -44,3 +45,25 @@ def print_model_info(model: torch.nn.Module):
     print(f"Total Parameters     : {total_params:,} ({total_params / 1e6:.2f}M)")
     print(f"Trainable Parameters : {trainable_params:,}")
     print(f"Model File Size      : {total_size_mb:.2f} MB")
+
+def is_jupyter() -> bool:
+    # 1. sys.modules에 ipykernel이 로드되어 있는지 확인 (가장 확실한 방법)
+    if 'ipykernel' in sys.modules:
+        return True
+        
+    # 2. IPython get_ipython() 객체 확인 (VS Code, Colab, Classic Notebook 대응)
+    try:
+        from IPython import get_ipython
+        ip = get_ipython()
+        if ip is None:
+            return False
+            
+        shell_name = ip.__class__.__name__
+        # 주피터 계열 쉘 이름 체크
+        if 'ZMQ' in shell_name or 'Shell' in shell_name or 'InteractiveShell' in shell_name:
+            # 단, 터미널 IPython(ipython 명령어 실행)인 경우는 제외
+            return shell_name != 'TerminalInteractiveShell'
+    except Exception:
+        pass
+
+    return False

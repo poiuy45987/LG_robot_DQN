@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 import numpy as np
 import os
+import cv2
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 from matplotlib.patches import Patch
@@ -11,8 +12,15 @@ from matplotlib.gridspec import GridSpec
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from PIL import Image
 
+from path_planner.utils.utils import is_jupyter
+
 if TYPE_CHECKING:
     from path_planner.map_layer import MapLayers
+
+
+# Terminal visualization windows are kept alive and reused by name.  This
+# prevents a new Matplotlib window from being created for every frame.
+_terminal_image_windows: dict[str, tuple[Figure, object]] = {}
 
 
 # FIXME: 좀 더 일반적인 형태로 바꿀 수 있을 듯.
@@ -81,23 +89,65 @@ def get_map_img(obstacles: np.ndarray, fig: Figure, canvas: FigureCanvasAgg,
     return np.array(canvas.buffer_rgba(), dtype=np.uint8)[:, :, :3] # [H, W, C]
 
 
-def display_image(img_array: np.ndarray):
+def _get_display_figure_size(img_array: np.ndarray) -> tuple[float, float]:
+    """Return a practical initial window size while preserving image aspect ratio."""
+    height, width = img_array.shape[:2]
+    aspect_ratio = width / height
+
+    # Keep ordinary maps comfortably visible without creating a window larger
+    # than a typical desktop.  Portrait debug panels receive extra height.
+    if aspect_ratio >= 1.0:
+        figure_width = min(14.0, max(7.0, 10.0 * aspect_ratio))
+        figure_height = figure_width / aspect_ratio
+    else:
+        figure_height = min(14.0, max(7.0, 10.0 / aspect_ratio))
+        figure_width = figure_height * aspect_ratio
+
+    return figure_width, figure_height
+
+
+def display_image(
+    img_array: np.ndarray,
+    window_name: str = "Image",
+    figure_size: tuple[float, float] | None = None,
+) -> None:
     """
-    numpy 배열 이미지를 주피터 또는 시스템 뷰어에 최적화된 방식으로 보여주는 method
+    numpy 배열 이미지를 Jupyter 또는 터미널 GUI 창에 표시한다.
+
+    Jupyter에서는 셀 출력으로 표시한다. GUI backend를 사용하는 터미널에서는
+    ``window_name``별 창 하나를 유지하고, 이후 호출마다 그 창의 이미지만 갱신한다.
+    ``figure_size``가 없으면 이미지 비율에 맞는 초기 창 크기를 계산한다.
     """
     if img_array is None:
         return
-        
-    img_pil = Image.fromarray(img_array)
-    
-    try:
-        # 주피터 셀 환경일 때: 여러 번 호출하면 셀 아래에 그림이 순서대로 쭉 나열됩니다.
+
+    if is_jupyter():
+        # 주피터 노트북 환경: 셀 아래에 인라인으로 표시
         from IPython.display import display
+        img_pil = Image.fromarray(img_array)
         display(img_pil)
-    except (ImportError, NameError):
-        # 터미널 환경일 때: 시스템 이미지 뷰어로 창을 띄웁니다. 
-        # 여러 번 호출하면 창이 여러 개 뜹니다.
-        img_pil.show()
+    else:
+        # 터미널 환경: 이름별 창 하나를 만들고 이후에는 이미지 artist만 갱신.
+        window = _terminal_image_windows.get(window_name)
+        if window is None or not plt.fignum_exists(window[0].number):
+            initial_size = figure_size or _get_display_figure_size(img_array)
+            fig, ax = plt.subplots(num=window_name, figsize=initial_size)
+            ax.axis("off")
+            image_artist = ax.imshow(img_array)
+            fig.subplots_adjust(left=0, right=1, bottom=0, top=1)
+            try:
+                fig.canvas.manager.set_window_title(window_name)
+            except AttributeError:
+                # 일부 backend(Agg 등)는 window manager를 제공하지 않는다.
+                pass
+            _terminal_image_windows[window_name] = (fig, image_artist)
+        else:
+            fig, image_artist = window
+            image_artist.set_data(img_array)
+
+        fig.canvas.draw_idle()
+        plt.show(block=False)  # 코드 실행을 멈추지 않음
+        plt.pause(0.001)       # 창 렌더링과 닫기 이벤트 처리
 
 
 def visualize_saved_map(map_file_path: str):
@@ -121,7 +171,7 @@ def visualize_saved_map(map_file_path: str):
     fig = Figure()
     canvas = FigureCanvasAgg(fig)
     map_img = get_map_img(obstacles, fig=fig, canvas=canvas, map_name=map_file_name, visualized=False)
-    display_image(map_img)
+    display_image(map_img, window_name=f"'{map_file_path} obstacle map")
 
 
 def visualize_mode_map(map_file_path: str):
@@ -152,7 +202,7 @@ def visualize_mode_map(map_file_path: str):
     fig = Figure()
     canvas = FigureCanvasAgg(fig)
     map_img = get_map_img(obstacles, fig=fig, canvas=canvas, map_name=map_file_name, visualized=True)
-    display_image(map_img)
+    display_image(map_img, window_name=f"'{map_file_path} mode map")
 
 
 def visualize_mask(robot_mask: np.ndarray):
@@ -332,7 +382,7 @@ def draw_obs(obs: dict, fig: Figure, stack_steps: int, local_view_dim: int, clea
              preprocessor=None):
         
     fig.clear() # 이전 그림 지우기
-    fig.set_size_inches(15, 12)
+    fig.set_size_inches(20, 5*stack_steps + 3)
     
     # 그림을 그릴 창을 4행 3열로 나눔. 첫 번째 행의 높이는 두 번째 행보다 2배 높게 설정.
     height_ratios = [4]*stack_steps + [1]
@@ -451,4 +501,4 @@ def draw_obs(obs: dict, fig: Figure, stack_steps: int, local_view_dim: int, clea
                 va='top', ha='left', family='monospace')
     # ---------------------------------------------
     
-    fig.tight_layout()
+    fig.tight_layout(pad=0.5, w_pad=0.5, h_pad=0.5)
