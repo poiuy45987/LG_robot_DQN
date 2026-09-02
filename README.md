@@ -92,21 +92,7 @@ python -m path_planner.main test \
 
 * test 결과 저장 위치: src/path_planner/path_planner/result/(모델 이름): 각 map에서 생성된 경로 png 파일과 test 결과가 정리된 excel 파일이 같이 있습니다.
 
-## 6. GIF 생성
-
-```bash
-python -m path_planner.main gif \
-    --model-name model.pth \
-    --map-rel-path test/test_map_L1_0000.npy
-```
-
-결과는 `result/(모델 이름)/gif_result/(맵 이름).gif`에 저장됩니다.
-
-### 시각화 결과를 좀 더 편하게 보고 싶은 경우, train_and_test.ipynb 파일의 cell을 실행하면 됩니다.
-
-## 7. 기타 Mode
-
-### 7.1. Inference Mode
+## 6. Inference Mode
 특정 맵에서 로봇의 청소 성능을 평가하고 결과를 출력합니다. Coverage, Overlap rate, Cleaning time, Inference time 등의 지표가 자동으로 계산되어 출력되며, 최종 청소 경로를 시각화합니다.
 
 ```bash
@@ -140,7 +126,21 @@ Inference Time per Step:    6.34 ms
 ============================================================
 ```
 
-### 7.2. Weights Mode
+## 7. GIF 생성
+
+```bash
+python -m path_planner.main gif \
+    --model-name model.pth \
+    --map-rel-path test/test_map_L1_0000.npy
+```
+
+결과는 `result/(모델 이름)/gif_result/(맵 이름).gif`에 저장됩니다.
+
+### 시각화 결과를 좀 더 편하게 보고 싶은 경우, train_and_test.ipynb 파일의 cell을 실행하면 됩니다.
+
+## 8. 기타 Mode
+
+### 8.1. Weights Mode
 학습된 모델의 가중치(weights)를 시각화합니다. LSTM 신경망의 weights를 그래프로 확인할 수 있습니다.
 
 ```bash
@@ -150,7 +150,7 @@ python -m path_planner.main weights \
 
 * `--model-name`: 가중치를 시각화할 model 이름 설정 (기본값: `model.pth`)
 
-### 7.3. Map Mode
+### 8.2. Map Mode
 저장된 맵 파일을 시각화하고, 초기 경로를 확인합니다. 장애물 분포 및 로봇의 초기 위치와 방향을 확인할 때 유용합니다.
 
 ```bash
@@ -162,7 +162,7 @@ python -m path_planner.main map \
 * `--map-rel-path`: 시각화할 맵 경로 (기본값: `test/test_map_L1_0000.npy`)
 
 
-## 8. 명령어 도움말
+## 9. 명령어 도움말
 
 ```bash
 python -m path_planner.main -h
